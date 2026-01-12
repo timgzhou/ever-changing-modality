@@ -1,0 +1,12 @@
+einops==0.8.0 
+matplotlib==3.7.0 
+numpy 
+torchmetrics
+transformers
+wandb
+datasets
+geopandas
+torch 
+torchvision
+accelerate
+torchgeo
