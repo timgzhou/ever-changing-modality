@@ -13,6 +13,46 @@ ALL_BAND_NAMES = [
     'B08', 'B8A', 'B09', 'B10', 'B11', 'B12'
 ]
 
+RGB_BAND_NAMES = [
+    'B04', 'B03', 'B02'
+]
+
+VRE_BAND_NAMES = [
+    'B05', 'B06', 'B07'
+]
+NIR_BAND_NAMES = [
+    'B09', 'B10'
+]
+SWIR_BAND_NAMES = [
+    'B11', 'B12'
+]
+
+# Modality group key to band names mapping
+MODALITY_BANDS = {
+    'rgb': RGB_BAND_NAMES,
+    'vre': VRE_BAND_NAMES,
+    'nir': NIR_BAND_NAMES,
+    'swir': SWIR_BAND_NAMES,
+}
+
+
+def get_modality_bands_dict(*modality_keys):
+    """
+    Get a dictionary of modality keys to their band tuples.
+
+    Args:
+        *modality_keys: Variable number of modality keys (e.g., 'rgb', 'vre', 'nir', 'swir')
+
+    Returns:
+        Dict mapping modality keys to tuples of band names
+
+    Example:
+        >>> get_modality_bands_dict('rgb', 'vre')
+        {'rgb': ('B04', 'B03', 'B02'), 'vre': ('B05', 'B06', 'B07')}
+    """
+    return {key: tuple(MODALITY_BANDS[key]) for key in modality_keys}
+
+
 BAND_DESCRIPTIONS = {
     'B01': 'Coastal Aerosol',
     'B02': 'Blue',
@@ -184,11 +224,12 @@ class MultiModalTransform:
 
 def create_multimodal_batch(
     batch,
-    bands_rgb=('B04', 'B03', 'B02'),
-    bands_infrared=('B08', 'B8A', 'B09', 'B10'),
+    bands_rgb=None,
+    bands_newmod=None,
     mins=BAND_MINS,
     maxs=BAND_MAXS,
-    modalities=('rgb', 'infrared')
+    modalities=('rgb',),
+    modality_bands_dict=None
 ):
     """
     Create a multimodal batch from EuroSAT batch.
@@ -196,11 +237,14 @@ def create_multimodal_batch(
 
     Args:
         batch: EuroSAT batch dict with 'image' key [B, 13, H, W]
-        bands_rgb: Tuple of RGB band names
-        bands_infrared: Tuple of infrared band names
+        bands_rgb: (Deprecated) Tuple of RGB band names - use modality_bands_dict instead
+        bands_newmod: (Deprecated) Tuple of new modality band names - use modality_bands_dict instead
         mins: Min values for normalization
         maxs: Max values for normalization
-        modalities: Tuple of modality keys to include
+        modalities: Tuple of modality keys to include (e.g., ('rgb', 'vre'))
+        modality_bands_dict: Dict mapping modality names to their band tuples
+                            e.g., {'rgb': ('B04', 'B03', 'B02'), 'vre': ('B05', 'B06', 'B07')}
+                            If provided, overrides bands_rgb and bands_newmod
 
     Returns:
         Dict with requested modality keys
@@ -208,19 +252,33 @@ def create_multimodal_batch(
     image = batch['image']  # [B, 13, H, W]
     result = {}
 
-    if 'rgb' in modalities:
-        # Get RGB indices and normalize
-        rgb_indices = get_band_indices(bands_rgb)
-        rgb_normalized = normalize_bands(image, rgb_indices, mins, maxs)
-        # Apply ImageNet normalization
-        rgb_final = apply_imagenet_normalization(rgb_normalized)
-        result['rgb'] = rgb_final
+    # Use modality_bands_dict if provided, otherwise fall back to old parameters for backwards compatibility
+    if modality_bands_dict is not None:
+        bands_dict = modality_bands_dict
+    else:
+        # Backwards compatibility: construct dict from old parameters
+        bands_dict = {}
+        if bands_rgb is not None:
+            bands_dict['rgb'] = bands_rgb
+        if bands_newmod is not None:
+            # For backwards compatibility, assume the first non-rgb modality uses bands_newmod
+            non_rgb_mods = [m for m in modalities if m != 'rgb']
+            if non_rgb_mods:
+                bands_dict[non_rgb_mods[0]] = bands_newmod
 
-    if 'infrared' in modalities:
-        # Get infrared indices and normalize
-        infrared_indices = get_band_indices(bands_infrared)
-        infrared_normalized = normalize_bands(image, infrared_indices, mins, maxs)
-        result['infrared'] = infrared_normalized
+    for modality in modalities:
+        if modality not in bands_dict:
+            raise ValueError(f"Modality '{modality}' not found in bands dictionary. Available: {list(bands_dict.keys())}")
+
+        bands = bands_dict[modality]
+        indices = get_band_indices(bands)
+        normalized = normalize_bands(image, indices, mins, maxs)
+
+        # Apply ImageNet normalization only for RGB
+        if modality == 'rgb':
+            normalized = apply_imagenet_normalization(normalized)
+
+        result[modality] = normalized
 
     return result
 
