@@ -6,10 +6,9 @@ from torch.utils.data import DataLoader, Subset
 from torchgeo.datasets import EuroSAT
 from tqdm import tqdm
 from einops import rearrange
-from evan_main import evan_small, evan_base, evan_large
+from evan_main import evan_small, evan_base, evan_large, EVANClassifier
 from eurosat_data_utils import (
     create_multimodal_batch,
-    get_default_transform,
     normalize_bands,
     get_band_indices,
     DictTransform,
@@ -61,6 +60,10 @@ class SimpleMAEDecoder(nn.Module):
         super().__init__()
         self.patch_size = patch_size
         self.num_channels = num_channels
+        self.embed_dim = embed_dim
+
+        # Learnable mask token for masked positions
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
         # Simple transformer decoder (2 layers by default)
         from torch.nn import TransformerEncoderLayer, TransformerEncoder
@@ -76,126 +79,33 @@ class SimpleMAEDecoder(nn.Module):
         # Linear projection to reconstruct pixels
         self.decoder_pred = nn.Linear(embed_dim, patch_size * patch_size * num_channels)
 
-    def forward(self, x):
+        # Initialize mask token
+        torch.nn.init.normal_(self.mask_token, std=0.02)
+
+    def forward(self, x_unmasked, ids_restore):
         """
         Args:
-            x: [B, num_patches, embed_dim]
+            x_unmasked: [B, num_unmasked, embed_dim] - Unmasked patch embeddings
+            ids_restore: [B, num_patches] - Indices to restore original order
 
         Returns:
             reconstructed patches: [B, num_patches, patch_size^2 * channels]
         """
-        x = self.decoder(x)
+        B, L_unmasked, D = x_unmasked.shape
+        L_total = ids_restore.shape[1]
+
+        # Create full sequence with mask tokens at masked positions
+        mask_tokens = self.mask_token.expand(B, L_total - L_unmasked, -1)
+        x_full = torch.cat([x_unmasked, mask_tokens], dim=1)  # [B, num_patches, embed_dim]
+
+        # Unshuffle to restore original order
+        x_full = torch.gather(x_full, dim=1, index=ids_restore.unsqueeze(-1).expand(-1, -1, D))
+
+        # Decode and predict pixels for all patches
+        x = self.decoder(x_full)
         x = self.decoder_pred(x)
         return x
 
-
-class EVANClassifier(nn.Module):
-    """Classifier head on top of EVAN for EuroSAT."""
-
-    def __init__(self, evan_model, num_classes=10, fusion_strategy='mean', factor=4):
-        super().__init__()
-        self.evan = evan_model
-        self.fusion_strategy = fusion_strategy
-        self.num_classes = num_classes
-        self.factor = factor
-        embed_dim = self.evan.embed_dim
-        hidden_dim = embed_dim * factor
-
-        if fusion_strategy == 'mean':
-            # Average CLS tokens from all modalities, then classify
-            self.classifier = nn.Sequential(
-                nn.Linear(embed_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, num_classes)
-            )
-            self.modality_classifiers = None
-        elif fusion_strategy == 'ensemble':
-            # Per-modality classifiers that get ensembled
-            self.classifier = None
-            self.modality_classifiers = nn.ModuleDict()
-        else:
-            raise ValueError(f"Unknown fusion strategy: {fusion_strategy}")
-
-    def _instantiate_modality_classifier(self, modality_key: str):
-        """
-        Create a new classifier for a specific modality.
-
-        Args:
-            modality_key: Name of the modality (e.g., 'rgb', 'vre', 'nir', 'swir')
-        """
-        embed_dim = self.evan.embed_dim
-        hidden_dim = embed_dim * self.factor
-
-        classifier = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, self.num_classes)
-        )
-
-        # Move to same device as model
-        if next(self.parameters(), None) is not None:
-            device = next(self.parameters()).device
-            classifier = classifier.to(device)
-
-        self.modality_classifiers[modality_key] = classifier
-        print(f"  Created new classifier for modality: {modality_key}")
-
-    def forward(self, x, train_modality=None):
-        """
-        Forward pass supporting both single tensor and dict inputs.
-
-        Args:
-            x: Either a tensor [B, C, H, W] or dict {modality: tensor}
-            train_modality: Optional str specifying which modality to use for loss during training
-                           (only applies in ensemble mode). If None, uses all modalities.
-                           During eval, always uses all modalities for ensemble.
-
-        Returns:
-            logits: [B, num_classes]
-        """
-        # Get features from EVAN
-        features_dict = self.evan.forward_features(x)
-
-        if self.fusion_strategy == 'mean':
-            # Extract CLS tokens from each modality
-            cls_tokens = []
-            for modality in sorted(features_dict.keys()):
-                cls_tokens.append(features_dict[modality]['x_norm_clstoken'])
-
-            # Average CLS tokens
-            fused = torch.stack(cls_tokens).mean(dim=0)
-
-            # Classify
-            logits = self.classifier(fused)
-
-        elif self.fusion_strategy == 'ensemble':
-            # In training mode with train_modality specified, only use that modality
-            if self.training and train_modality is not None:
-                # Only compute logits for the training modality
-                if train_modality not in self.modality_classifiers:
-                    self._instantiate_modality_classifier(train_modality)
-
-                cls_token = features_dict[train_modality]['x_norm_clstoken']
-                logits = self.modality_classifiers[train_modality](cls_token)
-            else:
-                # Inference mode or no train_modality specified: ensemble all modalities
-                all_logits = []
-                for modality in sorted(features_dict.keys()):
-                    # Create classifier for this modality if it doesn't exist
-                    if modality not in self.modality_classifiers:
-                        self._instantiate_modality_classifier(modality)
-
-                    # Get CLS token for this modality
-                    cls_token = features_dict[modality]['x_norm_clstoken']
-
-                    # Get logits from modality-specific classifier
-                    modality_logits = self.modality_classifiers[modality](cls_token)
-                    all_logits.append(modality_logits)
-
-                # Ensemble by averaging logits
-                logits = torch.stack(all_logits).mean(dim=0)
-
-        return logits
 
 
 # Note: create_multimodal_batch is now imported from eurosat_data_utils
@@ -220,19 +130,13 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
     correct = 0
     total = 0
 
-    # Extract bands_rgb and bands_newmod for create_multimodal_batch compatibility
-    bands_rgb = modality_bands_dict.get('rgb')
-    # Get the first non-rgb modality for bands_newmod (for backwards compatibility with create_multimodal_batch)
-    non_rgb_keys = [k for k in modality_bands_dict.keys() if k != 'rgb']
-    bands_newmod = modality_bands_dict[non_rgb_keys[0]] if non_rgb_keys else ()
-
     with torch.no_grad():
         for batch in dataloader:
             labels = batch['label'].to(device)
 
             # Create multi-modal input with specified modalities
             modal_input = create_multimodal_batch(
-                batch, bands_rgb, bands_newmod, BAND_MINS, BAND_MAXS, modalities=modalities_to_use
+                batch, modality_bands_dict=modality_bands_dict, modalities=modalities_to_use
             )
             modal_input = {k: v.to(device) for k, v in modal_input.items()}
             outputs = model(modal_input)
@@ -255,7 +159,6 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
 def random_mask_patches(x, mask_ratio=0.75):
     """
     Randomly mask patches for MAE training.
-    Based on MAESTRO's mask_seq (mae.py:228-264).
 
     Args:
         x: Patch embeddings [B, num_patches, embed_dim]
@@ -322,27 +225,6 @@ def patchify(imgs, patch_size):
     return patches
 
 
-def unpatchify(patches, patch_size, channels, img_size):
-    """
-    Convert patches back to image for visualization.
-
-    Args:
-        patches: [B, num_patches, patch_size^2 * C]
-        patch_size: Size of each patch
-        channels: Number of channels
-        img_size: Image size (H = W)
-
-    Returns:
-        imgs: [B, C, H, W]
-    """
-    B = patches.shape[0]
-    num_patches_h = num_patches_w = img_size // patch_size
-
-    patches = patches.reshape(B, num_patches_h, num_patches_w, patch_size, patch_size, channels)
-    imgs = patches.permute(0, 5, 1, 3, 2, 4).reshape(B, channels, img_size, img_size)
-    return imgs
-
-
 def evaluate_mae_reconstruction(model, evan, mae_decoder, dataloader, device,
                                 bands_target, patch_size, mask_ratio, target_modality):
     """Evaluate MAE reconstruction loss on test set."""
@@ -365,16 +247,12 @@ def evaluate_mae_reconstruction(model, evan, mae_decoder, dataloader, device,
             # Extract patch tokens (skip CLS and storage tokens)
             patch_embeddings = target_modality_features[:, evan.n_storage_tokens + 1:, :]  # [B, num_patches, embed_dim]
 
+            # Random masking
             x_masked, mask, ids_restore = random_mask_patches(patch_embeddings, mask_ratio)
-            pred_masked = mae_decoder(x_masked)
 
-            # Restore full predictions
-            B, L_unmasked, D_pred = pred_masked.shape
-            L_total = patch_embeddings.shape[1]
-            pred_full = torch.zeros(B, L_total, D_pred, device=device)
-            ids_keep = ids_restore.gather(1, torch.arange(L_unmasked, device=device).unsqueeze(0).expand(B, -1))
-            pred_full.scatter_(1, ids_keep.unsqueeze(-1).expand(-1, -1, D_pred), pred_masked)
-
+            # Decoder predicts for all patches (unmasked + mask tokens)
+            pred_full = mae_decoder(x_masked, ids_restore)  # [B, num_patches, patch_size^2 * C]
+            # Compute loss only on masked patches
             loss = mae_reconstruction_loss(pred_full, target_patches, mask)
             total_loss += loss.item()
             count += 1
@@ -419,21 +297,21 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
     for param in model.parameters():
         param.requires_grad = False
 
-    # Unfreeze target modality patch embedder and modality-specific LoRAs for MAE training
+    # Unfreeze target modality patch embedder and modality-specific layers for MAE training
     for param in evan.patch_embedders[target_modality].parameters():
         param.requires_grad = True
-    for param in evan.modality_specific_lora_adaptors[target_modality].parameters():
+    for param in evan.modality_specific_layer_adaptors[target_modality].parameters():
         param.requires_grad = True
     print(f"  Unfroze: {target_modality} patch embedder")
-    print(f"  Unfroze: {target_modality} modality-specific LoRAs")
+    print(f"  Unfroze: {target_modality} modality-specific layers")
 
-    trainable_params_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
+    trainable_params_in_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
     trainable_params_decoder = sum(p.numel() for p in mae_decoder.parameters())
-    trainable_total = trainable_params_evan+trainable_params_decoder
-    print(f"\nTrainable parameters for MAE: {trainable_total}\n    {trainable_params_evan=} and {trainable_params_decoder=}")
+    trainable_total = trainable_params_in_evan+trainable_params_decoder
+    print(f"\nTrainable parameters for MAE: {trainable_total}\n    {trainable_params_in_evan=} and {trainable_params_decoder=}")
 
-    # Optimizer for MAE phase - collect all trainable parameters
-    mae_params = [p for p in model.parameters() if p.requires_grad]
+    # Optimizer for MAE phase - collect trainable parameters from model + all decoder parameters
+    mae_params = list(filter(lambda p: p.requires_grad, model.parameters())) + list(mae_decoder.parameters())
 
     optimizer_mae = torch.optim.AdamW(mae_params, lr=args.mae_lr)
 
@@ -441,13 +319,13 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
     target_modality_indices = get_band_indices(bands_target)
 
     # Training loop
-    for epoch in range(args.stage2_epochs):  # MAE epochs = stage2_epochs
+    for epoch in range(args.stage2_mae_epochs):
         model.train()
         mae_decoder.train()
         train_loss = 0.0
         train_count = 0
 
-        pbar = tqdm(train_loader, desc=f"MAE Epoch {epoch+1}/{args.stage2_epochs}")
+        pbar = tqdm(train_loader, desc=f"MAE Epoch {epoch+1}/{args.stage2_mae_epochs}")
         for batch in pbar:
             # Extract and normalize target modality bands
             images = batch['image']  # [B, 13, H, W]
@@ -464,19 +342,9 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
             # Random masking
             x_masked, mask, ids_restore = random_mask_patches(patch_embeddings, args.mae_mask_ratio)
 
-            # Decoder processes only unmasked patches
-            pred_masked = mae_decoder(x_masked)  # [B, num_unmasked, patch_size^2 * C]
-
-            # Restore full sequence with mask tokens
-            B, L_unmasked, D_pred = pred_masked.shape
-            L_total = patch_embeddings.shape[1]
-            pred_full = torch.zeros(B, L_total, D_pred, device=device)
-
-            # Scatter unmasked predictions back to original positions
-            ids_keep = ids_restore.gather(1, torch.arange(L_unmasked, device=device).unsqueeze(0).expand(B, -1))
-            pred_full.scatter_(1, ids_keep.unsqueeze(-1).expand(-1, -1, D_pred), pred_masked)
-
-            # Compute loss on masked patches only
+            # Decoder predicts for all patches (unmasked + mask tokens)
+            pred_full = mae_decoder(x_masked, ids_restore)  # [B, num_patches, patch_size^2 * C]
+            # Compute loss only on masked patches
             loss = mae_reconstruction_loss(pred_full, target_patches, mask)
 
             optimizer_mae.zero_grad()
@@ -495,7 +363,7 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
             bands_target, patch_size, args.mae_mask_ratio, target_modality
         )
 
-        print(f"\nMAE Epoch {epoch+1}/{args.stage2_epochs}:")
+        print(f"\nMAE Epoch {epoch+1}/{args.stage2_mae_epochs}:")
         print(f"  Train reconstruction loss: {train_loss:.4f}")
         print(f"  Test reconstruction loss:  {eval_loss:.4f}\n")
 
@@ -511,13 +379,13 @@ if __name__ == '__main__':
                         help='Batch size for training (default: 32)')
     parser.add_argument('--lr', type=float, default=1e-3,
                         help='Learning rate (default: 1e-3)')
-    parser.add_argument('--epochs', type=int, default=1,
+    parser.add_argument('--stage1_epochs', type=int, default=1,
                         help='Number of training epochs (default: 1)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of dataloader workers (default: 4)')
-    parser.add_argument('--stage2', action='store_true',
-                        help='Run stage 2 training after stage 1 (train on train2 with RGB+NewModality)')
-    parser.add_argument('--stage2_epochs', type=int, default=None,
+    parser.add_argument('--stage2_mae_epochs', type=int, default=4,
+                        help='Number of epochs for stage 2 (default: same as --epochs)')
+    parser.add_argument('--stage2_ft_epochs', type=int, default=4,
                         help='Number of epochs for stage 2 (default: same as --epochs)')
     parser.add_argument('--stage2_lr', type=float, default=None,
                         help='Learning rate for stage 2 (default: same as --lr)')
@@ -535,12 +403,11 @@ if __name__ == '__main__':
     parser.add_argument('--mae_lr', type=float, default=None,
                         help='Learning rate for MAE phase (default: same as stage2_lr)')
     parser.add_argument('--new_mod_group', type=str, default='vre', choices=['vre','nir','swir'],
-                        help='Learning rate for MAE phase (default: same as stage2_lr)')
+                        help='')
+    parser.add_argument('--tz_modality_specific_layer_augmenter', type=str, default='lora', choices=['lora','fft'],
+                        help='lora or fft fot mofality-specific mae.')
     args = parser.parse_args()
 
-    # Set stage 2 defaults
-    if args.stage2_epochs is None:
-        args.stage2_epochs = args.epochs
     if args.stage2_lr is None:
         args.stage2_lr = args.lr
     if args.mae_lr is None:
@@ -548,7 +415,7 @@ if __name__ == '__main__':
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
-    print(f"Model: {args.model}, Batch size: {args.batch_size}, LR: {args.lr}, Epochs: {args.epochs}")
+    print(f"Model: {args.model}, Batch size: {args.batch_size}, LR: {args.lr}, Epochs: {args.stage1_epochs}")
 
     # Band configuration (using constants from eurosat_data_utils)
     newmod = args.new_mod_group
@@ -604,13 +471,14 @@ if __name__ == '__main__':
         # img_size=64,  # EuroSAT images are 64x64
         tz_fusion_time=args.tz_fusion_time,
         tz_lora_rank=args.tz_lora_rank,
+        tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
         n_storage_tokens=4,  # DINOv3 uses 4 register tokens
         device=device
     )
     # Note: evan_preset models automatically loads pretrained weights from facebook/dinov3 pretrained models
 
     # Create classifier
-    model = EVANClassifier(evan, num_classes=10, fusion_strategy=args.fusion_strategy)
+    model = EVANClassifier(evan, num_classes=10, fusion_strategy=args.fusion_strategy,device=device)
     model = model.to(device)
 
     # Freeze EVAN backbone, train only classifier(s)
@@ -638,7 +506,7 @@ if __name__ == '__main__':
     # Training setup
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
-    num_epochs = args.epochs
+    num_epochs = args.stage1_epochs
 
     print(f"\n=== Training for {num_epochs} epochs ===")
     print(f"Strategy: Train on RGB (train1 split), test on both RGB and RGB+{args.new_mod_group}")
@@ -737,400 +605,369 @@ if __name__ == '__main__':
     print(f"  Test accuracy (RGB+{newmod}): {test_acc_multi:.2f}%")
 
     # ==================== STAGE 2 TRAINING ====================
-    if args.stage2:
+    print("\n" + "="*70)
+    print("=== STAGE 2: Training new modality components on train2 ===")
+    print("="*70)
+
+    # Prepare train2 dataset from the same full training dataset
+    print("\n=== Preparing train2 dataset ===")
+    train2_indices = load_split_indices('datasets/eurosat-train2.txt', train_dataset_full)
+    train2_dataset = Subset(train_dataset_full, train2_indices)
+    print(f"Loaded {len(train2_indices)} samples from train2 split")
+
+    train2_loader = DataLoader(train2_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+
+    if args.stage2_train_method == 'supervised':
+        # ========== SUPERVISED TRAINING (Current Method) ==========
+        print(f"\nNote: {newmod.capitalize()} components were already created during stage 1 evaluation")
+        print("      Now unfreezing them for training in stage 2")
+
+        # Freeze everything first
+        for param in model.parameters():
+            param.requires_grad = False
+
+        # Unfreeze classifier(s) depending on fusion strategy
+        if model.fusion_strategy == 'mean':
+            for param in model.classifier.parameters():
+                param.requires_grad = True
+            print("  Unfroze: Classifier (mean fusion)")
+        elif model.fusion_strategy == 'ensemble':
+            # In ensemble mode, only unfreeze the new modality classifier
+            # RGB classifier should remain frozen from stage 1
+
+            # Ensure new modality classifier exists (should have been created in stage 1 validation)
+            if newmod not in model.modality_classifiers:
+                print(f"  Creating {newmod} classifier (was not created during stage 1 validation)")
+                model._instantiate_modality_classifier(newmod)
+
+            # Unfreeze new modality classifier
+            for param in model.modality_classifiers[newmod].parameters():
+                param.requires_grad = True
+            print(f"  Unfroze: {newmod.capitalize()} classifier (ensemble mode)")
+
+            # RGB classifier stays frozen
+            if 'rgb' in model.modality_classifiers:
+                for param in model.modality_classifiers['rgb'].parameters():
+                    param.requires_grad = False
+                print("  Kept frozen: RGB classifier (ensemble mode)")
+
+        # Unfreeze new modality components
+        # Patch embedder
+        if newmod in evan.patch_embedders:
+            for param in evan.patch_embedders[newmod].parameters():
+                param.requires_grad = True
+            print(f"  Unfroze: {newmod.capitalize()} patch embedder")
+
+        # Modality-specific layers
+        if newmod in evan.modality_specific_layer_adaptors:
+            for param in evan.modality_specific_layer_adaptors[newmod].parameters():
+                param.requires_grad = True
+            print(f"  Unfroze: {newmod.capitalize()} modality-specific layers")
+
+        # Modality encoding
+        if newmod in evan.modality_encoders:
+            evan.modality_encoders[newmod].requires_grad = True
+            print(f"  Unfroze: {newmod.capitalize()} modality encoding")
+
+        # Fusion LoRAs
+        if newmod in evan.modality_fusion_lora_adaptors:
+            for param in evan.modality_fusion_lora_adaptors[newmod].parameters():
+                param.requires_grad = True
+            print(f"  Unfroze: {newmod.capitalize()} fusion LoRAs")
+
+        # Print parameter info
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"\nTrainable parameters for stage 2: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
+
+        # Create new optimizer for stage 2
+        optimizer_stage2 = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=args.stage2_lr
+        )
+        num_epochs_stage2 = args.stage2_ft_epochs
+
+        print(f"\n=== Stage 2 Training for {num_epochs_stage2} epochs ===")
+        print(f"Learning rate: {args.stage2_lr}")
+        print(f"Modalities: RGB {bands_rgb} + {newmod.upper()} {bands_newmod}")
+        print(f"Training: {newmod.capitalize()} patch embedder, modality-specific LoRAs, modality encoding, fusion LoRAs, classifier")
+        print("Frozen: RGB components and shared DINO backbone")
+        if model.fusion_strategy == 'ensemble':
+            print(f"Note: In ensemble mode, training loss uses only {newmod} classifier (RGB frozen)")
+            print(f"      Evaluation will ensemble both RGB and {newmod} predictions\n")
+        else:
+            print()
+
+        # Stage 2 training loop
+        for epoch in range(num_epochs_stage2):
+            model.train()
+            train_loss = 0.0
+            train_correct = 0
+            train_total = 0
+
+            pbar = tqdm(train2_loader, desc=f"Stage 2 Epoch {epoch+1}/{num_epochs_stage2} [Train RGB+{newmod.upper()}]")
+            for batch_idx, batch in enumerate(pbar):
+                labels = batch['label'].to(device)
+
+                # Create multi-modal input (RGB + new modality)
+                multimodal_input = create_multimodal_batch(
+                    batch, modality_bands_dict=modality_bands_dict, modalities=('rgb', newmod)
+                )
+                multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
+
+                optimizer_stage2.zero_grad()
+                outputs = model(multimodal_input)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer_stage2.step()
+
+                train_loss += loss.item()
+                _, predicted = outputs.max(1)
+                train_total += labels.size(0)
+                train_correct += predicted.eq(labels).sum().item()
+
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'acc': f'{100.*train_correct/train_total:.2f}%'
+                })
+
+            train_loss /= len(train2_loader)
+            train_acc = 100. * train_correct / train_total
+
+            # Evaluation on RGB-only, newmod-only, and RGB+newmod
+            test_loss_rgb, test_acc_rgb = evaluate(
+                model, test_loader_full, criterion, device,
+                modality_bands_dict, modalities_to_use=('rgb',)
+            )
+            test_loss_newmod, test_acc_newmod = evaluate(
+                model, test_loader_full, criterion, device,
+                modality_bands_dict, modalities_to_use=(newmod,)
+            )
+            test_loss_multi, test_acc_multi = evaluate(
+                model, test_loader_full, criterion, device,
+                modality_bands_dict, modalities_to_use=('rgb', newmod)
+            )
+
+            # Print epoch results
+            print(f"\nStage 2 Epoch {epoch+1}/{num_epochs_stage2}:")
+            print(f"  Train (RGB+{newmod.upper()}, train2):  Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
+            print(f"  Test (RGB only):         Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
+            print(f"  Test ({newmod.upper()} only):          Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
+            print(f"  Test (RGB+{newmod.upper()}):           Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%\n")
+
+        print("\n=== Stage 2 Training complete ===")
+
+        # Save stage 2 checkpoint
+        timestamp_stage2 = datetime.now().strftime('%Y%m%d_%H%M%S')
+        checkpoint_path_stage2 = os.path.join(checkpoint_dir, f'evan_eurosat_stage2_{timestamp_stage2}.pt')
+
+        checkpoint_stage2 = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer_stage2.state_dict(),
+            'epoch': num_epochs_stage2,
+            'train_acc': train_acc,
+            'test_acc_rgb': test_acc_rgb,
+            'test_acc_newmod': test_acc_newmod,
+            'test_acc_multi': test_acc_multi,
+            'stage1_checkpoint': checkpoint_path,
+            'config': {
+                'model_type': args.model,
+                'num_classes': 10,
+                'train_split': 'train2',
+                'fusion_strategy': args.fusion_strategy,
+                'stage2_train_method': args.stage2_train_method,
+                'bands_rgb': bands_rgb,
+                'bands_newmod': bands_newmod,
+                'newmod': newmod,
+                'num_epochs': num_epochs_stage2,
+                'batch_size': args.batch_size,
+                'learning_rate': args.stage2_lr,
+            }
+        }
+
+        torch.save(checkpoint_stage2, checkpoint_path_stage2)
+        print(f"\n=== Stage 2 checkpoint saved to: {checkpoint_path_stage2} ===")
+        print(f"Stage 2 Final metrics:")
+        print(f"  Train accuracy (RGB+{newmod.upper()}, train2): {train_acc:.2f}%")
+        print(f"  Test accuracy (RGB only): {test_acc_rgb:.2f}%")
+        print(f"  Test accuracy ({newmod.capitalize()} only): {test_acc_newmod:.2f}%")
+        print(f"  Test accuracy (RGB+{newmod.upper()}): {test_acc_multi:.2f}%")
+
+    elif args.stage2_train_method == 'mae+supervised':
+        # ========== MAE + SUPERVISED TRAINING (Two-Phase Method) ==========
+
+        # Phase 2a: MAE SSL training
+        train_mae_phase(
+            model, evan, train2_loader, test_loader_full, device, args,
+            bands_newmod, newmod
+        )
+
+        # Phase 2b: Supervised fine-tuning
         print("\n" + "="*70)
-        print("=== STAGE 2: Training new modality components on train2 ===")
+        print("=== PHASE 2b: Supervised Fine-tuning ===")
         print("="*70)
 
-        # Prepare train2 dataset from the same full training dataset
-        print("\n=== Preparing train2 dataset ===")
-        train2_indices = load_split_indices('datasets/eurosat-train2.txt', train_dataset_full)
-        train2_dataset = Subset(train_dataset_full, train2_indices)
-        print(f"Loaded {len(train2_indices)} samples from train2 split")
+        # Freeze everything first
+        for param in model.parameters():
+            param.requires_grad = False
 
-        train2_loader = DataLoader(train2_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+        # Unfreeze classifier(s)
+        if model.fusion_strategy == 'mean':
+            for param in model.classifier.parameters():
+                param.requires_grad = True
+            print("  Unfroze: Classifier (mean fusion)")
+        elif model.fusion_strategy == 'ensemble':
+            # Ensure new modality classifier exists
+            if newmod not in model.modality_classifiers:
+                print(f"  Creating {newmod} classifier")
+                model._instantiate_modality_classifier(newmod)
 
-        if args.stage2_train_method == 'supervised':
-            # ========== SUPERVISED TRAINING (Current Method) ==========
-            print(f"\nNote: {newmod.capitalize()} components were already created during stage 1 evaluation")
-            print("      Now unfreezing them for training in stage 2")
+            # Unfreeze new modality classifier
+            for param in model.modality_classifiers[newmod].parameters():
+                param.requires_grad = True
+            print(f"  Unfroze: {newmod.capitalize()} classifier (ensemble mode)")
 
-            # Freeze everything first
-            for param in model.parameters():
-                param.requires_grad = False
+        # Unfreeze new modality fusion LoRA and modality encoding
+        if newmod in evan.modality_encoders:
+            evan.modality_encoders[newmod].requires_grad = True
+            print(f"  Unfroze: {newmod.capitalize()} modality encoding")
 
-            # Unfreeze classifier(s) depending on fusion strategy
-            if model.fusion_strategy == 'mean':
-                for param in model.classifier.parameters():
-                    param.requires_grad = True
-                print("  Unfroze: Classifier (mean fusion)")
-            elif model.fusion_strategy == 'ensemble':
-                # In ensemble mode, only unfreeze the new modality classifier
-                # RGB classifier should remain frozen from stage 1
+        if newmod in evan.modality_fusion_lora_adaptors:
+            for param in evan.modality_fusion_lora_adaptors[newmod].parameters():
+                param.requires_grad = True
+            print(f"  Unfroze: {newmod.capitalize()} fusion LoRAs")
 
-                # Ensure new modality classifier exists (should have been created in stage 1 validation)
-                if newmod not in model.modality_classifiers:
-                    print(f"  Creating {newmod} classifier (was not created during stage 1 validation)")
-                    model._instantiate_modality_classifier(newmod)
+        # Print parameter info
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"\nTrainable parameters for Phase 2b: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
 
-                # Unfreeze new modality classifier
-                for param in model.modality_classifiers[newmod].parameters():
-                    param.requires_grad = True
-                print(f"  Unfroze: {newmod.capitalize()} classifier (ensemble mode)")
+        if trainable_params == 0:
+            raise ValueError("No trainable parameters found! Check that components are being unfrozen correctly.")
 
-                # RGB classifier stays frozen
-                if 'rgb' in model.modality_classifiers:
-                    for param in model.modality_classifiers['rgb'].parameters():
-                        param.requires_grad = False
-                    print("  Kept frozen: RGB classifier (ensemble mode)")
+        # Create optimizer for Phase 2b
+        optimizer_phase2b = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=args.stage2_lr
+        )
+        num_epochs_phase2b = args.stage2_ft_epochs
 
-            # Unfreeze new modality components
-            # Patch embedder
-            if newmod in evan.patch_embedders:
-                for param in evan.patch_embedders[newmod].parameters():
-                    param.requires_grad = True
-                print(f"  Unfroze: {newmod.capitalize()} patch embedder")
+        print(f"\n=== Phase 2b Training for {num_epochs_phase2b} epochs ===")
+        print(f"Learning rate: {args.stage2_lr}")
+        print(f"Modalities: RGB {bands_rgb} + {newmod.upper()} {bands_newmod}")
+        print(f"Training: {newmod.capitalize()} modality encoding, fusion LoRAs, classifier")
+        print(f"Frozen: {newmod.upper()} patch embedder, {newmod.upper()} modality-specific LoRAs, RGB components, DINO backbone")
+        print(f"Model processes multi-modal input by {model.fusion_strategy}")
 
-            # Modality-specific LoRAs
-            if newmod in evan.modality_specific_lora_adaptors:
-                for param in evan.modality_specific_lora_adaptors[newmod].parameters():
-                    param.requires_grad = True
-                print(f"  Unfroze: {newmod.capitalize()} modality-specific LoRAs")
+        # Phase 2b training loop
+        for epoch in range(num_epochs_phase2b):
+            model.train()
+            train_loss = 0.0
+            train_correct = 0
+            train_total = 0
 
-            # Modality encoding
-            if newmod in evan.modality_encoders:
-                evan.modality_encoders[newmod].requires_grad = True
-                print(f"  Unfroze: {newmod.capitalize()} modality encoding")
+            pbar = tqdm(train2_loader, desc=f"Phase 2b Epoch {epoch+1}/{num_epochs_phase2b} [Train RGB+{newmod.upper()}]")
+            for batch in pbar:
+                labels = batch['label'].to(device)
 
-            # Fusion LoRAs
-            if newmod in evan.modality_fusion_lora_adaptors:
-                for param in evan.modality_fusion_lora_adaptors[newmod].parameters():
-                    param.requires_grad = True
-                print(f"  Unfroze: {newmod.capitalize()} fusion LoRAs")
+                # Create multi-modal input (RGB + new modality)
+                multimodal_input = create_multimodal_batch(
+                    batch, modality_bands_dict=modality_bands_dict, modalities=('rgb', newmod)
+                )
+                multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
 
-            # Print parameter info
-            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            total_params = sum(p.numel() for p in model.parameters())
-            print(f"\nTrainable parameters for stage 2: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
+                optimizer_phase2b.zero_grad()
+                # In ensemble mode, train only on new modality predictions
+                outputs = model(multimodal_input)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer_phase2b.step()
 
-            # Create new optimizer for stage 2
-            optimizer_stage2 = torch.optim.AdamW(
-                filter(lambda p: p.requires_grad, model.parameters()),
-                lr=args.stage2_lr
+                train_loss += loss.item()
+                _, predicted = outputs.max(1)
+                train_total += labels.size(0)
+                train_correct += predicted.eq(labels).sum().item()
+
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'acc': f'{100.*train_correct/train_total:.2f}%'
+                })
+
+            train_loss /= len(train2_loader)
+            train_acc = 100. * train_correct / train_total
+
+            # Evaluation on RGB-only, newmod-only, and RGB+newmod
+            test_loss_rgb, test_acc_rgb = evaluate(
+                model, test_loader_full, criterion, device,
+                modality_bands_dict, modalities_to_use=('rgb',)
             )
-            num_epochs_stage2 = args.stage2_epochs
+            test_loss_newmod, test_acc_newmod = evaluate(
+                model, test_loader_full, criterion, device,
+                modality_bands_dict, modalities_to_use=(newmod,)
+            )
+            test_loss_multi, test_acc_multi = evaluate(
+                model, test_loader_full, criterion, device,
+                modality_bands_dict, modalities_to_use=('rgb', newmod)
+            )
 
-            print(f"\n=== Stage 2 Training for {num_epochs_stage2} epochs ===")
-            print(f"Learning rate: {args.stage2_lr}")
-            print(f"Modalities: RGB {bands_rgb} + {newmod.upper()} {bands_newmod}")
-            print(f"Training: {newmod.capitalize()} patch embedder, modality-specific LoRAs, modality encoding, fusion LoRAs, classifier")
-            print("Frozen: RGB components and shared DINO backbone")
-            if model.fusion_strategy == 'ensemble':
-                print(f"Note: In ensemble mode, training loss uses only {newmod} classifier (RGB frozen)")
-                print(f"      Evaluation will ensemble both RGB and {newmod} predictions\n")
-            else:
-                print()
+            # Print epoch results
+            print(f"\nPhase 2b Epoch {epoch+1}/{num_epochs_phase2b}:")
+            print(f"  Train (RGB+{newmod.upper()}, train2):  Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
+            print(f"  Test (RGB only):         Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
+            print(f"  Test ({newmod.upper()} only):          Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
+            print(f"  Test (RGB+{newmod.upper()}):           Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%\n")
 
-            # Stage 2 training loop
-            for epoch in range(num_epochs_stage2):
-                model.train()
-                train_loss = 0.0
-                train_correct = 0
-                train_total = 0
+        print("\n=== Phase 2b (Supervised Fine-tuning) complete ===")
 
-                pbar = tqdm(train2_loader, desc=f"Stage 2 Epoch {epoch+1}/{num_epochs_stage2} [Train RGB+{newmod.upper()}]")
-                for batch_idx, batch in enumerate(pbar):
-                    labels = batch['label'].to(device)
+        # Save stage 2 checkpoint
+        timestamp_stage2 = datetime.now().strftime('%Y%m%d_%H%M%S')
+        checkpoint_path_stage2 = os.path.join(checkpoint_dir, f'evan_eurosat_stage2_mae_{timestamp_stage2}.pt')
 
-                    # Create multi-modal input (RGB + new modality)
-                    multimodal_input = create_multimodal_batch(
-                        batch, modality_bands_dict=modality_bands_dict, modalities=('rgb', newmod)
-                    )
-                    multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
-
-                    optimizer_stage2.zero_grad()
-                    # In ensemble mode, train only on new modality predictions
-                    if model.fusion_strategy == 'ensemble':
-                        outputs = model(multimodal_input, train_modality=newmod)
-                    else:
-                        outputs = model(multimodal_input)
-                    loss = criterion(outputs, labels)
-                    loss.backward()
-                    optimizer_stage2.step()
-
-                    train_loss += loss.item()
-                    _, predicted = outputs.max(1)
-                    train_total += labels.size(0)
-                    train_correct += predicted.eq(labels).sum().item()
-
-                    pbar.set_postfix({
-                        'loss': f'{loss.item():.4f}',
-                        'acc': f'{100.*train_correct/train_total:.2f}%'
-                    })
-
-                train_loss /= len(train2_loader)
-                train_acc = 100. * train_correct / train_total
-
-                # Evaluation on RGB-only, newmod-only, and RGB+newmod
-                test_loss_rgb, test_acc_rgb = evaluate(
-                    model, test_loader_full, criterion, device,
-                    modality_bands_dict, modalities_to_use=('rgb',)
-                )
-                test_loss_newmod, test_acc_newmod = evaluate(
-                    model, test_loader_full, criterion, device,
-                    modality_bands_dict, modalities_to_use=(newmod,)
-                )
-                test_loss_multi, test_acc_multi = evaluate(
-                    model, test_loader_full, criterion, device,
-                    modality_bands_dict, modalities_to_use=('rgb', newmod)
-                )
-
-                # Print epoch results
-                print(f"\nStage 2 Epoch {epoch+1}/{num_epochs_stage2}:")
-                print(f"  Train (RGB+{newmod.upper()}, train2):  Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
-                print(f"  Test (RGB only):         Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
-                print(f"  Test ({newmod.upper()} only):          Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
-                print(f"  Test (RGB+{newmod.upper()}):           Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%\n")
-
-            print("\n=== Stage 2 Training complete ===")
-
-            # Save stage 2 checkpoint
-            timestamp_stage2 = datetime.now().strftime('%Y%m%d_%H%M%S')
-            checkpoint_path_stage2 = os.path.join(checkpoint_dir, f'evan_eurosat_stage2_{timestamp_stage2}.pt')
-
-            checkpoint_stage2 = {
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer_stage2.state_dict(),
-                'epoch': num_epochs_stage2,
-                'train_acc': train_acc,
-                'test_acc_rgb': test_acc_rgb,
-                'test_acc_newmod': test_acc_newmod,
-                'test_acc_multi': test_acc_multi,
-                'stage1_checkpoint': checkpoint_path,
-                'config': {
-                    'model_type': args.model,
-                    'num_classes': 10,
-                    'train_split': 'train2',
-                    'fusion_strategy': args.fusion_strategy,
-                    'stage2_train_method': args.stage2_train_method,
-                    'bands_rgb': bands_rgb,
-                    'bands_newmod': bands_newmod,
-                    'newmod': newmod,
-                    'num_epochs': num_epochs_stage2,
-                    'batch_size': args.batch_size,
-                    'learning_rate': args.stage2_lr,
-                }
+        checkpoint_stage2 = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer_phase2b.state_dict(),
+            'epoch': num_epochs_phase2b,
+            'train_acc': train_acc,
+            'test_acc_rgb': test_acc_rgb,
+            'test_acc_newmod': test_acc_newmod,
+            'test_acc_multi': test_acc_multi,
+            'stage1_checkpoint': checkpoint_path,
+            'config': {
+                'model_type': args.model,
+                'num_classes': 10,
+                'train_split': 'train2',
+                'fusion_strategy': args.fusion_strategy,
+                'stage2_train_method': args.stage2_train_method,
+                'mae_mask_ratio': args.mae_mask_ratio,
+                'mae_lr': args.mae_lr,
+                'bands_rgb': bands_rgb,
+                'bands_newmod': bands_newmod,
+                'newmod': newmod,
+                'num_epochs': num_epochs_phase2b,
+                'batch_size': args.batch_size,
+                'learning_rate': args.stage2_lr,
             }
+        }
 
-            torch.save(checkpoint_stage2, checkpoint_path_stage2)
-            print(f"\n=== Stage 2 checkpoint saved to: {checkpoint_path_stage2} ===")
-            print(f"Stage 2 Final metrics:")
-            print(f"  Train accuracy (RGB+{newmod.upper()}, train2): {train_acc:.2f}%")
-            print(f"  Test accuracy (RGB only): {test_acc_rgb:.2f}%")
-            print(f"  Test accuracy ({newmod.capitalize()} only): {test_acc_newmod:.2f}%")
-            print(f"  Test accuracy (RGB+{newmod.upper()}): {test_acc_multi:.2f}%")
+        torch.save(checkpoint_stage2, checkpoint_path_stage2)
+        print(f"\n=== Stage 2 checkpoint saved to: {checkpoint_path_stage2} ===")
+        print(f"Stage 2 Final metrics (after MAE+Supervised):")
+        print(f"  Train accuracy (RGB+{newmod.upper()}, train2): {train_acc:.2f}%")
+        print(f"  Test accuracy (RGB only): {test_acc_rgb:.2f}%")
+        print(f"  Test accuracy ({newmod.capitalize()} only): {test_acc_newmod:.2f}%")
+        print(f"  Test accuracy (RGB+{newmod.upper()}): {test_acc_multi:.2f}%")
 
-        elif args.stage2_train_method == 'mae+supervised':
-            # ========== MAE + SUPERVISED TRAINING (Two-Phase Method) ==========
-
-            # Phase 2a: MAE SSL training
-            train_mae_phase(
-                model, evan, train2_loader, test_loader_full, device, args,
-                bands_newmod, newmod
-            )
-
-            # Phase 2b: Supervised fine-tuning
-            print("\n" + "="*70)
-            print("=== PHASE 2b: Supervised Fine-tuning ===")
-            print("="*70)
-
-            # Freeze everything first
-            for param in model.parameters():
-                param.requires_grad = False
-
-            # Freeze new modality patch embedder and modality-specific LoRA (just trained in MAE)
-            if newmod in evan.patch_embedders:
-                for param in evan.patch_embedders[newmod].parameters():
-                    param.requires_grad = False
-                print(f"  Kept frozen: {newmod.capitalize()} patch embedder (trained in MAE)")
-
-            if newmod in evan.modality_specific_lora_adaptors:
-                for param in evan.modality_specific_lora_adaptors[newmod].parameters():
-                    param.requires_grad = False
-                print(f"  Kept frozen: {newmod.capitalize()} modality-specific LoRAs (trained in MAE)")
-
-            # Unfreeze classifier(s)
-            if model.fusion_strategy == 'mean':
-                for param in model.classifier.parameters():
-                    param.requires_grad = True
-                print("  Unfroze: Classifier (mean fusion)")
-            elif model.fusion_strategy == 'ensemble':
-                # Ensure new modality classifier exists
-                if newmod not in model.modality_classifiers:
-                    print(f"  Creating {newmod} classifier")
-                    model._instantiate_modality_classifier(newmod)
-
-                # Unfreeze new modality classifier
-                for param in model.modality_classifiers[newmod].parameters():
-                    param.requires_grad = True
-                print(f"  Unfroze: {newmod.capitalize()} classifier (ensemble mode)")
-
-                # RGB classifier stays frozen
-                if 'rgb' in model.modality_classifiers:
-                    for param in model.modality_classifiers['rgb'].parameters():
-                        param.requires_grad = False
-                    print("  Kept frozen: RGB classifier (ensemble mode)")
-
-            # Unfreeze new modality fusion LoRA and modality encoding
-            if newmod in evan.modality_encoders:
-                evan.modality_encoders[newmod].requires_grad = True
-                print(f"  Unfroze: {newmod.capitalize()} modality encoding")
-
-            if newmod in evan.modality_fusion_lora_adaptors:
-                for param in evan.modality_fusion_lora_adaptors[newmod].parameters():
-                    param.requires_grad = True
-                print(f"  Unfroze: {newmod.capitalize()} fusion LoRAs")
-
-            # Print parameter info
-            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            total_params = sum(p.numel() for p in model.parameters())
-            print(f"\nTrainable parameters for Phase 2b: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
-
-            if trainable_params == 0:
-                raise ValueError("No trainable parameters found! Check that components are being unfrozen correctly.")
-
-            # Create optimizer for Phase 2b
-            optimizer_phase2b = torch.optim.AdamW(
-                filter(lambda p: p.requires_grad, model.parameters()),
-                lr=args.stage2_lr
-            )
-            num_epochs_phase2b = args.stage2_epochs
-
-            print(f"\n=== Phase 2b Training for {num_epochs_phase2b} epochs ===")
-            print(f"Learning rate: {args.stage2_lr}")
-            print(f"Modalities: RGB {bands_rgb} + {newmod.upper()} {bands_newmod}")
-            print(f"Training: {newmod.capitalize()} modality encoding, fusion LoRAs, classifier")
-            print(f"Frozen: {newmod.upper()} patch embedder, {newmod.upper()} modality-specific LoRAs, RGB components, DINO backbone")
-            print(f"Model processes multi-modal input by {model.fusion_strategy}")
-
-            # Verify modality components exist before training
-            assert newmod in evan.patch_embedders, f"{newmod} patch embedder not found!"
-            assert newmod in evan.modality_encoders, f"{newmod} modality encoding not found!"
-            assert newmod in evan.modality_fusion_lora_adaptors, f"{newmod} fusion LoRAs not found!"
-            if model.fusion_strategy == 'ensemble':
-                assert newmod in model.modality_classifiers, f"{newmod} classifier not found!"
-            print(f"  Verified: All {newmod} components exist")
-
-            # Phase 2b training loop
-            for epoch in range(num_epochs_phase2b):
-                model.train()
-                train_loss = 0.0
-                train_correct = 0
-                train_total = 0
-
-                pbar = tqdm(train2_loader, desc=f"Phase 2b Epoch {epoch+1}/{num_epochs_phase2b} [Train RGB+{newmod.upper()}]")
-                for batch in pbar:
-                    labels = batch['label'].to(device)
-
-                    # Create multi-modal input (RGB + new modality)
-                    multimodal_input = create_multimodal_batch(
-                        batch, modality_bands_dict=modality_bands_dict, modalities=('rgb', newmod)
-                    )
-                    multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
-
-                    optimizer_phase2b.zero_grad()
-                    # In ensemble mode, train only on new modality predictions
-                    if model.fusion_strategy == 'ensemble':
-                        outputs = model(multimodal_input)  # Ensemble both in phase 2b
-                    else:
-                        outputs = model(multimodal_input)
-                    loss = criterion(outputs, labels)
-                    loss.backward()
-                    optimizer_phase2b.step()
-
-                    train_loss += loss.item()
-                    _, predicted = outputs.max(1)
-                    train_total += labels.size(0)
-                    train_correct += predicted.eq(labels).sum().item()
-
-                    pbar.set_postfix({
-                        'loss': f'{loss.item():.4f}',
-                        'acc': f'{100.*train_correct/train_total:.2f}%'
-                    })
-
-                train_loss /= len(train2_loader)
-                train_acc = 100. * train_correct / train_total
-
-                # Evaluation on RGB-only, newmod-only, and RGB+newmod
-                test_loss_rgb, test_acc_rgb = evaluate(
-                    model, test_loader_full, criterion, device,
-                    modality_bands_dict, modalities_to_use=('rgb',)
-                )
-                test_loss_newmod, test_acc_newmod = evaluate(
-                    model, test_loader_full, criterion, device,
-                    modality_bands_dict, modalities_to_use=(newmod,)
-                )
-                test_loss_multi, test_acc_multi = evaluate(
-                    model, test_loader_full, criterion, device,
-                    modality_bands_dict, modalities_to_use=('rgb', newmod)
-                )
-
-                # Print epoch results
-                print(f"\nPhase 2b Epoch {epoch+1}/{num_epochs_phase2b}:")
-                print(f"  Train (RGB+{newmod.upper()}, train2):  Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
-                print(f"  Test (RGB only):         Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
-                print(f"  Test ({newmod.upper()} only):          Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
-                print(f"  Test (RGB+{newmod.upper()}):           Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%\n")
-
-            print("\n=== Phase 2b (Supervised Fine-tuning) complete ===")
-
-            # Save stage 2 checkpoint
-            timestamp_stage2 = datetime.now().strftime('%Y%m%d_%H%M%S')
-            checkpoint_path_stage2 = os.path.join(checkpoint_dir, f'evan_eurosat_stage2_mae_{timestamp_stage2}.pt')
-
-            checkpoint_stage2 = {
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer_phase2b.state_dict(),
-                'epoch': num_epochs_phase2b,
-                'train_acc': train_acc,
-                'test_acc_rgb': test_acc_rgb,
-                'test_acc_newmod': test_acc_newmod,
-                'test_acc_multi': test_acc_multi,
-                'stage1_checkpoint': checkpoint_path,
-                'config': {
-                    'model_type': args.model,
-                    'num_classes': 10,
-                    'train_split': 'train2',
-                    'fusion_strategy': args.fusion_strategy,
-                    'stage2_train_method': args.stage2_train_method,
-                    'mae_mask_ratio': args.mae_mask_ratio,
-                    'mae_lr': args.mae_lr,
-                    'bands_rgb': bands_rgb,
-                    'bands_newmod': bands_newmod,
-                    'newmod': newmod,
-                    'num_epochs': num_epochs_phase2b,
-                    'batch_size': args.batch_size,
-                    'learning_rate': args.stage2_lr,
-                }
-            }
-
-            torch.save(checkpoint_stage2, checkpoint_path_stage2)
-            print(f"\n=== Stage 2 checkpoint saved to: {checkpoint_path_stage2} ===")
-            print(f"Stage 2 Final metrics (after MAE+Supervised):")
-            print(f"  Train accuracy (RGB+{newmod.upper()}, train2): {train_acc:.2f}%")
-            print(f"  Test accuracy (RGB only): {test_acc_rgb:.2f}%")
-            print(f"  Test accuracy ({newmod.capitalize()} only): {test_acc_newmod:.2f}%")
-            print(f"  Test accuracy (RGB+{newmod.upper()}): {test_acc_multi:.2f}%")
-
-        print("\n" + "="*70)
-        print("=== TWO-STAGE TRAINING COMPLETE ===")
-        print("="*70)
-        print(f"Stage 1 checkpoint: {checkpoint_path}")
-        print(f"Stage 2 checkpoint: {checkpoint_path_stage2}")
+    print("\n" + "="*70)
+    print("=== TWO-STAGE TRAINING COMPLETE ===")
+    print("="*70)
+    print(f"Stage 1 checkpoint: {checkpoint_path}")
+    print(f"Stage 2 checkpoint: {checkpoint_path_stage2}")
 
 # Examples on how to call this script:
 
 # python -u train_evan_eurosat.py
-# python -u train_evan_eurosat.py --stage2 --stage2_epochs 10 # Run both stages
-# python -u train_evan_eurosat.py --stage2 --stage2_epochs 4 --stage2_train_method 'supervised' --fusion_strategy ensemble # Run fully supervised
-# python -u train_evan_eurosat.py --stage2 --stage2_epochs 4 --stage2_train_method 'mae+supervised' --fusion_strategy ensemble # Run mae + supervised
+# python -u train_evan_eurosat.py --stage2_epochs 10 # Run both stages
+# python -u train_evan_eurosat.py --stage2_ft_epochs 4 --stage2_train_method 'supervised' --fusion_strategy ensemble # Run fully supervised
+# python -u train_evan_eurosat.py --stage2_mae_epochs 4 --stage2_ft_epochs 4 --stage2_train_method 'mae+supervised' --fusion_strategy ensemble # Run mae + supervised
+
+# python -u train_evan_eurosat.py --stage2_mae_epochs 1 --stage2_ft_epochs 1 --stage2_train_method 'mae+supervised' --fusion_strategy ensemble

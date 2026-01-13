@@ -69,6 +69,7 @@ class EVAN(nn.Module):
         untie_cls_and_patch_norms: bool = False,
         untie_global_and_local_cls_norm: bool = False,
         device: Any | None = None,
+        tz_modality_specific_layer_augmenter: Literal["lora", "fft"] = "lora",
         tz_fusion_time: int = 3,
         tz_lora_rank: int=32,
         **ignored_kwargs,
@@ -88,6 +89,7 @@ class EVAN(nn.Module):
         self.device = device
         self.tz_fusion_time = tz_fusion_time
         self.tz_lora_rank = tz_lora_rank
+        self.tz_modality_specific_layer_augmenter = tz_modality_specific_layer_augmenter
 
         # Multi-modality support: Initialize patch embedders dict with 'rgb' for DINO compatibility
         self.patch_embedders = nn.ModuleDict()
@@ -173,11 +175,32 @@ class EVAN(nn.Module):
         self.mask_token = nn.Parameter(torch.empty(1, embed_dim, device=device))
 
         # Initialize modality-specific LoRA adaptors for first tz_fusion_time blocks
-        self.modality_specific_lora_adaptors = nn.ModuleDict()
-        self.modality_specific_lora_adaptors['rgb'] = nn.ModuleList([
-            LoRALayer(embed_dim, rank=self.tz_lora_rank, device=device)
-            for _ in range(tz_fusion_time)
-        ])
+        self.modality_specific_layer_adaptors = nn.ModuleDict()
+        if tz_modality_specific_layer_augmenter=="lora":
+            self.modality_specific_layer_adaptors['rgb'] = nn.ModuleList([
+                LoRALayer(embed_dim, rank=self.tz_lora_rank, device=device)
+                for _ in range(tz_fusion_time)
+            ])
+        elif tz_modality_specific_layer_augmenter=="fft":    
+            self.modality_specific_layer_adaptors['rgb'] = nn.ModuleList([
+                SelfAttentionBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    ffn_ratio=ffn_ratio_sequence[i],
+                    qkv_bias=qkv_bias,
+                    proj_bias=proj_bias,
+                    ffn_bias=ffn_bias,
+                    drop_path=drop_path_rate,
+                    norm_layer=norm_layer_cls,
+                    act_layer=nn.GELU,
+                    ffn_layer=ffn_layer_cls,
+                    init_values=layerscale_init,
+                    mask_k_bias=mask_k_bias,
+                    device=device,
+                )
+                for i in range(tz_fusion_time)
+            ])
+        else: raise RuntimeError(f"unrecognized {tz_modality_specific_layer_augmenter=}")
 
         # Initialize modality encodings (per-token embeddings added after modality-specific processing)
         self.modality_encoders = nn.ParameterDict()
@@ -316,6 +339,20 @@ class EVAN(nn.Module):
                 checkpoint_remapped[key] = value
         checkpoint = checkpoint_remapped
 
+        # For FFT mode: Copy first tz_fusion_time blocks to RGB modality-specific layers
+        if self.tz_modality_specific_layer_augmenter == "fft":
+            print(f"\n  FFT mode: Copying first {self.tz_fusion_time} DINO blocks to RGB modality-specific layers...")
+            fft_params_copied = 0
+            for i in range(self.tz_fusion_time):
+                # Copy all weights from blocks[i] to modality_specific_layer_adaptors.rgb[i]
+                for key, value in list(checkpoint.items()):
+                    if key.startswith(f'blocks.{i}.'):
+                        # Create corresponding key for RGB modality-specific layer
+                        rgb_key = key.replace(f'blocks.{i}.', f'modality_specific_layer_adaptors.rgb.{i}.')
+                        checkpoint[rgb_key] = value.clone()
+                        fft_params_copied += value.numel()
+            print(f"    Copied {fft_params_copied:,} parameters for RGB FFT blocks")
+
         result = self.load_state_dict(checkpoint, strict=False)
 
         # Filter out expected missing keys (EVAN-specific multi-modality components)
@@ -324,7 +361,11 @@ class EVAN(nn.Module):
             if key == 'rope_embed.periods':
                 return True
             # EVAN multi-modality components (new, not in DINO)
-            if any(pattern in key for pattern in ['modality_specific_lora_adaptors', 'modality_encoders', 'modality_fusion_lora_adaptors']):
+            # Note: In FFT mode, modality_specific_layer_adaptors should be loaded (not missing)
+            if self.tz_modality_specific_layer_augmenter == "lora":
+                if 'modality_specific_layer_adaptors' in key:
+                    return True
+            if any(pattern in key for pattern in ['modality_encoders', 'modality_fusion_lora_adaptors']):
                 return True
             return False
 
@@ -389,12 +430,27 @@ class EVAN(nn.Module):
             embedder = embedder.to(self.device)
         self.patch_embedders[modality_key] = embedder
 
-        # 2. Create modality-specific LoRAs (for first tz_fusion_time blocks)
-        lora_list = nn.ModuleList([
-            LoRALayer(self.embed_dim, rank=self.tz_lora_rank, device=self.device)
-            for _ in range(self.tz_fusion_time)
-        ])
-        self.modality_specific_lora_adaptors[modality_key] = lora_list
+        # 2. Create modality-specific adaptors (for first tz_fusion_time blocks)
+        if self.tz_modality_specific_layer_augmenter == "lora":
+            # LoRA mode: create lightweight LoRA adaptors
+            adaptor_list = nn.ModuleList([
+                LoRALayer(self.embed_dim, rank=self.tz_lora_rank, device=self.device)
+                for _ in range(self.tz_fusion_time)
+            ])
+        elif self.tz_modality_specific_layer_augmenter == "fft":
+            # FFT mode: copy first tz_fusion_time transformer blocks from DINO
+            adaptor_list = nn.ModuleList()
+            for i in range(self.tz_fusion_time):
+                # Deep copy the block to create an independent copy
+                import copy
+                block_copy = copy.deepcopy(self.blocks[i])
+                if self.device is not None:
+                    block_copy = block_copy.to(self.device)
+                adaptor_list.append(block_copy)
+        else:
+            raise ValueError(f"Unknown augmenter mode: {self.tz_modality_specific_layer_augmenter}")
+
+        self.modality_specific_layer_adaptors[modality_key] = adaptor_list
 
         # 3. Create modality encoding (per-token embedding)
         modality_encoding = nn.Parameter(
@@ -420,15 +476,17 @@ class EVAN(nn.Module):
 
         # Verbose logging
         embedder_params = sum(p.numel() for p in embedder.parameters())
-        lora_params = sum(p.numel() for p in lora_list.parameters())
+        adaptor_params = sum(p.numel() for p in adaptor_list.parameters())
         encoding_params = modality_encoding.numel()
         fusion_lora_params = sum(p.numel() for p in fusion_lora_list.parameters())
 
+        adaptor_type = "LoRAs" if self.tz_modality_specific_layer_augmenter == "lora" else "FFT blocks"
         logger.info(f"✨ Initialized new modality: '{modality_key}'")
         logger.info(f"   - Input channels: {in_chans}")
+        logger.info(f"   - Augmenter mode: {self.tz_modality_specific_layer_augmenter}")
         logger.info(f"   - Components created:")
         logger.info(f"     • Patch embedder: {embedder_params:,} params")
-        logger.info(f"     • Modality-specific LoRAs ({self.tz_fusion_time} blocks): {lora_params:,} params")
+        logger.info(f"     • Modality-specific {adaptor_type} ({self.tz_fusion_time} blocks): {adaptor_params:,} params")
         logger.info(f"     • Modality encoding: {encoding_params:,} params")
         logger.info(f"     • Fusion LoRAs ({num_fusion_blocks} blocks): {fusion_lora_params:,} params")
         logger.info(f"   - Total new parameters: {new_params:,}")
@@ -688,19 +746,25 @@ class EVAN(nn.Module):
         for modality_key, x_mod in embedded_modalities.items():
             H, W = hw_tuples[modality_key]
 
-            # Apply first tz_fusion_time blocks with modality-specific LoRA
+            # Apply first tz_fusion_time blocks with modality-specific adaptations
             for i in range(self.tz_fusion_time):
                 if self.rope_embed is not None:
                     rope_sincos = self.rope_embed(H=H, W=W)
                 else:
                     rope_sincos = None
 
-                # Shared block forward
-                x_mod = self.blocks[i](x_mod, rope_sincos)
-
-                # Add modality-specific LoRA adaptation
-                lora = self.modality_specific_lora_adaptors[modality_key][i]
-                x_mod = x_mod + lora(x_mod)
+                # Apply modality-specific adaptation based on mode
+                if self.tz_modality_specific_layer_augmenter == "lora":
+                    # LoRA mode: shared block + additive LoRA adaptation
+                    x_mod = self.blocks[i](x_mod, rope_sincos)
+                    lora = self.modality_specific_layer_adaptors[modality_key][i]
+                    x_mod = x_mod + lora(x_mod)
+                elif self.tz_modality_specific_layer_augmenter == "fft":
+                    # FFT mode: replace with modality-specific full transformer block
+                    adaptor = self.modality_specific_layer_adaptors[modality_key][i]
+                    x_mod = adaptor(x_mod, rope_sincos)
+                else:
+                    raise ValueError(f"Unknown augmenter mode: {self.tz_modality_specific_layer_augmenter}")
 
             # Add modality encoding (per-token embedding)
             modality_encoding = self.modality_encoders[modality_key]
@@ -710,78 +774,8 @@ class EVAN(nn.Module):
 
         return embedded_modalities
 
-    def _get_intermediate_layers_not_chunked(self, x: Tensor, n: int = 1) -> List[Tensor]:
-        x, (H, W) = self.prepare_tokens_with_masks(x)
-        # If n is an int, take the n last blocks. If it's a list, take them
-        output, total_block_len = [], len(self.blocks)
-        blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
-        for i, blk in enumerate(self.blocks):
-            if self.rope_embed is not None:
-                rope_sincos = self.rope_embed(H=H, W=W)
-            else:
-                rope_sincos = None
-            x = blk(x, rope_sincos)
-            if i in blocks_to_take:
-                output.append(x)
-        assert len(output) == len(blocks_to_take), f"only {len(output)} / {len(blocks_to_take)} blocks found"
-        return output
-
-    def get_intermediate_layers(
-        self,
-        x: torch.Tensor,
-        *,
-        n: Union[int, Sequence] = 1,  # Layers or n last layers to take
-        reshape: bool = False,
-        return_class_token: bool = False,
-        return_extra_tokens: bool = False,
-        norm: bool = True,
-    ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor, ...]]]:
-        outputs = self._get_intermediate_layers_not_chunked(x, n)
-        if norm:
-            outputs_normed = []
-            for out in outputs:
-                if self.untie_cls_and_patch_norms:
-                    x_norm_cls_reg = self.cls_norm(out[:, : self.n_storage_tokens + 1])
-                    x_norm_patch = self.norm(out[:, self.n_storage_tokens + 1 :])
-                    outputs_normed.append(torch.cat((x_norm_cls_reg, x_norm_patch), dim=1))
-                else:
-                    outputs_normed.append(self.norm(out))
-            outputs = outputs_normed
-        class_tokens = [out[:, 0] for out in outputs]
-        extra_tokens = [out[:, 1 : self.n_storage_tokens + 1] for out in outputs]
-        outputs = [out[:, self.n_storage_tokens + 1 :] for out in outputs]
-        if reshape:
-            B, _, h, w = x.shape
-            outputs = [
-                out.reshape(B, h // self.patch_size, w // self.patch_size, -1).permute(0, 3, 1, 2).contiguous()
-                for out in outputs
-            ]
-        if not return_class_token and not return_extra_tokens:
-            return tuple(outputs)
-        elif return_class_token and not return_extra_tokens:
-            return tuple(zip(outputs, class_tokens))
-        elif not return_class_token and return_extra_tokens:
-            return tuple(zip(outputs, extra_tokens))
-        elif return_class_token and return_extra_tokens:
-            return tuple(zip(outputs, class_tokens, extra_tokens))
-
     def forward(self, *args, is_training: bool = False, **kwargs) -> Dict[str, Dict[str, Tensor]] | Dict[str, Tensor] | Tensor:
-        ret = self.forward_features(*args, **kwargs)
-        if is_training:
-            return ret
-        else:
-            # For inference, return pooled CLS tokens
-            # If input was a single tensor (converted to {'rgb': tensor}), return just the rgb output
-            if isinstance(ret, dict) and len(ret) == 1 and 'rgb' in ret:
-                # Backward compatibility: single RGB input
-                return self.head(ret['rgb']["x_norm_clstoken"])
-            elif isinstance(ret, dict):
-                # Multi-modality: return dict of pooled features
-                return {modality: self.head(output["x_norm_clstoken"])
-                        for modality, output in ret.items()}
-            else:
-                # Legacy path
-                return self.head(ret["x_norm_clstoken"])
+        raise NotImplementedError("Why are you calling me?")
 
 # EVAN preset functions (similar to DINOv3)
 
@@ -857,7 +851,106 @@ def evan_large(pretrained: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", **k
     return model
 
 
+class EVANClassifier(nn.Module):
+    """Classifier head on top of EVAN for EuroSAT."""
+
+    def __init__(self, evan_model, num_classes=10, fusion_strategy='mean', factor=4, device = "cuda"):
+        super().__init__()
+        self.evan = evan_model
+        self.fusion_strategy = fusion_strategy
+        self.num_classes = num_classes
+        self.factor = factor
+        embed_dim = self.evan.embed_dim
+        hidden_dim = embed_dim * factor
+        self.hidden_dim = hidden_dim
+        self.device = device
+
+        if fusion_strategy == 'mean':
+            # Average CLS tokens from all modalities, then classify
+            self.classifier = nn.Sequential(
+                nn.Linear(embed_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, num_classes)
+            )
+            self.modality_classifiers = None
+        elif fusion_strategy == 'ensemble':
+            # Per-modality classifiers that get ensembled
+            self.classifier = None
+            self.modality_classifiers = nn.ModuleDict()
+        else:
+            raise ValueError(f"Unknown fusion strategy: {fusion_strategy}")
+
+    def _instantiate_modality_classifier(self, modality_key: str):
+        """
+        Create a new classifier for a specific modality.
+
+        Args:
+            modality_key: Name of the modality (e.g., 'rgb', 'vre', 'nir', 'swir')
+        """
+        embed_dim = self.evan.embed_dim
+
+        classifier = nn.Sequential(
+            nn.Linear(embed_dim, self.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.num_classes)
+        )
+
+        classifier = classifier.to(self.device)
+        self.modality_classifiers[modality_key] = classifier
+        print(f"  Created new classifier for modality: {modality_key}")
+
+    def forward(self, x):
+        """
+        Forward pass supporting both single tensor and dict inputs.
+
+        Args:
+            x: Either a tensor [B, C, H, W] or dict {modality: tensor}
+            train_modality: Optional str specifying which modality to use for loss during training
+                           (only applies in ensemble mode). If None, uses all modalities.
+                           During eval, always uses all modalities for ensemble.
+
+        Returns:
+            logits: [B, num_classes]
+        """
+        # Get features from EVAN
+        features_dict = self.evan.forward_features(x)
+
+        if self.fusion_strategy == 'mean':
+            # Extract CLS tokens from each modality
+            cls_tokens = []
+            for modality in sorted(features_dict.keys()):
+                if modality=="rgb":
+                    cls_tokens.append(features_dict[modality]['x_norm_clstoken'])
+                else:
+                    cls_tokens.append(features_dict[modality]['x_norm_patchtokens'].mean(1))
+
+            # Average CLS tokens
+            fused = torch.stack(cls_tokens).mean(dim=0)
+
+            # Classify
+            logits = self.classifier(fused)
+
+        elif self.fusion_strategy == 'ensemble':
+            all_logits = []
+            for modality in sorted(features_dict.keys()):
+                # Create classifier for this modality if it doesn't exist
+                if modality not in self.modality_classifiers:
+                    self._instantiate_modality_classifier(modality)
+
+                # Get CLS token for this modality
+                cls_token = features_dict[modality]['x_norm_clstoken']
+
+                # Get logits from modality-specific classifier
+                modality_logits = self.modality_classifiers[modality](cls_token)
+                all_logits.append(modality_logits)
+
+            # Ensemble by averaging logits
+            logits = torch.stack(all_logits).mean(dim=0)
+
+        return logits
+
+
 if __name__ == '__main__':
     print("why are you calling me?")
-    
+
 # python -u evan_main.py
