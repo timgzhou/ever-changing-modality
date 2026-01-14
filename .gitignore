@@ -214,3 +214,4 @@ logs
 references
 *.sh
 ignore
+wandb

@@ -538,47 +538,6 @@ class EVAN(nn.Module):
 
         return x, (H, W)
 
-    def forward_features_list(self, x_list: List[Tensor], masks_list: List[Tensor]) -> List[Dict[str, Tensor]]:
-        x = []
-        rope = []
-        for t_x, t_masks in zip(x_list, masks_list):
-            t2_x, hw_tuple = self.prepare_tokens_with_masks(t_x, t_masks)
-            x.append(t2_x)
-            rope.append(hw_tuple)
-        for _, blk in enumerate(self.blocks):
-            if self.rope_embed is not None:
-                rope_sincos = [self.rope_embed(H=H, W=W) for H, W in rope]
-            else:
-                rope_sincos = [None for r in rope]
-            x = blk(x, rope_sincos)
-        all_x = x
-        output = []
-        for idx, (x, masks) in enumerate(zip(all_x, masks_list)):
-            if self.untie_cls_and_patch_norms or self.untie_global_and_local_cls_norm:
-                if self.untie_global_and_local_cls_norm and self.training and idx == 1:
-                    # Assume second entry of list corresponds to local crops.
-                    # We only ever apply this during training.
-                    x_norm_cls_reg = self.local_cls_norm(x[:, : self.n_storage_tokens + 1])
-                elif self.untie_cls_and_patch_norms:
-                    x_norm_cls_reg = self.cls_norm(x[:, : self.n_storage_tokens + 1])
-                else:
-                    x_norm_cls_reg = self.norm(x[:, : self.n_storage_tokens + 1])
-                x_norm_patch = self.norm(x[:, self.n_storage_tokens + 1 :])
-            else:
-                x_norm = self.norm(x)
-                x_norm_cls_reg = x_norm[:, : self.n_storage_tokens + 1]
-                x_norm_patch = x_norm[:, self.n_storage_tokens + 1 :]
-            output.append(
-                {
-                    "x_norm_clstoken": x_norm_cls_reg[:, 0],
-                    "x_storage_tokens": x_norm_cls_reg[:, 1:],
-                    "x_norm_patchtokens": x_norm_patch,
-                    "x_prenorm": x,
-                    "masks": masks,
-                }
-            )
-        return output
-
     def forward_features(self, x: Tensor | Dict[str, Tensor] | List[Tensor], masks: Optional[Tensor] = None) -> Dict[str, Tensor]:
         """
         Forward features with multi-modality support.
@@ -593,10 +552,6 @@ class EVAN(nn.Module):
         # Handle backward compatibility: single tensor input
         if isinstance(x, torch.Tensor):
             x = {'rgb': x}
-
-        # Handle list input (legacy)
-        if isinstance(x, list):
-            return self.forward_features_list(x, masks)[0]
 
         # Now x is a dict of modalities
         if not isinstance(x, dict) or len(x) == 0:
@@ -938,8 +893,11 @@ class EVANClassifier(nn.Module):
                     self._instantiate_modality_classifier(modality)
 
                 # Get CLS token for this modality
-                cls_token = features_dict[modality]['x_norm_clstoken']
-
+                # cls_token = features_dict[modality]['x_norm_clstoken']
+                if modality=="rgb":
+                    cls_token=features_dict[modality]['x_norm_clstoken']
+                else:
+                    cls_token=features_dict[modality]['x_norm_patchtokens'].mean(1)
                 # Get logits from modality-specific classifier
                 modality_logits = self.modality_classifiers[modality](cls_token)
                 all_logits.append(modality_logits)

@@ -22,6 +22,7 @@ import logging
 import os
 import argparse
 from datetime import datetime
+import wandb
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
@@ -165,7 +166,7 @@ def random_mask_patches(x, mask_ratio=0.75):
 
     Returns:
         x_masked: Unmasked patches only [B, num_unmasked, embed_dim]
-        mask: Boolean mask [B, num_patches] where True = masked
+        mask: Boolean mask [B, num_patches] where True = masked (hidden from encoder)
         ids_restore: Indices to restore original order [B, num_patches]
     """
     B, L, D = x.shape
@@ -173,7 +174,7 @@ def random_mask_patches(x, mask_ratio=0.75):
 
     # Random shuffle
     noise = torch.rand(B, L, device=x.device)
-    ids_shuffle = torch.argsort(noise, dim=1)
+    ids_shuffle = torch.argsort(noise, dim=1) 
     ids_restore = torch.argsort(ids_shuffle, dim=1)
 
     # Keep first len_keep patches
@@ -189,18 +190,6 @@ def random_mask_patches(x, mask_ratio=0.75):
 
 
 def mae_reconstruction_loss(pred, target, mask):
-    """
-    MSE loss on masked patches only.
-    Based on MAESTRO's compute_loss_rec (model.py:195-247).
-
-    Args:
-        pred: Predicted pixels [B, num_patches, patch_size^2 * channels]
-        target: Target pixels [B, num_patches, patch_size^2 * channels]
-        mask: Boolean mask [B, num_patches] where True = compute loss
-
-    Returns:
-        loss: Mean squared error on masked patches
-    """
     loss = (pred - target) ** 2
     loss = loss.mean(dim=-1)  # Mean over pixels in patch
 
@@ -262,7 +251,8 @@ def evaluate_mae_reconstruction(model, evan, mae_decoder, dataloader, device,
 def supervised_training_loop(model, train_loader, test_loader_full, device,
                              modality_bands_dict, criterion, optimizer, num_epochs,
                              train_modalities, newmod, phase_name="Training",
-                             eval_newmod_only=True, modality_masking=None):
+                             eval_newmod_only=True, modality_masking=None,
+                             use_wandb=False, wandb_prefix=None):
     """
     General supervised training loop for EVAN.
 
@@ -299,6 +289,7 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
         modality_masking = {}
 
     # Training loop
+    global_step = 0
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
@@ -328,17 +319,32 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
             outputs = model(modal_input)
             loss = criterion(outputs, labels)
             loss.backward()
+
+            # Compute gradient norm
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=float('inf'))
+
             optimizer.step()
 
             train_loss += loss.item()
             _, predicted = outputs.max(1)
             train_total += labels.size(0)
             train_correct += predicted.eq(labels).sum().item()
+            global_step += 1
 
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
-                'acc': f'{100.*train_correct/train_total:.2f}%'
+                'acc': f'{100.*train_correct/train_total:.2f}%',
+                'grad_norm': f'{grad_norm:.4f}'
             })
+
+            # Log to wandb every step
+            if use_wandb and wandb_prefix:
+                wandb.log({
+                    f'{wandb_prefix}/train_loss': loss.item(),
+                    f'{wandb_prefix}/grad_norm': grad_norm.item(),
+                    f'{wandb_prefix}/step': global_step,
+                })
 
         train_loss /= len(train_loader)
         train_acc = 100. * train_correct / train_total
@@ -381,12 +387,28 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
             print(f"  Multi-modal gain:      {test_acc_multi - test_acc_rgb:+.2f}%")
         print()
 
+        # Log epoch-level metrics to wandb
+        if use_wandb and wandb_prefix:
+            log_dict = {
+                f'{wandb_prefix}/train_loss_epoch': train_loss,
+                f'{wandb_prefix}/train_acc': train_acc,
+                f'{wandb_prefix}/eval_loss_multi': test_loss_multi,
+                f'{wandb_prefix}/eval_acc_rgb': test_acc_rgb,
+                f'{wandb_prefix}/eval_acc_multi': test_acc_multi,
+                f'{wandb_prefix}/epoch': epoch + 1,
+            }
+            if eval_newmod_only:
+                log_dict[f'{wandb_prefix}/eval_loss_newmod'] = test_loss_newmod
+                log_dict[f'{wandb_prefix}/eval_acc_newmod'] = test_acc_newmod
+            wandb.log(log_dict)
+
     return train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi
 
 
 def supervised_finetune_phase(model, evan, train_loader, test_loader_full, device, args,
                                newmod, modality_bands_dict, criterion, phase_name="Stage 2",
-                               modality_masking=None):
+                               modality_masking=None,freeze_rgb=True,unfreeze_modality_specific=False,
+                               use_wandb=False, wandb_prefix=None):
     """
     Supervised fine-tuning for new modality components.
 
@@ -434,15 +456,17 @@ def supervised_finetune_phase(model, evan, train_loader, test_loader_full, devic
         print(f"  Unfroze: {newmod.capitalize()} classifier (ensemble mode)")
 
         # RGB classifier stays frozen
-        if 'rgb' in model.modality_classifiers:
+        if freeze_rgb:
+            print("WARNING: RGB classifier head is frozen.")
             for param in model.modality_classifiers['rgb'].parameters():
                 param.requires_grad = False
-            print("  Kept frozen: RGB classifier (ensemble mode)")
+        else:
+            print("Unfreezing RGB classifier head.")
+            for param in model.modality_classifiers['rgb'].parameters():
+                param.requires_grad = True
 
     # Unfreeze new modality components (if training all components, not just fusion)
-    train_modality_specific = getattr(args, 'train_modality_specific', True)
-
-    if train_modality_specific:
+    if unfreeze_modality_specific:
         # Patch embedder
         if newmod in evan.patch_embedders:
             for param in evan.patch_embedders[newmod].parameters():
@@ -456,15 +480,12 @@ def supervised_finetune_phase(model, evan, train_loader, test_loader_full, devic
             print(f"  Unfroze: {newmod.capitalize()} modality-specific layers")
 
     # Modality encoding
-    if newmod in evan.modality_encoders:
-        evan.modality_encoders[newmod].requires_grad = True
-        print(f"  Unfroze: {newmod.capitalize()} modality encoding")
+    evan.modality_encoders[newmod].requires_grad_(True)
+    print(f"  Unfroze: {newmod.capitalize()} modality encoding")
 
     # Fusion LoRAs
-    if newmod in evan.modality_fusion_lora_adaptors:
-        for param in evan.modality_fusion_lora_adaptors[newmod].parameters():
-            param.requires_grad = True
-        print(f"  Unfroze: {newmod.capitalize()} fusion LoRAs")
+    evan.modality_fusion_lora_adaptors[newmod].requires_grad_(True)
+    print(f"  Unfroze: {newmod.capitalize()} fusion LoRAs")
 
     # Print parameter info
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -485,25 +506,21 @@ def supervised_finetune_phase(model, evan, train_loader, test_loader_full, devic
     print(f"Learning rate: {args.stage2_lr}")
     print(f"Modalities: RGB {bands_rgb} + {newmod.upper()} {bands_newmod}")
 
-    if train_modality_specific:
+    if unfreeze_modality_specific:
         print(f"Training: {newmod.capitalize()} patch embedder, modality-specific LoRAs, modality encoding, fusion LoRAs, classifier")
         print("Frozen: RGB components and shared DINO backbone")
     else:
         print(f"Training: {newmod.capitalize()} modality encoding, fusion LoRAs, classifier")
         print(f"Frozen: {newmod.upper()} patch embedder, {newmod.upper()} modality-specific LoRAs, RGB components, DINO backbone")
 
-    if model.fusion_strategy == 'ensemble':
-        print(f"Note: In ensemble mode, training loss uses only {newmod} classifier (RGB frozen)")
-        print(f"      Evaluation will ensemble both RGB and {newmod} predictions\n")
-    else:
-        print()
 
     # Run training loop
     train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi = supervised_training_loop(
         model, train_loader, test_loader_full, device,
         modality_bands_dict, criterion, optimizer, num_epochs,
         train_modalities=('rgb', newmod), newmod=newmod, phase_name=phase_name,
-        eval_newmod_only=True, modality_masking=modality_masking
+        eval_newmod_only=True, modality_masking=modality_masking,
+        use_wandb=use_wandb, wandb_prefix=wandb_prefix
     )
 
     print(f"\n=== {phase_name} complete ===")
@@ -512,7 +529,7 @@ def supervised_finetune_phase(model, evan, train_loader, test_loader_full, devic
 
 
 def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
-                    bands_target, target_modality):
+                    bands_target, target_modality, use_wandb=False):
     """
     Phase 2a: MAE SSL training for target_modality components.
 
@@ -570,6 +587,7 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
     target_modality_indices = get_band_indices(bands_target)
 
     # Training loop
+    global_step = 0
     for epoch in range(args.stage2_mae_epochs):
         model.train()
         mae_decoder.train()
@@ -600,11 +618,25 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
 
             optimizer_mae.zero_grad()
             loss.backward()
+
+            # Compute gradient norm before stepping
+            grad_norm = torch.nn.utils.clip_grad_norm_(mae_params, max_norm=float('inf'))
+
             optimizer_mae.step()
 
             train_loss += loss.item()
             train_count += 1
-            pbar.set_postfix({'mae_loss': f'{loss.item():.4f}'})
+            global_step += 1
+            pbar.set_postfix({'mae_loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'})
+
+            # Log to wandb every step
+            if use_wandb:
+                wandb.log({
+                    'phase2a_mae/train_loss': loss.item(),
+                    'phase2a_mae/grad_norm': grad_norm.item(),
+                    'phase2a_mae/epoch': epoch + 1,
+                    'phase2a_mae/step': global_step,
+                })
 
         train_loss /= train_count
 
@@ -613,6 +645,14 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
             model, evan, mae_decoder, test_loader_full, device,
             bands_target, patch_size, args.mae_mask_ratio, target_modality
         )
+
+        # Log epoch-level metrics
+        if use_wandb:
+            wandb.log({
+                'phase2a_mae/train_loss_epoch': train_loss,
+                'phase2a_mae/eval_loss': eval_loss,
+                'phase2a_mae/epoch': epoch + 1,
+            })
 
         print(f"\nMAE Epoch {epoch+1}/{args.stage2_mae_epochs}:")
         print(f"  Train reconstruction loss: {train_loss:.4f}")
@@ -649,20 +689,31 @@ if __name__ == '__main__':
     parser.add_argument('--stage2_train_method', type=str, default='supervised',
                         choices=['supervised', 'mae+supervised'],
                         help='Stage 2 training method: supervised or mae+supervised')
-    parser.add_argument('--mae_mask_ratio', type=float, default=0.75,
-                        help='Mask ratio for MAE training (default: 0.75)')
-    parser.add_argument('--mae_lr', type=float, default=None,
+    parser.add_argument('--mae_mask_ratio', type=float, default=0.85,
+                        help='Mask ratio for MAE training (default: 0.85)')
+    parser.add_argument('--mae_lr', type=float, default=0.000001,
                         help='Learning rate for MAE phase (default: same as stage2_lr)')
     parser.add_argument('--new_mod_group', type=str, default='vre', choices=['vre','nir','swir'],
                         help='')
     parser.add_argument('--tz_modality_specific_layer_augmenter', type=str, default='lora', choices=['lora','fft'],
                         help='lora or fft fot mofality-specific mae.')
+    parser.add_argument('--freeze_rgb',action='store_true')
+    parser.add_argument('--wandb', action='store_true',
+                        help='Enable wandb logging for phase 2a/2b')
+    parser.add_argument('--wandb_project', type=str, default='evan-eurosat',
+                        help='Wandb project name')
     args = parser.parse_args()
 
     if args.stage2_lr is None:
         args.stage2_lr = args.lr
-    if args.mae_lr is None:
-        args.mae_lr = args.stage2_lr
+
+    # Initialize wandb if enabled
+    if args.wandb:
+        wandb.init(
+            project=args.wandb_project,
+            config=vars(args),
+            name=f"{args.model}_{args.new_mod_group}_{args.stage2_train_method}"
+        )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -825,7 +876,9 @@ if __name__ == '__main__':
         # Run supervised fine-tuning phase (trains all new modality components)
         optimizer_stage2, train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi = supervised_finetune_phase(
             model, evan, train2_loader, test_loader_full, device, args,
-            newmod, modality_bands_dict, criterion, phase_name="Stage 2",modality_masking = {'rgb': 0.5}
+            newmod, modality_bands_dict, criterion, phase_name="Stage 2",modality_masking = {'rgb': 0.4,'vir': 0.2},
+            freeze_rgb=args.freeze_rgb, unfreeze_modality_specific=True,
+            use_wandb=args.wandb, wandb_prefix='phase2b_finetune'
         )
 
         # Save stage 2 checkpoint
@@ -870,18 +923,17 @@ if __name__ == '__main__':
         # Phase 2a: MAE SSL training
         train_mae_phase(
             model, evan, train2_loader, test_loader_full, device, args,
-            bands_newmod, newmod
+            bands_newmod, newmod, use_wandb=args.wandb
         )
 
         # Phase 2b: Supervised fine-tuning (fusion layers + classifier only, modality-specific frozen)
         # Temporarily set flag to NOT train modality-specific components (they were trained in MAE phase)
-        args.train_modality_specific = False
         optimizer_phase2b, train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi = supervised_finetune_phase(
             model, evan, train2_loader, test_loader_full, device, args,
-            newmod, modality_bands_dict, criterion, phase_name="Phase 2b"
+            newmod, modality_bands_dict, criterion, phase_name="Phase 2b",unfreeze_modality_specific=False,
+            freeze_rgb=args.freeze_rgb, use_wandb=args.wandb, wandb_prefix='phase2b_finetune'
         )
         # Restore flag to default
-        args.train_modality_specific = True
 
         # Save stage 2 checkpoint
         timestamp_stage2 = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -926,6 +978,10 @@ if __name__ == '__main__':
     print("="*70)
     print(f"Stage 1 checkpoint: {checkpoint_path}")
     print(f"Stage 2 checkpoint: {checkpoint_path_stage2}")
+
+    # Finish wandb run
+    if args.wandb:
+        wandb.finish()
 
 # Examples on how to call this script:
 
