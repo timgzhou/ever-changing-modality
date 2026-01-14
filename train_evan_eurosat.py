@@ -107,7 +107,6 @@ class SimpleMAEDecoder(nn.Module):
         return x
 
 
-
 # Note: create_multimodal_batch is now imported from eurosat_data_utils
 
 
@@ -258,6 +257,258 @@ def evaluate_mae_reconstruction(model, evan, mae_decoder, dataloader, device,
             count += 1
 
     return total_loss / count
+
+
+def supervised_training_loop(model, train_loader, test_loader_full, device,
+                             modality_bands_dict, criterion, optimizer, num_epochs,
+                             train_modalities, newmod, phase_name="Training",
+                             eval_newmod_only=True, modality_masking=None):
+    """
+    General supervised training loop for EVAN.
+
+    Args:
+        model: EVAN classifier
+        train_loader: Training dataloader
+        test_loader_full: Test dataloader
+        device: torch device
+        modality_bands_dict: Dict mapping modality names to band tuples
+        criterion: Loss function
+        optimizer: Optimizer (already configured with trainable parameters)
+        num_epochs: Number of epochs to train
+        train_modalities: Tuple of modality names to use for training (e.g., ('rgb',) or ('rgb', 'vre'))
+        newmod: Name of the new modality (for logging)
+        phase_name: Name of this training phase for logging
+        eval_newmod_only: Whether to evaluate on newmod-only (False for Stage 1)
+        modality_masking: Optional dict mapping modality name to masking probability (e.g., {'rgb': 0.3, 'vre': 0.2})
+                         During training, one modality is randomly masked out per batch based on these probabilities.
+
+    Returns:
+        Tuple of (train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi)
+        (test_acc_newmod is None if eval_newmod_only=False)
+    """
+
+    # Determine training modality string for logging
+    train_mod_str = "+".join(m.upper() for m in train_modalities)
+
+    # Setup modality masking if specified
+    if modality_masking:
+        import random
+        masking_info = " (with modality masking: " + ", ".join(f"{k}={v:.1%}" for k, v in modality_masking.items()) + ")"
+        print(f"Modality masking enabled{masking_info}")
+    else:
+        modality_masking = {}
+
+    # Training loop
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+
+        pbar = tqdm(train_loader, desc=f"{phase_name} Epoch {epoch+1}/{num_epochs} [Train {train_mod_str}]")
+        for batch in pbar:
+            labels = batch['label'].to(device)
+
+            # Create modal input
+            modal_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict, modalities=train_modalities
+            )
+            modal_input = {k: v.to(device) for k, v in modal_input.items()}
+
+            # Apply modality masking (mask one modality at a time per batch)
+            if modality_masking:
+                # For each modality, decide whether to mask it this batch
+                for modality_name, mask_prob in modality_masking.items():
+                    if modality_name in modal_input and random.random() < mask_prob:
+                        # Mask this modality by removing it from the input
+                        del modal_input[modality_name]
+                        break  # Only mask one modality at a time
+
+            optimizer.zero_grad()
+            outputs = model(modal_input)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            train_total += labels.size(0)
+            train_correct += predicted.eq(labels).sum().item()
+
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'acc': f'{100.*train_correct/train_total:.2f}%'
+            })
+
+        train_loss /= len(train_loader)
+        train_acc = 100. * train_correct / train_total
+
+        # Evaluation on training modalities
+        test_loss_train, test_acc_train = evaluate(
+            model, test_loader_full, criterion, device,
+            modality_bands_dict, modalities_to_use=train_modalities
+        )
+
+        # Evaluation on RGB-only
+        test_loss_rgb, test_acc_rgb = evaluate(
+            model, test_loader_full, criterion, device,
+            modality_bands_dict, modalities_to_use=('rgb',)
+        )
+
+        # Evaluation on newmod-only (if requested)
+        test_acc_newmod = None
+        if eval_newmod_only:
+            test_loss_newmod, test_acc_newmod = evaluate(
+                model, test_loader_full, criterion, device,
+                modality_bands_dict, modalities_to_use=(newmod,)
+            )
+
+        # Evaluation on RGB+newmod
+        test_loss_multi, test_acc_multi = evaluate(
+            model, test_loader_full, criterion, device,
+            modality_bands_dict, modalities_to_use=('rgb', newmod)
+        )
+
+        # Print epoch results
+        print(f"\n{phase_name} Epoch {epoch+1}/{num_epochs}:")
+        print(f"  Train ({train_mod_str}):      Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
+        print(f"  Test ({train_mod_str}):       Loss: {test_loss_train:.4f}, Acc: {test_acc_train:.2f}%")
+        print(f"  Test (RGB only):       Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
+        if eval_newmod_only:
+            print(f"  Test ({newmod.upper()} only):        Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
+        print(f"  Test (RGB+{newmod.upper()}):         Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%")
+        if not eval_newmod_only:
+            print(f"  Multi-modal gain:      {test_acc_multi - test_acc_rgb:+.2f}%")
+        print()
+
+    return train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi
+
+
+def supervised_finetune_phase(model, evan, train_loader, test_loader_full, device, args,
+                               newmod, modality_bands_dict, criterion, phase_name="Stage 2",
+                               modality_masking=None):
+    """
+    Supervised fine-tuning for new modality components.
+
+    Trains:
+    - New modality fusion LoRAs
+    - New modality encoding
+    - Classifier(s) (depends on fusion strategy)
+
+    Optionally trains (if train_modality_specific=True):
+    - New modality patch embedder
+    - New modality modality-specific LoRA
+
+    Frozen:
+    - RGB components and shared DINO backbone
+
+    Args:
+        modality_masking: Optional dict mapping modality name to masking probability
+                         (e.g., {'rgb': 0.3, 'vre': 0.2}) for robustness training
+    """
+    print("\n" + "="*70)
+    print(f"=== {phase_name}: Supervised Fine-tuning ===")
+    print("="*70)
+
+    bands_rgb = modality_bands_dict['rgb']
+    bands_newmod = modality_bands_dict[newmod]
+
+    # Freeze everything first
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Unfreeze classifier(s)
+    if model.fusion_strategy == 'mean':
+        for param in model.classifier.parameters():
+            param.requires_grad = True
+        print("  Unfroze: Classifier (mean fusion)")
+    elif model.fusion_strategy == 'ensemble':
+        # Ensure new modality classifier exists
+        if newmod not in model.modality_classifiers:
+            print(f"  Creating {newmod} classifier")
+            model._instantiate_modality_classifier(newmod)
+
+        # Unfreeze new modality classifier
+        for param in model.modality_classifiers[newmod].parameters():
+            param.requires_grad = True
+        print(f"  Unfroze: {newmod.capitalize()} classifier (ensemble mode)")
+
+        # RGB classifier stays frozen
+        if 'rgb' in model.modality_classifiers:
+            for param in model.modality_classifiers['rgb'].parameters():
+                param.requires_grad = False
+            print("  Kept frozen: RGB classifier (ensemble mode)")
+
+    # Unfreeze new modality components (if training all components, not just fusion)
+    train_modality_specific = getattr(args, 'train_modality_specific', True)
+
+    if train_modality_specific:
+        # Patch embedder
+        if newmod in evan.patch_embedders:
+            for param in evan.patch_embedders[newmod].parameters():
+                param.requires_grad = True
+            print(f"  Unfroze: {newmod.capitalize()} patch embedder")
+
+        # Modality-specific layers
+        if newmod in evan.modality_specific_layer_adaptors:
+            for param in evan.modality_specific_layer_adaptors[newmod].parameters():
+                param.requires_grad = True
+            print(f"  Unfroze: {newmod.capitalize()} modality-specific layers")
+
+    # Modality encoding
+    if newmod in evan.modality_encoders:
+        evan.modality_encoders[newmod].requires_grad = True
+        print(f"  Unfroze: {newmod.capitalize()} modality encoding")
+
+    # Fusion LoRAs
+    if newmod in evan.modality_fusion_lora_adaptors:
+        for param in evan.modality_fusion_lora_adaptors[newmod].parameters():
+            param.requires_grad = True
+        print(f"  Unfroze: {newmod.capitalize()} fusion LoRAs")
+
+    # Print parameter info
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\nTrainable parameters for {phase_name}: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
+
+    if trainable_params == 0:
+        raise ValueError("No trainable parameters found! Check that components are being unfrozen correctly.")
+
+    # Create optimizer
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.stage2_lr
+    )
+    num_epochs = args.stage2_ft_epochs
+
+    print(f"\n=== {phase_name} Training for {num_epochs} epochs ===")
+    print(f"Learning rate: {args.stage2_lr}")
+    print(f"Modalities: RGB {bands_rgb} + {newmod.upper()} {bands_newmod}")
+
+    if train_modality_specific:
+        print(f"Training: {newmod.capitalize()} patch embedder, modality-specific LoRAs, modality encoding, fusion LoRAs, classifier")
+        print("Frozen: RGB components and shared DINO backbone")
+    else:
+        print(f"Training: {newmod.capitalize()} modality encoding, fusion LoRAs, classifier")
+        print(f"Frozen: {newmod.upper()} patch embedder, {newmod.upper()} modality-specific LoRAs, RGB components, DINO backbone")
+
+    if model.fusion_strategy == 'ensemble':
+        print(f"Note: In ensemble mode, training loss uses only {newmod} classifier (RGB frozen)")
+        print(f"      Evaluation will ensemble both RGB and {newmod} predictions\n")
+    else:
+        print()
+
+    # Run training loop
+    train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi = supervised_training_loop(
+        model, train_loader, test_loader_full, device,
+        modality_bands_dict, criterion, optimizer, num_epochs,
+        train_modalities=('rgb', newmod), newmod=newmod, phase_name=phase_name,
+        eval_newmod_only=True, modality_masking=modality_masking
+    )
+
+    print(f"\n=== {phase_name} complete ===")
+
+    return optimizer, train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi
 
 
 def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
@@ -430,8 +681,6 @@ if __name__ == '__main__':
     # Resize transform (applied to all datasets)
     resize_transform = DictTransform(transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True))
 
-    # Load all datasets with all bands and resize only (no normalization in dataset)
-    # We'll normalize manually in the training/evaluation loops
     train_dataset_full = EuroSAT(
         root='datasets',
         split='train',
@@ -510,65 +759,16 @@ if __name__ == '__main__':
 
     print(f"\n=== Training for {num_epochs} epochs ===")
     print(f"Strategy: Train on RGB (train1 split), test on both RGB and RGB+{args.new_mod_group}")
-    print("Note: train2 split reserved for future experiments\n")
 
-    # Training loop
-    for epoch in range(num_epochs):
-        # Training on RGB
-        model.train()
-        train_loss = 0.0
-        train_correct = 0
-        train_total = 0
+    # Run Stage 1 training loop (RGB-only training)
+    train_acc, test_acc_rgb, _, test_acc_multi = supervised_training_loop(
+        model, train_loader, test_loader_full, device,
+        modality_bands_dict, criterion, optimizer, num_epochs,
+        train_modalities=('rgb',), newmod=newmod, phase_name="Stage 1",
+        eval_newmod_only=False
+    )
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train RGB]")
-        for batch in pbar:
-            labels = batch['label'].to(device)
-
-            # Normalize RGB data
-            modal_input = create_multimodal_batch(
-                batch, modality_bands_dict=modality_bands_dict, modalities=('rgb',)
-            )
-            modal_input = {k: v.to(device) for k, v in modal_input.items()}
-
-            optimizer.zero_grad()
-            outputs = model(modal_input)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-
-            train_loss += loss.item()
-            _, predicted = outputs.max(1)
-            train_total += labels.size(0)
-            train_correct += predicted.eq(labels).sum().item()
-
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'acc': f'{100.*train_correct/train_total:.2f}%'
-            })
-
-        train_loss /= len(train_loader)
-        train_acc = 100. * train_correct / train_total
-
-        # Evaluation on RGB only
-        test_loss_rgb, test_acc_rgb = evaluate(
-            model, test_loader_full, criterion, device,
-            modality_bands_dict, modalities_to_use=('rgb',)
-        )
-
-        # Evaluation on RGB + new modality
-        test_loss_multi, test_acc_multi = evaluate(
-            model, test_loader_full, criterion, device,
-            modality_bands_dict, modalities_to_use=('rgb', newmod)
-        )
-
-        # Print epoch results
-        print(f"\nEpoch {epoch+1}/{num_epochs}:")
-        print(f"  Train (RGB):           Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
-        print(f"  Test (RGB only):       Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
-        print(f"  Test (RGB+{newmod}):   Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%")
-        print(f"  Multi-modal gain:      {test_acc_multi - test_acc_rgb:+.2f}%\n")
-
-    print("\n=== Training complete ===")
+    print("\n=== Stage 1 Training complete ===")
 
     # Save checkpoint
     checkpoint_dir = 'checkpoints'
@@ -622,140 +822,11 @@ if __name__ == '__main__':
         print(f"\nNote: {newmod.capitalize()} components were already created during stage 1 evaluation")
         print("      Now unfreezing them for training in stage 2")
 
-        # Freeze everything first
-        for param in model.parameters():
-            param.requires_grad = False
-
-        # Unfreeze classifier(s) depending on fusion strategy
-        if model.fusion_strategy == 'mean':
-            for param in model.classifier.parameters():
-                param.requires_grad = True
-            print("  Unfroze: Classifier (mean fusion)")
-        elif model.fusion_strategy == 'ensemble':
-            # In ensemble mode, only unfreeze the new modality classifier
-            # RGB classifier should remain frozen from stage 1
-
-            # Ensure new modality classifier exists (should have been created in stage 1 validation)
-            if newmod not in model.modality_classifiers:
-                print(f"  Creating {newmod} classifier (was not created during stage 1 validation)")
-                model._instantiate_modality_classifier(newmod)
-
-            # Unfreeze new modality classifier
-            for param in model.modality_classifiers[newmod].parameters():
-                param.requires_grad = True
-            print(f"  Unfroze: {newmod.capitalize()} classifier (ensemble mode)")
-
-            # RGB classifier stays frozen
-            if 'rgb' in model.modality_classifiers:
-                for param in model.modality_classifiers['rgb'].parameters():
-                    param.requires_grad = False
-                print("  Kept frozen: RGB classifier (ensemble mode)")
-
-        # Unfreeze new modality components
-        # Patch embedder
-        if newmod in evan.patch_embedders:
-            for param in evan.patch_embedders[newmod].parameters():
-                param.requires_grad = True
-            print(f"  Unfroze: {newmod.capitalize()} patch embedder")
-
-        # Modality-specific layers
-        if newmod in evan.modality_specific_layer_adaptors:
-            for param in evan.modality_specific_layer_adaptors[newmod].parameters():
-                param.requires_grad = True
-            print(f"  Unfroze: {newmod.capitalize()} modality-specific layers")
-
-        # Modality encoding
-        if newmod in evan.modality_encoders:
-            evan.modality_encoders[newmod].requires_grad = True
-            print(f"  Unfroze: {newmod.capitalize()} modality encoding")
-
-        # Fusion LoRAs
-        if newmod in evan.modality_fusion_lora_adaptors:
-            for param in evan.modality_fusion_lora_adaptors[newmod].parameters():
-                param.requires_grad = True
-            print(f"  Unfroze: {newmod.capitalize()} fusion LoRAs")
-
-        # Print parameter info
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in model.parameters())
-        print(f"\nTrainable parameters for stage 2: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
-
-        # Create new optimizer for stage 2
-        optimizer_stage2 = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=args.stage2_lr
+        # Run supervised fine-tuning phase (trains all new modality components)
+        optimizer_stage2, train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi = supervised_finetune_phase(
+            model, evan, train2_loader, test_loader_full, device, args,
+            newmod, modality_bands_dict, criterion, phase_name="Stage 2",modality_masking = {'rgb': 0.5}
         )
-        num_epochs_stage2 = args.stage2_ft_epochs
-
-        print(f"\n=== Stage 2 Training for {num_epochs_stage2} epochs ===")
-        print(f"Learning rate: {args.stage2_lr}")
-        print(f"Modalities: RGB {bands_rgb} + {newmod.upper()} {bands_newmod}")
-        print(f"Training: {newmod.capitalize()} patch embedder, modality-specific LoRAs, modality encoding, fusion LoRAs, classifier")
-        print("Frozen: RGB components and shared DINO backbone")
-        if model.fusion_strategy == 'ensemble':
-            print(f"Note: In ensemble mode, training loss uses only {newmod} classifier (RGB frozen)")
-            print(f"      Evaluation will ensemble both RGB and {newmod} predictions\n")
-        else:
-            print()
-
-        # Stage 2 training loop
-        for epoch in range(num_epochs_stage2):
-            model.train()
-            train_loss = 0.0
-            train_correct = 0
-            train_total = 0
-
-            pbar = tqdm(train2_loader, desc=f"Stage 2 Epoch {epoch+1}/{num_epochs_stage2} [Train RGB+{newmod.upper()}]")
-            for batch_idx, batch in enumerate(pbar):
-                labels = batch['label'].to(device)
-
-                # Create multi-modal input (RGB + new modality)
-                multimodal_input = create_multimodal_batch(
-                    batch, modality_bands_dict=modality_bands_dict, modalities=('rgb', newmod)
-                )
-                multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
-
-                optimizer_stage2.zero_grad()
-                outputs = model(multimodal_input)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer_stage2.step()
-
-                train_loss += loss.item()
-                _, predicted = outputs.max(1)
-                train_total += labels.size(0)
-                train_correct += predicted.eq(labels).sum().item()
-
-                pbar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'acc': f'{100.*train_correct/train_total:.2f}%'
-                })
-
-            train_loss /= len(train2_loader)
-            train_acc = 100. * train_correct / train_total
-
-            # Evaluation on RGB-only, newmod-only, and RGB+newmod
-            test_loss_rgb, test_acc_rgb = evaluate(
-                model, test_loader_full, criterion, device,
-                modality_bands_dict, modalities_to_use=('rgb',)
-            )
-            test_loss_newmod, test_acc_newmod = evaluate(
-                model, test_loader_full, criterion, device,
-                modality_bands_dict, modalities_to_use=(newmod,)
-            )
-            test_loss_multi, test_acc_multi = evaluate(
-                model, test_loader_full, criterion, device,
-                modality_bands_dict, modalities_to_use=('rgb', newmod)
-            )
-
-            # Print epoch results
-            print(f"\nStage 2 Epoch {epoch+1}/{num_epochs_stage2}:")
-            print(f"  Train (RGB+{newmod.upper()}, train2):  Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
-            print(f"  Test (RGB only):         Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
-            print(f"  Test ({newmod.upper()} only):          Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
-            print(f"  Test (RGB+{newmod.upper()}):           Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%\n")
-
-        print("\n=== Stage 2 Training complete ===")
 
         # Save stage 2 checkpoint
         timestamp_stage2 = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -764,7 +835,7 @@ if __name__ == '__main__':
         checkpoint_stage2 = {
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer_stage2.state_dict(),
-            'epoch': num_epochs_stage2,
+            'epoch': args.stage2_ft_epochs,
             'train_acc': train_acc,
             'test_acc_rgb': test_acc_rgb,
             'test_acc_newmod': test_acc_newmod,
@@ -779,7 +850,7 @@ if __name__ == '__main__':
                 'bands_rgb': bands_rgb,
                 'bands_newmod': bands_newmod,
                 'newmod': newmod,
-                'num_epochs': num_epochs_stage2,
+                'num_epochs': args.stage2_ft_epochs,
                 'batch_size': args.batch_size,
                 'learning_rate': args.stage2_lr,
             }
@@ -802,122 +873,15 @@ if __name__ == '__main__':
             bands_newmod, newmod
         )
 
-        # Phase 2b: Supervised fine-tuning
-        print("\n" + "="*70)
-        print("=== PHASE 2b: Supervised Fine-tuning ===")
-        print("="*70)
-
-        # Freeze everything first
-        for param in model.parameters():
-            param.requires_grad = False
-
-        # Unfreeze classifier(s)
-        if model.fusion_strategy == 'mean':
-            for param in model.classifier.parameters():
-                param.requires_grad = True
-            print("  Unfroze: Classifier (mean fusion)")
-        elif model.fusion_strategy == 'ensemble':
-            # Ensure new modality classifier exists
-            if newmod not in model.modality_classifiers:
-                print(f"  Creating {newmod} classifier")
-                model._instantiate_modality_classifier(newmod)
-
-            # Unfreeze new modality classifier
-            for param in model.modality_classifiers[newmod].parameters():
-                param.requires_grad = True
-            print(f"  Unfroze: {newmod.capitalize()} classifier (ensemble mode)")
-
-        # Unfreeze new modality fusion LoRA and modality encoding
-        if newmod in evan.modality_encoders:
-            evan.modality_encoders[newmod].requires_grad = True
-            print(f"  Unfroze: {newmod.capitalize()} modality encoding")
-
-        if newmod in evan.modality_fusion_lora_adaptors:
-            for param in evan.modality_fusion_lora_adaptors[newmod].parameters():
-                param.requires_grad = True
-            print(f"  Unfroze: {newmod.capitalize()} fusion LoRAs")
-
-        # Print parameter info
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in model.parameters())
-        print(f"\nTrainable parameters for Phase 2b: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
-
-        if trainable_params == 0:
-            raise ValueError("No trainable parameters found! Check that components are being unfrozen correctly.")
-
-        # Create optimizer for Phase 2b
-        optimizer_phase2b = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=args.stage2_lr
+        # Phase 2b: Supervised fine-tuning (fusion layers + classifier only, modality-specific frozen)
+        # Temporarily set flag to NOT train modality-specific components (they were trained in MAE phase)
+        args.train_modality_specific = False
+        optimizer_phase2b, train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi = supervised_finetune_phase(
+            model, evan, train2_loader, test_loader_full, device, args,
+            newmod, modality_bands_dict, criterion, phase_name="Phase 2b"
         )
-        num_epochs_phase2b = args.stage2_ft_epochs
-
-        print(f"\n=== Phase 2b Training for {num_epochs_phase2b} epochs ===")
-        print(f"Learning rate: {args.stage2_lr}")
-        print(f"Modalities: RGB {bands_rgb} + {newmod.upper()} {bands_newmod}")
-        print(f"Training: {newmod.capitalize()} modality encoding, fusion LoRAs, classifier")
-        print(f"Frozen: {newmod.upper()} patch embedder, {newmod.upper()} modality-specific LoRAs, RGB components, DINO backbone")
-        print(f"Model processes multi-modal input by {model.fusion_strategy}")
-
-        # Phase 2b training loop
-        for epoch in range(num_epochs_phase2b):
-            model.train()
-            train_loss = 0.0
-            train_correct = 0
-            train_total = 0
-
-            pbar = tqdm(train2_loader, desc=f"Phase 2b Epoch {epoch+1}/{num_epochs_phase2b} [Train RGB+{newmod.upper()}]")
-            for batch in pbar:
-                labels = batch['label'].to(device)
-
-                # Create multi-modal input (RGB + new modality)
-                multimodal_input = create_multimodal_batch(
-                    batch, modality_bands_dict=modality_bands_dict, modalities=('rgb', newmod)
-                )
-                multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
-
-                optimizer_phase2b.zero_grad()
-                # In ensemble mode, train only on new modality predictions
-                outputs = model(multimodal_input)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer_phase2b.step()
-
-                train_loss += loss.item()
-                _, predicted = outputs.max(1)
-                train_total += labels.size(0)
-                train_correct += predicted.eq(labels).sum().item()
-
-                pbar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'acc': f'{100.*train_correct/train_total:.2f}%'
-                })
-
-            train_loss /= len(train2_loader)
-            train_acc = 100. * train_correct / train_total
-
-            # Evaluation on RGB-only, newmod-only, and RGB+newmod
-            test_loss_rgb, test_acc_rgb = evaluate(
-                model, test_loader_full, criterion, device,
-                modality_bands_dict, modalities_to_use=('rgb',)
-            )
-            test_loss_newmod, test_acc_newmod = evaluate(
-                model, test_loader_full, criterion, device,
-                modality_bands_dict, modalities_to_use=(newmod,)
-            )
-            test_loss_multi, test_acc_multi = evaluate(
-                model, test_loader_full, criterion, device,
-                modality_bands_dict, modalities_to_use=('rgb', newmod)
-            )
-
-            # Print epoch results
-            print(f"\nPhase 2b Epoch {epoch+1}/{num_epochs_phase2b}:")
-            print(f"  Train (RGB+{newmod.upper()}, train2):  Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
-            print(f"  Test (RGB only):         Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
-            print(f"  Test ({newmod.upper()} only):          Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
-            print(f"  Test (RGB+{newmod.upper()}):           Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%\n")
-
-        print("\n=== Phase 2b (Supervised Fine-tuning) complete ===")
+        # Restore flag to default
+        args.train_modality_specific = True
 
         # Save stage 2 checkpoint
         timestamp_stage2 = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -926,7 +890,7 @@ if __name__ == '__main__':
         checkpoint_stage2 = {
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer_phase2b.state_dict(),
-            'epoch': num_epochs_phase2b,
+            'epoch': args.stage2_ft_epochs,
             'train_acc': train_acc,
             'test_acc_rgb': test_acc_rgb,
             'test_acc_newmod': test_acc_newmod,
@@ -943,7 +907,7 @@ if __name__ == '__main__':
                 'bands_rgb': bands_rgb,
                 'bands_newmod': bands_newmod,
                 'newmod': newmod,
-                'num_epochs': num_epochs_phase2b,
+                'num_epochs': args.stage2_ft_epochs,
                 'batch_size': args.batch_size,
                 'learning_rate': args.stage2_lr,
             }

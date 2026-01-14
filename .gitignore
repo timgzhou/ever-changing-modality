@@ -213,3 +213,4 @@ eval_results
 logs
 references
 *.sh
+ignore

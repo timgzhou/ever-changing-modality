@@ -35,7 +35,6 @@ MODALITY_BANDS = {
     'swir': SWIR_BAND_NAMES,
 }
 
-
 def get_modality_bands_dict(*modality_keys):
     """
     Get a dictionary of modality keys to their band tuples.
