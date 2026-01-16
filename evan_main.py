@@ -101,7 +101,6 @@ class EVAN(nn.Module):
             flatten_embedding=False,
         )
         self.patch_embedders['rgb'] = rgb_embedder
-        # Note: DINO weight loading compatibility handled by key remapping in load_pretrained_dino()
 
 
         self.cls_token = nn.Parameter(torch.empty(1, 1, embed_dim, device=device))
@@ -728,6 +727,184 @@ class EVAN(nn.Module):
             embedded_modalities[modality_key] = x_mod
 
         return embedded_modalities
+
+    def forward_features_masked_multimodal(
+        self,
+        x: Dict[str, Tensor],
+        mask_info: Dict[str, Dict]
+    ) -> Tuple[Dict[str, Tensor], Dict[str, Dict]]:
+        """
+        Forward with token masking through fusion layers for multi-modal MAE training.
+
+        This method:
+        1. Embeds each modality and applies token-level masking (keeps only unmasked tokens)
+        2. Processes through modality-specific layers with LoRAs
+        3. Adds modality encoding
+        4. Concatenates unmasked patches for cross-modal attention in fusion
+        5. Processes through fusion layers with fusion LoRAs
+        6. Splits back to per-modality and inserts mask tokens for decoder
+
+        Args:
+            x: Dict of modality tensors {modality_name: [B, C, H, W]}
+            mask_info: Dict from MultiModalMaskingStrategy, containing per-modality:
+                       {'present': bool, 'ids_keep': Tensor, 'mask': Tensor, 'ids_restore': Tensor}
+
+        Returns:
+            Tuple of:
+            - features: Dict[modality] -> [B, num_patches, embed_dim] with mask tokens inserted
+            - recon_info: Dict[modality] -> {'mask': Tensor, 'ids_restore': Tensor, ...}
+        """
+        if not isinstance(x, dict) or len(x) == 0:
+            raise ValueError("Input must be a non-empty dict of modalities")
+
+        embedded_modalities = {}
+        reconstruction_info = {}
+        hw_tuples = {}
+
+        B = list(x.values())[0].shape[0]
+        D = self.embed_dim
+
+        # Step 1: Embed each modality and apply token masking
+        for modality_key, modality_tensor in x.items():
+            mod_mask_info = mask_info.get(modality_key, {})
+            if not mod_mask_info.get('present', True):
+                continue
+
+            if modality_key not in self.patch_embedders:
+                in_chans = modality_tensor.shape[1]
+                self._create_modality_components(modality_key, in_chans)
+
+            # Embed patches
+            embedder = self.patch_embedders[modality_key]
+            x_emb = embedder(modality_tensor)  # [B, H, W, embed_dim]
+            _, H, W, _ = x_emb.shape
+            x_emb = x_emb.flatten(1, 2)  # [B, num_patches, embed_dim]
+            num_patches = x_emb.shape[1]
+
+            hw_tuples[modality_key] = (H, W)
+
+            # Get masking info
+            ids_keep = mod_mask_info['ids_keep']  # [B, num_keep]
+            mask = mod_mask_info['mask']          # [B, num_patches] True=masked
+            ids_restore = mod_mask_info['ids_restore']
+
+            # Gather unmasked patches only
+            num_keep = ids_keep.shape[1]
+            x_unmasked = torch.gather(
+                x_emb, dim=1,
+                index=ids_keep.unsqueeze(-1).expand(-1, -1, D)
+            )  # [B, num_keep, embed_dim]
+
+            # Prepend CLS and storage tokens
+            cls_token = self.cls_token.expand(B, -1, -1)
+            if self.n_storage_tokens > 0:
+                storage_tokens = self.storage_tokens.expand(B, -1, -1)
+                x_with_special = torch.cat([cls_token, storage_tokens, x_unmasked], dim=1)
+            else:
+                x_with_special = torch.cat([cls_token, x_unmasked], dim=1)
+
+            embedded_modalities[modality_key] = x_with_special
+            reconstruction_info[modality_key] = {
+                'mask': mask,
+                'ids_restore': ids_restore,
+                'num_patches': num_patches,
+                'num_keep': num_keep,
+                'H': H, 'W': W
+            }
+
+        # Step 2: Process through modality-specific layers
+        for modality_key, x_mod in embedded_modalities.items():
+            H, W = hw_tuples[modality_key]
+
+            for i in range(self.tz_fusion_time):
+                if self.rope_embed is not None:
+                    # Note: RoPE is computed for full image size, subset is used for unmasked patches
+                    rope_sincos = self.rope_embed(H=H, W=W)
+                else:
+                    rope_sincos = None
+
+                if self.tz_modality_specific_layer_augmenter == "lora":
+                    x_mod = self.blocks[i](x_mod, rope_sincos)
+                    lora = self.modality_specific_layer_adaptors[modality_key][i]
+                    x_mod = x_mod + lora(x_mod)
+                elif self.tz_modality_specific_layer_augmenter == "fft":
+                    adaptor = self.modality_specific_layer_adaptors[modality_key][i]
+                    x_mod = adaptor(x_mod, rope_sincos)
+
+            # Add modality encoding
+            modality_encoding = self.modality_encoders[modality_key]
+            x_mod = x_mod + modality_encoding
+
+            embedded_modalities[modality_key] = x_mod
+
+        # Step 3: Concatenate patches for fusion (cross-modal attention on UNMASKED tokens)
+        all_patches = []
+        patch_ranges = {}
+        current_idx = 0
+        n_special = self.n_storage_tokens + 1  # CLS + storage tokens
+
+        modality_order = sorted(embedded_modalities.keys())
+        for modality_key in modality_order:
+            x_mod = embedded_modalities[modality_key]
+            # Extract patches (skip CLS + storage)
+            patches = x_mod[:, n_special:, :]
+            num_patches = patches.shape[1]
+
+            patch_ranges[modality_key] = (current_idx, current_idx + num_patches)
+            all_patches.append(patches)
+            current_idx += num_patches
+
+        # Use CLS/storage from first modality
+        first_mod = modality_order[0]
+        cls_storage = embedded_modalities[first_mod][:, :n_special, :]
+
+        x_concat = torch.cat([cls_storage] + all_patches, dim=1)
+
+        # Step 4: Process through fusion layers
+        H = W = self.img_size // self.patch_size
+
+        for i in range(self.tz_fusion_time, len(self.blocks)):
+            if self.rope_embed is not None:
+                rope_sincos = self.rope_embed(H=H, W=W)
+            else:
+                rope_sincos = None
+
+            x_concat = self.blocks[i](x_concat, rope_sincos)
+
+            # Sum fusion LoRAs from all present modalities
+            lora_idx = i - self.tz_fusion_time
+            lora_out = sum(
+                self.modality_fusion_lora_adaptors[mod][lora_idx](x_concat)
+                for mod in embedded_modalities.keys()
+                if mod in self.modality_fusion_lora_adaptors
+            )
+            x_concat = x_concat + lora_out
+
+        # Step 5: Split back and insert mask tokens for decoder
+        fused_patches = x_concat[:, n_special:, :]
+
+        output_features = {}
+        for modality_key in modality_order:
+            start, end = patch_ranges[modality_key]
+            mod_patches = fused_patches[:, start:end, :]  # [B, num_keep, D]
+
+            # Insert mask tokens at masked positions
+            info = reconstruction_info[modality_key]
+            num_keep = info['num_keep']
+            num_total = info['num_patches']
+
+            # Create full sequence with mask tokens
+            # Use a learnable mask token (we'll use zeros as placeholder, decoder has its own)
+            mask_tokens = torch.zeros(B, num_total - num_keep, D, device=mod_patches.device)
+            x_full = torch.cat([mod_patches, mask_tokens], dim=1)
+
+            # Unshuffle to restore original spatial order
+            ids_restore = info['ids_restore']
+            x_full = torch.gather(x_full, dim=1, index=ids_restore.unsqueeze(-1).expand(-1, -1, D))
+
+            output_features[modality_key] = x_full
+
+        return output_features, reconstruction_info
 
     def forward(self, *args, is_training: bool = False, **kwargs) -> Dict[str, Dict[str, Tensor]] | Dict[str, Tensor] | Tensor:
         raise NotImplementedError("Why are you calling me?")

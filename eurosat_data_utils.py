@@ -21,7 +21,7 @@ VRE_BAND_NAMES = [
     'B05', 'B06', 'B07'
 ]
 NIR_BAND_NAMES = [
-    'B09', 'B10'
+    'B08', 'B08A'
 ]
 SWIR_BAND_NAMES = [
     'B11', 'B12'
