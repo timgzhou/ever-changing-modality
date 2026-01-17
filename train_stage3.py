@@ -163,7 +163,7 @@ def main():
     )
 
     # Create classifier
-    model = EVANClassifier(evan, num_classes=config['num_classes'], fusion_strategy=config['fusion_strategy'], device=device)
+    model = EVANClassifier(evan, num_classes=config['num_classes'], classifier_strategy=config['fusion_strategy'], device=device)
     model = model.to(device)
 
     # For ensemble mode, pre-instantiate RGB classifier before loading state dict
@@ -175,7 +175,7 @@ def main():
     num_newmod_channels = len(bands_newmod)
     if newmod not in evan.patch_embedders:
         print(f"  Creating {newmod} modality components...")
-        evan._create_modality_components(newmod, num_newmod_channels)
+        evan.create_modality_components(newmod, num_newmod_channels)
 
     # Load state dict from checkpoint - this loads the MAE-trained components
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)

@@ -26,6 +26,9 @@ NIR_BAND_NAMES = [
 SWIR_BAND_NAMES = [
     'B11', 'B12'
 ]
+AW_BAND_NAMES = [
+    'B01', 'B09'
+]
 
 # Modality group key to band names mapping
 MODALITY_BANDS = {
@@ -33,6 +36,7 @@ MODALITY_BANDS = {
     'vre': VRE_BAND_NAMES,
     'nir': NIR_BAND_NAMES,
     'swir': SWIR_BAND_NAMES,
+    'aw': AW_BAND_NAMES
 }
 
 def get_modality_bands_dict(*modality_keys):

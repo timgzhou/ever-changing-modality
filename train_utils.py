@@ -234,13 +234,112 @@ def evaluate_mae_reconstruction(model, evan, mae_decoder, dataloader, device,
     return total_loss / count
 
 
+def single_modality_training_loop(model, train_loader, test_loader, device,
+                                   modality_bands_dict, criterion, optimizer, num_epochs,
+                                   modality, phase_name="Training",
+                                   use_wandb=False, wandb_prefix=None, clip_norm=float('inf')):
+    """
+    Simple training loop for single-modality EVAN training (Stage 0).
+
+    Args:
+        model: EVAN classifier
+        train_loader: Training dataloader
+        test_loader: Test dataloader
+        device: torch device
+        modality_bands_dict: Dict mapping modality name to band tuple
+        criterion: Loss function
+        optimizer: Optimizer
+        num_epochs: Number of epochs to train
+        modality: Single modality name to train and evaluate on
+        phase_name: Name of this training phase for logging
+        use_wandb: Whether to log to wandb
+        wandb_prefix: Prefix for wandb metrics
+
+    Returns:
+        Tuple of (train_acc, test_acc)
+    """
+    mod_str = modality.upper()
+    global_step = 0
+    best_test_acc = 0
+    best_epoch = 0
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+
+        pbar = tqdm(train_loader, desc=f"{phase_name} Epoch {epoch+1}/{num_epochs} [{mod_str}]")
+        for batch in pbar:
+            labels = batch['label'].to(device)
+
+            modal_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict, modalities=(modality,)
+            )
+            modal_input = {k: v.to(device) for k, v in modal_input.items()}
+
+            optimizer.zero_grad()
+            outputs = model(modal_input)
+            loss = criterion(outputs, labels)
+            loss.backward()
+
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=clip_norm)
+
+            optimizer.step()
+
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            train_total += labels.size(0)
+            train_correct += predicted.eq(labels).sum().item()
+            global_step += 1
+
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'acc': f'{100.*train_correct/train_total:.2f}%',
+                'grad_norm': f'{grad_norm:.4f}'
+            })
+
+            if use_wandb and wandb_prefix:
+                wandb.log({
+                    f'{wandb_prefix}/train_loss': loss.item(),
+                    f'{wandb_prefix}/grad_norm': grad_norm.item(),
+                    f'{wandb_prefix}/step': global_step,
+                })
+
+        train_loss /= len(train_loader)
+        train_acc = 100. * train_correct / train_total
+
+        # Evaluate on same modality
+        test_loss, test_acc = evaluate(
+            model, test_loader, criterion, device,
+            modality_bands_dict, modalities_to_use=(modality,)
+        )
+        if (epoch%8==1) or (epoch+1==num_epochs):
+            print(f"  Train ({mod_str}): Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
+            print(f"  Test ({mod_str}):  Loss: {test_loss:.4f}, Acc: {test_acc:.2f}% (epoch {epoch+1}/{num_epochs})")
+        if test_acc > best_test_acc:
+            print(f"    New record: {test_acc:.2f}> previous {best_test_acc:.2f} at epoch {epoch+1}")
+            best_test_acc=test_acc
+            best_epoch=epoch+1
+        if use_wandb and wandb_prefix:
+            wandb.log({
+                f'{wandb_prefix}/train_loss_epoch': train_loss,
+                f'{wandb_prefix}/train_acc': train_acc,
+                f'{wandb_prefix}/eval_loss': test_loss,
+                f'{wandb_prefix}/eval_acc': test_acc,
+                f'{wandb_prefix}/epoch': epoch + 1,
+            })
+
+    return train_acc, test_acc, best_test_acc, best_epoch
+
+
 def supervised_training_loop(model, train_loader, test_loader_full, device,
                              modality_bands_dict, criterion, optimizer, num_epochs,
-                             train_modalities, newmod, phase_name="Training",
-                             eval_newmod_only=True, modality_masking=None,
+                             train_modalities, newmod=None, phase_name="Training",
+                             modality_masking=None,
                              use_wandb=False, wandb_prefix=None, freeze_rgb=False):
     """
-    General supervised training loop for EVAN.
+    General supervised training loop for EVAN with multi-modal support.
 
     Args:
         model: EVAN classifier
@@ -254,7 +353,6 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
         train_modalities: Tuple of modality names to use for training (e.g., ('rgb',) or ('rgb', 'vre'))
         newmod: Name of the new modality (for logging)
         phase_name: Name of this training phase for logging
-        eval_newmod_only: Whether to evaluate on newmod-only (False for Stage 1)
         modality_masking: Optional dict mapping modality name to masking probability (e.g., {'rgb': 0.3, 'vre': 0.2})
                          During training, one modality is randomly masked out per batch based on these probabilities.
 
@@ -352,29 +450,29 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
             modality_bands_dict, modalities_to_use=('rgb',)
         )
 
-        # Evaluation on newmod-only (if requested)
         test_acc_newmod = None
-        if eval_newmod_only:
+        if newmod:
             test_loss_newmod, test_acc_newmod = evaluate(
                 model, test_loader_full, criterion, device,
                 modality_bands_dict, modalities_to_use=(newmod,)
             )
 
         # Evaluation on RGB+newmod
-        test_loss_multi, test_acc_multi = evaluate(
-            model, test_loader_full, criterion, device,
-            modality_bands_dict, modalities_to_use=('rgb', newmod)
-        )
+        if newmod:
+            test_loss_multi, test_acc_multi = evaluate(
+                model, test_loader_full, criterion, device,
+                modality_bands_dict, modalities_to_use=('rgb', newmod)
+            )
 
         # Print epoch results
         print(f"\n{phase_name} Epoch {epoch+1}/{num_epochs}:")
         print(f"  Train ({train_mod_str}):      Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
         print(f"  Test ({train_mod_str}):       Loss: {test_loss_train:.4f}, Acc: {test_acc_train:.2f}%")
         print(f"  Test (RGB only):       Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
-        if eval_newmod_only:
+        if newmod:
             print(f"  Test ({newmod.upper()} only):        Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
         print(f"  Test (RGB+{newmod.upper()}):         Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%")
-        if not eval_newmod_only:
+        if newmod:
             print(f"  Multi-modal gain:      {test_acc_multi - test_acc_rgb:+.2f}%")
         print()
 
@@ -388,7 +486,7 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
                 f'{wandb_prefix}/eval_acc_multi': test_acc_multi,
                 f'{wandb_prefix}/epoch': epoch + 1,
             }
-            if eval_newmod_only:
+            if newmod:
                 log_dict[f'{wandb_prefix}/eval_loss_newmod'] = test_loss_newmod
                 log_dict[f'{wandb_prefix}/eval_acc_newmod'] = test_acc_newmod
             wandb.log(log_dict)

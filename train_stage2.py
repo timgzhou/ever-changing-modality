@@ -139,7 +139,7 @@ def main():
     )
 
     # Create classifier
-    model = EVANClassifier(evan, num_classes=config['num_classes'], fusion_strategy=config['fusion_strategy'], device=device)
+    model = EVANClassifier(evan, num_classes=config['num_classes'], classifier_strategy=config['fusion_strategy'], device=device)
     model = model.to(device)
 
     # For ensemble mode, pre-instantiate RGB classifier before loading state dict

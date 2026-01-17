@@ -91,7 +91,6 @@ class EVAN(nn.Module):
         self.tz_lora_rank = tz_lora_rank
         self.tz_modality_specific_layer_augmenter = tz_modality_specific_layer_augmenter
 
-        # Multi-modality support: Initialize patch embedders dict with 'rgb' for DINO compatibility
         self.patch_embedders = nn.ModuleDict()
         rgb_embedder = PatchEmbed(
             img_size=img_size,
@@ -102,19 +101,13 @@ class EVAN(nn.Module):
         )
         self.patch_embedders['rgb'] = rgb_embedder
 
-
-        self.cls_token = nn.Parameter(torch.empty(1, 1, embed_dim, device=device))
+        # Per-modality CLS and storage tokens
         self.n_storage_tokens = n_storage_tokens
+        self.cls_tokens = nn.ParameterDict()
+        self.cls_tokens['rgb'] = nn.Parameter(torch.empty(1, 1, embed_dim, device=device))
+        self.storage_tokens = nn.ParameterDict()
         if self.n_storage_tokens > 0:
-            self.storage_tokens = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim, device=device))
-        logger.info(f"using base={pos_embed_rope_base} for rope new")
-        logger.info(f"using min_period={pos_embed_rope_min_period} for rope new")
-        logger.info(f"using max_period={pos_embed_rope_max_period} for rope new")
-        logger.info(f"using normalize_coords={pos_embed_rope_normalize_coords} for rope new")
-        logger.info(f"using shift_coords={pos_embed_rope_shift_coords} for rope new")
-        logger.info(f"using rescale_coords={pos_embed_rope_rescale_coords} for rope new")
-        logger.info(f"using jitter_coords={pos_embed_rope_jitter_coords} for rope new")
-        logger.info(f"using dtype={pos_embed_rope_dtype} for rope new")
+            self.storage_tokens['rgb'] = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim, device=device))
         self.rope_embed = RopePositionEmbedding(
             embed_dim=embed_dim,
             num_heads=num_heads,
@@ -165,8 +158,6 @@ class EVAN(nn.Module):
 
         self.untie_global_and_local_cls_norm = untie_global_and_local_cls_norm
         if untie_global_and_local_cls_norm:
-            # When untying, this norm is applied to local CLS tokens and registers.
-            # This norm is never used during eval.
             self.local_cls_norm = norm_layer_cls(embed_dim)
         else:
             self.local_cls_norm = None
@@ -243,10 +234,10 @@ class EVAN(nn.Module):
         for key, value in hf_checkpoint.items():
             new_key = key
 
-            # Embeddings mapping
-            new_key = new_key.replace('embeddings.cls_token', 'cls_token')
+            # Embeddings mapping (map to RGB modality-specific tokens)
+            new_key = new_key.replace('embeddings.cls_token', 'cls_tokens.rgb')
             new_key = new_key.replace('embeddings.mask_token', 'mask_token')
-            new_key = new_key.replace('embeddings.register_tokens', 'storage_tokens')
+            new_key = new_key.replace('embeddings.register_tokens', 'storage_tokens.rgb')
             new_key = new_key.replace('embeddings.patch_embeddings.weight', 'patch_embed.proj.weight')
             new_key = new_key.replace('embeddings.patch_embeddings.bias', 'patch_embed.proj.bias')
 
@@ -254,8 +245,8 @@ class EVAN(nn.Module):
             # HF mask_token: [1, 1, D] -> DINOv3: [1, D]
             if 'mask_token' in new_key and value.ndim == 3:
                 value = value.squeeze(1)
-            # HF cls_token: [1, D] -> DINOv3: [1, 1, D]
-            elif 'cls_token' in new_key and value.ndim == 2:
+            # HF cls_token: [1, D] -> EVAN: [1, 1, D]
+            elif 'cls_tokens' in new_key and value.ndim == 2:
                 value = value.unsqueeze(1)
 
             # Layer mapping: layer.X -> blocks.X
@@ -276,6 +267,9 @@ class EVAN(nn.Module):
             # LayerScale mapping
             new_key = new_key.replace('.layer_scale1.lambda1', '.ls1.gamma')
             new_key = new_key.replace('.layer_scale2.lambda1', '.ls2.gamma')
+
+            # EVAN multi-modality compatibility: Remap patch_embed.* to patch_embedders.rgb.*
+            new_key = new_key.replace('patch_embed.', 'patch_embedders.rgb.')
 
             checkpoint[new_key] = value
 
@@ -321,22 +315,8 @@ class EVAN(nn.Module):
         # Count transferred parameters
         transferred_params = sum(p.numel() for p in checkpoint.values())
         checkpoint_params = transferred_params - created_params  # Actual params from checkpoint
-        print(f"  Transferred parameters: {transferred_params:,}")
         print(f"    - From checkpoint: {checkpoint_params:,}")
         print(f"    - Created (K bias zeros): {created_params:,}")
-        print(f"  Transfer ratio: {100 * checkpoint_params / original_params:.2f}%")
-
-        # EVAN multi-modality compatibility: Remap patch_embed.* to patch_embedders.rgb.*
-        # This allows EVAN's multi-modality architecture to load DINO weights correctly
-        checkpoint_remapped = {}
-        for key, value in checkpoint.items():
-            if key.startswith('patch_embed.'):
-                # Remap: patch_embed.* -> patch_embedders.rgb.*
-                new_key = key.replace('patch_embed.', 'patch_embedders.rgb.')
-                checkpoint_remapped[new_key] = value
-            else:
-                checkpoint_remapped[key] = value
-        checkpoint = checkpoint_remapped
 
         # For FFT mode: Copy first tz_fusion_time blocks to RGB modality-specific layers
         if self.tz_modality_specific_layer_augmenter == "fft":
@@ -378,9 +358,9 @@ class EVAN(nn.Module):
                 for k in expected_missing
                 if k in self.state_dict()
             )
-            print(f"  Expected missing keys (in EVAN but not in DINO): {len(expected_missing)}")
-            print(f"    Keys: {expected_missing}")
-            print(f"    Parameters: {expected_missing_params:,}")
+            # print(f"  Expected missing keys (in EVAN but not in DINO): {len(expected_missing)}")
+            # print(f"    Keys: {expected_missing}")
+            # print(f"    Parameters: {expected_missing_params:,}")
 
         if len(unexpected_missing) > 0:
             unexpected_missing_params = sum(
@@ -406,7 +386,7 @@ class EVAN(nn.Module):
         print("\nWeights loaded successfully!")
         print("=== DINO weight loading complete ===\n")
 
-    def _create_modality_components(self, modality_key: str, in_chans: int):
+    def create_modality_components(self, modality_key: str, in_chans: int):
         """
         Create embedder, LoRAs, and encoding for a new modality.
 
@@ -440,7 +420,6 @@ class EVAN(nn.Module):
             # FFT mode: copy first tz_fusion_time transformer blocks from DINO
             adaptor_list = nn.ModuleList()
             for i in range(self.tz_fusion_time):
-                # Deep copy the block to create an independent copy
                 import copy
                 block_copy = copy.deepcopy(self.blocks[i])
                 if self.device is not None:
@@ -451,23 +430,26 @@ class EVAN(nn.Module):
 
         self.modality_specific_layer_adaptors[modality_key] = adaptor_list
 
-        # 3. Create modality encoding (per-token embedding)
+        # 3. Create modality-specific CLS token (initialized from RGB)
+        self.cls_tokens[modality_key] = nn.Parameter(self.cls_tokens['rgb'].data.clone())
+
+        # 4. Create modality-specific storage tokens (initialized from RGB)
+        if self.n_storage_tokens > 0:
+            self.storage_tokens[modality_key] = nn.Parameter(self.storage_tokens['rgb'].data.clone())
+
+        # 5. Create modality encoding (per-token embedding)
         modality_encoding = nn.Parameter(
             torch.zeros(1, 1, self.embed_dim, device=self.device)
         )
         self.modality_encoders[modality_key] = modality_encoding
 
-        # 4. Create fusion LoRAs (for remaining blocks after tz_fusion_time)
+        # 6. Create fusion LoRAs (for remaining blocks after tz_fusion_time)
         num_fusion_blocks = len(self.blocks) - self.tz_fusion_time
         fusion_lora_list = nn.ModuleList([
             LoRALayer(self.embed_dim, rank=self.tz_lora_rank, device=self.device)
             for _ in range(num_fusion_blocks)
         ])
         self.modality_fusion_lora_adaptors[modality_key] = fusion_lora_list
-
-        # 5. Freeze shared components, allow new components to train
-        for param in self.blocks.parameters():
-            param.requires_grad = False
 
         # Count new parameters
         params_after = sum(p.numel() for p in self.parameters())
@@ -476,47 +458,48 @@ class EVAN(nn.Module):
         # Verbose logging
         embedder_params = sum(p.numel() for p in embedder.parameters())
         adaptor_params = sum(p.numel() for p in adaptor_list.parameters())
+        cls_token_params = self.cls_tokens[modality_key].numel()
+        storage_token_params = self.storage_tokens[modality_key].numel() if self.n_storage_tokens > 0 else 0
         encoding_params = modality_encoding.numel()
         fusion_lora_params = sum(p.numel() for p in fusion_lora_list.parameters())
 
         adaptor_type = "LoRAs" if self.tz_modality_specific_layer_augmenter == "lora" else "FFT blocks"
-        logger.info(f"✨ Initialized new modality: '{modality_key}'")
+        logger.info(f"Initialized new modality: '{modality_key}'")
         logger.info(f"   - Input channels: {in_chans}")
         logger.info(f"   - Augmenter mode: {self.tz_modality_specific_layer_augmenter}")
         logger.info(f"   - Components created:")
         logger.info(f"     • Patch embedder: {embedder_params:,} params")
         logger.info(f"     • Modality-specific {adaptor_type} ({self.tz_fusion_time} blocks): {adaptor_params:,} params")
+        logger.info(f"     • CLS token: {cls_token_params:,} params")
+        logger.info(f"     • Storage tokens: {storage_token_params:,} params")
         logger.info(f"     • Modality encoding: {encoding_params:,} params")
         logger.info(f"     • Fusion LoRAs ({num_fusion_blocks} blocks): {fusion_lora_params:,} params")
         logger.info(f"   - Total new parameters: {new_params:,}")
-        logger.info(f"   - Shared blocks frozen: ✓")
 
-    def prepare_tokens_with_masks(self, x: Tensor, embedder: nn.Module = None, masks=None) -> Tuple[Tensor, Tuple[int]]:
+    def prepare_tokens_with_masks(self, x: Tensor, modality_key: str, masks=None) -> Tuple[Tensor, Tuple[int]]:
         """
         Prepare tokens with optional masks and modality-specific embedder.
 
         Args:
             x: Input tensor
-            embedder: Optional patch embedder (defaults to self.patch_embed for backward compatibility)
+            modality_key: Key identifying which modality's embedder and CLS/storage tokens to use
             masks: Optional mask tensor
 
         Returns:
             Tuple of (tokens with CLS and storage prepended, (H, W) spatial dimensions)
         """
-        if embedder is None:
-            embedder = self.patch_embed
-
+        embedder = self.patch_embedders[modality_key]
         x = embedder(x)
         B, H, W, _ = x.shape
         x = x.flatten(1, 2)
 
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
-            cls_token = self.cls_token
+            cls_token = self.cls_tokens[modality_key]
         else:
-            cls_token = self.cls_token + 0 * self.mask_token
+            cls_token = self.cls_tokens[modality_key] + 0 * self.mask_token
         if self.n_storage_tokens > 0:
-            storage_tokens = self.storage_tokens
+            storage_tokens = self.storage_tokens[modality_key]
         else:
             storage_tokens = torch.empty(
                 1,
@@ -548,13 +531,9 @@ class EVAN(nn.Module):
         Returns:
             Dictionary with normalized features
         """
-        # Handle backward compatibility: single tensor input
-        if isinstance(x, torch.Tensor):
-            x = {'rgb': x}
-
         # Now x is a dict of modalities
-        if not isinstance(x, dict) or len(x) == 0:
-            raise ValueError("Input must be a non-empty dict of modalities or a Tensor")
+        if isinstance(x, torch.Tensor) or not isinstance(x, dict) or len(x) == 0:
+            raise ValueError("Input must be a non-empty dict of modalities.")
 
         # Validate batch sizes match across modalities
         batch_sizes = [v.shape[0] for v in x.values()]
@@ -595,14 +574,18 @@ class EVAN(nn.Module):
         # This allows cross-modal attention during fusion!
         x_patches_concat = torch.cat(all_patches, dim=1)  # [B, sum(num_patches), embed_dim]
 
-        # Use CLS/storage from first modality for the concatenated sequence
-        first_modality = sorted(embedded_modalities.keys())[0]
-        x_cls_storage = all_cls_storage[first_modality]
+        # Concatenate all CLS/storage tokens from all modalities
+        # Each modality's CLS token will attend to all patches during fusion
+        all_cls_storage_list = [all_cls_storage[k] for k in sorted(all_cls_storage.keys())]
+        x_cls_storage_concat = torch.cat(all_cls_storage_list, dim=1)  # [B, n_modalities * (1 + n_storage), embed_dim]
+        n_cls_storage_per_modality = self.n_storage_tokens + 1
+        n_modalities = len(all_cls_storage)
+
         # Compute H, W from image size and patch size
         H = W = self.img_size // self.patch_size
 
         # Combine for fusion processing
-        x_fused = torch.cat([x_cls_storage, x_patches_concat], dim=1)
+        x_fused = torch.cat([x_cls_storage_concat, x_patches_concat], dim=1)
 
         # Step 4: Process through fusion blocks with cross-modal attention
         # All patches from all modalities attend to each other here!
@@ -624,26 +607,32 @@ class EVAN(nn.Module):
 
             x_fused = x_fused + lora_output
 
-        # Step 5: Split fused patches back into modality-specific outputs
-        # Extract fused CLS/storage tokens (these went through fusion blocks)
-        x_cls_storage_fused = x_fused[:, :self.n_storage_tokens + 1, :]
+        # Step 5: Split fused representation back into modality-specific outputs
+        # Total CLS/storage tokens = n_modalities * (1 + n_storage_tokens)
+        total_cls_storage = n_modalities * n_cls_storage_per_modality
 
-        # Extract fused patches (skip CLS/storage tokens)
-        x_patches_fused = x_fused[:, self.n_storage_tokens + 1:, :]
+        # Extract all fused CLS/storage tokens
+        x_cls_storage_fused = x_fused[:, :total_cls_storage, :]
 
-        # Split back into modality-specific patches using stored metadata
+        # Extract fused patches (skip all CLS/storage tokens)
+        x_patches_fused = x_fused[:, total_cls_storage:, :]
+
+        # Split back into modality-specific outputs
         output_dict = {}
-        for modality_key in sorted(embedded_modalities.keys()):
+        sorted_modalities = sorted(embedded_modalities.keys())
+        for mod_idx, modality_key in enumerate(sorted_modalities):
+            # Extract this modality's CLS/storage tokens
+            cls_start = mod_idx * n_cls_storage_per_modality
+            cls_end = cls_start + n_cls_storage_per_modality
+            x_cls_storage_mod = x_cls_storage_fused[:, cls_start:cls_end, :]
+
+            # Extract this modality's patches
             info = modality_info[modality_key]
-            start, end = info['start_idx'], info['end_idx']
+            patch_start, patch_end = info['start_idx'], info['end_idx']
+            patches = x_patches_fused[:, patch_start:patch_end, :]
 
-            # Extract this modality's patches from the fused representation
-            patches = x_patches_fused[:, start:end, :]
-
-            # Recombine with fused CLS/storage tokens (use the same CLS/storage for all modalities)
-            # Note: In single-modality case, this is just the RGB CLS/storage after all blocks
-            # In multi-modality case, all modalities share the same fused CLS/storage
-            x_mod = torch.cat([x_cls_storage_fused, patches], dim=1)
+            # Recombine this modality's CLS/storage with its patches
+            x_mod = torch.cat([x_cls_storage_mod, patches], dim=1)
 
             # Apply normalization
             if self.untie_cls_and_patch_norms or self.untie_global_and_local_cls_norm:
@@ -689,10 +678,9 @@ class EVAN(nn.Module):
         for modality_key, modality_tensor in x.items():
             if modality_key not in self.patch_embedders:
                 in_chans = modality_tensor.shape[1]
-                self._create_modality_components(modality_key, in_chans)
+                self.create_modality_components(modality_key, in_chans)
 
-            embedder = self.patch_embedders[modality_key]
-            x_mod, (H, W) = self.prepare_tokens_with_masks(modality_tensor, embedder=embedder, masks=masks)
+            x_mod, (H, W) = self.prepare_tokens_with_masks(modality_tensor, modality_key, masks=masks)
             embedded_modalities[modality_key] = x_mod
             hw_tuples[modality_key] = (H, W)
 
@@ -728,183 +716,84 @@ class EVAN(nn.Module):
 
         return embedded_modalities
 
-    def forward_features_masked_multimodal(
+    def set_requires_grad(
         self,
-        x: Dict[str, Tensor],
-        mask_info: Dict[str, Dict]
-    ) -> Tuple[Dict[str, Tensor], Dict[str, Dict]]:
+        modality: str,
+        *,
+        patch_embedders: bool = False,
+        clsreg: bool = False,
+        msla: bool = False,
+        modality_encoders: bool = False,
+        mfla: bool = False,
+        blocks: bool = False,
+        norm: bool = False,
+        mask_token: bool = False,
+    ):
         """
-        Forward with token masking through fusion layers for multi-modal MAE training.
-
-        This method:
-        1. Embeds each modality and applies token-level masking (keeps only unmasked tokens)
-        2. Processes through modality-specific layers with LoRAs
-        3. Adds modality encoding
-        4. Concatenates unmasked patches for cross-modal attention in fusion
-        5. Processes through fusion layers with fusion LoRAs
-        6. Splits back to per-modality and inserts mask tokens for decoder
+        Set requires_grad for specific components of the model.
 
         Args:
-            x: Dict of modality tensors {modality_name: [B, C, H, W]}
-            mask_info: Dict from MultiModalMaskingStrategy, containing per-modality:
-                       {'present': bool, 'ids_keep': Tensor, 'mask': Tensor, 'ids_restore': Tensor}
-
-        Returns:
-            Tuple of:
-            - features: Dict[modality] -> [B, num_patches, embed_dim] with mask tokens inserted
-            - recon_info: Dict[modality] -> {'mask': Tensor, 'ids_restore': Tensor, ...}
+            modality: Either a modality key (e.g., 'rgb', 'vre') or 'backbone' for shared weights.
+                      Use 'all' to apply to all modalities.
+            patch_embedders: Unfreeze patch embedders for this modality
+            clsreg: Unfreeze CLS and storage (register) tokens for this modality
+            msla: Unfreeze modality-specific layer adaptors (LoRAs or FFT blocks)
+            modality_encoders: Unfreeze modality encodings
+            mfla: Unfreeze modality fusion LoRA adaptors
+            blocks: Unfreeze shared transformer blocks (only when modality='backbone')
+            norm: Unfreeze shared norm layers (only when modality='backbone')
+            mask_token: Unfreeze mask token (only when modality='backbone')
         """
-        if not isinstance(x, dict) or len(x) == 0:
-            raise ValueError("Input must be a non-empty dict of modalities")
+        if modality == 'backbone':
+            # Shared backbone components
+            if blocks:
+                for param in self.blocks.parameters():
+                    param.requires_grad = True
+            if norm:
+                for param in self.norm.parameters():
+                    param.requires_grad = True
+                if self.cls_norm is not None:
+                    for param in self.cls_norm.parameters():
+                        param.requires_grad = True
+                if self.local_cls_norm is not None:
+                    for param in self.local_cls_norm.parameters():
+                        param.requires_grad = True
+            if mask_token:
+                self.mask_token.requires_grad = True
+        elif modality == 'all':
+            # Apply to all modalities
+            for mod_key in self.patch_embedders.keys():
+                self.set_requires_grad(
+                    mod_key,
+                    patch_embedders=patch_embedders,
+                    clsreg=clsreg,
+                    msla=msla,
+                    modality_encoders=modality_encoders,
+                    mfla=mfla,
+                )
+        else:
+            # Modality-specific components
+            if patch_embedders and modality in self.patch_embedders:
+                for param in self.patch_embedders[modality].parameters():
+                    param.requires_grad = True
+            if clsreg:
+                if modality in self.cls_tokens:
+                    self.cls_tokens[modality].requires_grad = True
+                if self.n_storage_tokens > 0 and modality in self.storage_tokens:
+                    self.storage_tokens[modality].requires_grad = True
+            if msla and modality in self.modality_specific_layer_adaptors:
+                for param in self.modality_specific_layer_adaptors[modality].parameters():
+                    param.requires_grad = True
+            if modality_encoders and modality in self.modality_encoders:
+                self.modality_encoders[modality].requires_grad = True
+            if mfla and modality in self.modality_fusion_lora_adaptors:
+                for param in self.modality_fusion_lora_adaptors[modality].parameters():
+                    param.requires_grad = True
 
-        embedded_modalities = {}
-        reconstruction_info = {}
-        hw_tuples = {}
-
-        B = list(x.values())[0].shape[0]
-        D = self.embed_dim
-
-        # Step 1: Embed each modality and apply token masking
-        for modality_key, modality_tensor in x.items():
-            mod_mask_info = mask_info.get(modality_key, {})
-            if not mod_mask_info.get('present', True):
-                continue
-
-            if modality_key not in self.patch_embedders:
-                in_chans = modality_tensor.shape[1]
-                self._create_modality_components(modality_key, in_chans)
-
-            # Embed patches
-            embedder = self.patch_embedders[modality_key]
-            x_emb = embedder(modality_tensor)  # [B, H, W, embed_dim]
-            _, H, W, _ = x_emb.shape
-            x_emb = x_emb.flatten(1, 2)  # [B, num_patches, embed_dim]
-            num_patches = x_emb.shape[1]
-
-            hw_tuples[modality_key] = (H, W)
-
-            # Get masking info
-            ids_keep = mod_mask_info['ids_keep']  # [B, num_keep]
-            mask = mod_mask_info['mask']          # [B, num_patches] True=masked
-            ids_restore = mod_mask_info['ids_restore']
-
-            # Gather unmasked patches only
-            num_keep = ids_keep.shape[1]
-            x_unmasked = torch.gather(
-                x_emb, dim=1,
-                index=ids_keep.unsqueeze(-1).expand(-1, -1, D)
-            )  # [B, num_keep, embed_dim]
-
-            # Prepend CLS and storage tokens
-            cls_token = self.cls_token.expand(B, -1, -1)
-            if self.n_storage_tokens > 0:
-                storage_tokens = self.storage_tokens.expand(B, -1, -1)
-                x_with_special = torch.cat([cls_token, storage_tokens, x_unmasked], dim=1)
-            else:
-                x_with_special = torch.cat([cls_token, x_unmasked], dim=1)
-
-            embedded_modalities[modality_key] = x_with_special
-            reconstruction_info[modality_key] = {
-                'mask': mask,
-                'ids_restore': ids_restore,
-                'num_patches': num_patches,
-                'num_keep': num_keep,
-                'H': H, 'W': W
-            }
-
-        # Step 2: Process through modality-specific layers
-        for modality_key, x_mod in embedded_modalities.items():
-            H, W = hw_tuples[modality_key]
-
-            for i in range(self.tz_fusion_time):
-                if self.rope_embed is not None:
-                    # Note: RoPE is computed for full image size, subset is used for unmasked patches
-                    rope_sincos = self.rope_embed(H=H, W=W)
-                else:
-                    rope_sincos = None
-
-                if self.tz_modality_specific_layer_augmenter == "lora":
-                    x_mod = self.blocks[i](x_mod, rope_sincos)
-                    lora = self.modality_specific_layer_adaptors[modality_key][i]
-                    x_mod = x_mod + lora(x_mod)
-                elif self.tz_modality_specific_layer_augmenter == "fft":
-                    adaptor = self.modality_specific_layer_adaptors[modality_key][i]
-                    x_mod = adaptor(x_mod, rope_sincos)
-
-            # Add modality encoding
-            modality_encoding = self.modality_encoders[modality_key]
-            x_mod = x_mod + modality_encoding
-
-            embedded_modalities[modality_key] = x_mod
-
-        # Step 3: Concatenate patches for fusion (cross-modal attention on UNMASKED tokens)
-        all_patches = []
-        patch_ranges = {}
-        current_idx = 0
-        n_special = self.n_storage_tokens + 1  # CLS + storage tokens
-
-        modality_order = sorted(embedded_modalities.keys())
-        for modality_key in modality_order:
-            x_mod = embedded_modalities[modality_key]
-            # Extract patches (skip CLS + storage)
-            patches = x_mod[:, n_special:, :]
-            num_patches = patches.shape[1]
-
-            patch_ranges[modality_key] = (current_idx, current_idx + num_patches)
-            all_patches.append(patches)
-            current_idx += num_patches
-
-        # Use CLS/storage from first modality
-        first_mod = modality_order[0]
-        cls_storage = embedded_modalities[first_mod][:, :n_special, :]
-
-        x_concat = torch.cat([cls_storage] + all_patches, dim=1)
-
-        # Step 4: Process through fusion layers
-        H = W = self.img_size // self.patch_size
-
-        for i in range(self.tz_fusion_time, len(self.blocks)):
-            if self.rope_embed is not None:
-                rope_sincos = self.rope_embed(H=H, W=W)
-            else:
-                rope_sincos = None
-
-            x_concat = self.blocks[i](x_concat, rope_sincos)
-
-            # Sum fusion LoRAs from all present modalities
-            lora_idx = i - self.tz_fusion_time
-            lora_out = sum(
-                self.modality_fusion_lora_adaptors[mod][lora_idx](x_concat)
-                for mod in embedded_modalities.keys()
-                if mod in self.modality_fusion_lora_adaptors
-            )
-            x_concat = x_concat + lora_out
-
-        # Step 5: Split back and insert mask tokens for decoder
-        fused_patches = x_concat[:, n_special:, :]
-
-        output_features = {}
-        for modality_key in modality_order:
-            start, end = patch_ranges[modality_key]
-            mod_patches = fused_patches[:, start:end, :]  # [B, num_keep, D]
-
-            # Insert mask tokens at masked positions
-            info = reconstruction_info[modality_key]
-            num_keep = info['num_keep']
-            num_total = info['num_patches']
-
-            # Create full sequence with mask tokens
-            # Use a learnable mask token (we'll use zeros as placeholder, decoder has its own)
-            mask_tokens = torch.zeros(B, num_total - num_keep, D, device=mod_patches.device)
-            x_full = torch.cat([mod_patches, mask_tokens], dim=1)
-
-            # Unshuffle to restore original spatial order
-            ids_restore = info['ids_restore']
-            x_full = torch.gather(x_full, dim=1, index=ids_restore.unsqueeze(-1).expand(-1, -1, D))
-
-            output_features[modality_key] = x_full
-
-        return output_features, reconstruction_info
+    def freeze_all(self):
+        """Freeze all parameters in the model."""
+        for param in self.parameters():
+            param.requires_grad = False
 
     def forward(self, *args, is_training: bool = False, **kwargs) -> Dict[str, Dict[str, Tensor]] | Dict[str, Tensor] | Tensor:
         raise NotImplementedError("Why are you calling me?")
@@ -986,18 +875,19 @@ def evan_large(pretrained: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", **k
 class EVANClassifier(nn.Module):
     """Classifier head on top of EVAN for EuroSAT."""
 
-    def __init__(self, evan_model, num_classes=10, fusion_strategy='mean', factor=4, device = "cuda"):
+    def __init__(self, evan_model, num_classes=10, classifier_strategy='mean', factor=4, global_rep="clstoken", device = "cuda"):
         super().__init__()
         self.evan = evan_model
-        self.fusion_strategy = fusion_strategy
+        self.classifier_strategy = classifier_strategy
         self.num_classes = num_classes
         self.factor = factor
+        self.global_rep=global_rep
         embed_dim = self.evan.embed_dim
         hidden_dim = embed_dim * factor
         self.hidden_dim = hidden_dim
         self.device = device
 
-        if fusion_strategy == 'mean':
+        if classifier_strategy == 'mean':
             # Average CLS tokens from all modalities, then classify
             self.classifier = nn.Sequential(
                 nn.Linear(embed_dim, hidden_dim),
@@ -1005,14 +895,15 @@ class EVANClassifier(nn.Module):
                 nn.Linear(hidden_dim, num_classes)
             )
             self.modality_classifiers = None
-        elif fusion_strategy == 'ensemble':
+        elif classifier_strategy == 'ensemble':
             # Per-modality classifiers that get ensembled
             self.classifier = None
             self.modality_classifiers = nn.ModuleDict()
+            self.instantiate_modality_classifier('rgb')
         else:
-            raise ValueError(f"Unknown fusion strategy: {fusion_strategy}")
+            raise ValueError(f"Unknown fusion strategy: {classifier_strategy}")
 
-    def _instantiate_modality_classifier(self, modality_key: str):
+    def instantiate_modality_classifier(self, modality_key: str):
         """
         Create a new classifier for a specific modality.
 
@@ -1047,13 +938,13 @@ class EVANClassifier(nn.Module):
         # Get features from EVAN
         features_dict = self.evan.forward_features(x)
 
-        if self.fusion_strategy == 'mean':
+        if self.classifier_strategy == 'mean':
             # Extract CLS tokens from each modality
             cls_tokens = []
             for modality in sorted(features_dict.keys()):
-                if modality=="rgb":
+                if self.global_rep=="clstoken":
                     cls_tokens.append(features_dict[modality]['x_norm_clstoken'])
-                else:
+                elif self.global_rep=="mean_patch":
                     cls_tokens.append(features_dict[modality]['x_norm_patchtokens'].mean(1))
 
             # Average CLS tokens
@@ -1062,19 +953,18 @@ class EVANClassifier(nn.Module):
             # Classify
             logits = self.classifier(fused)
 
-        elif self.fusion_strategy == 'ensemble':
+        elif self.classifier_strategy == 'ensemble':
             all_logits = []
             for modality in sorted(features_dict.keys()):
                 # Create classifier for this modality if it doesn't exist
                 if modality not in self.modality_classifiers:
-                    self._instantiate_modality_classifier(modality)
-
-                # Get CLS token for this modality
-                # cls_token = features_dict[modality]['x_norm_clstoken']
-                if modality=="rgb":
+                    self.instantiate_modality_classifier(modality)
+                if self.global_rep=="clstoken":
                     cls_token=features_dict[modality]['x_norm_clstoken']
-                else:
+                elif self.global_rep=="mean_patch":
                     cls_token=features_dict[modality]['x_norm_patchtokens'].mean(1)
+                else:
+                    raise ValueError(f"unrecognized global_rep arg, choices are clstoken or mean_patch, received {self.global_rep}")
                 # Get logits from modality-specific classifier
                 modality_logits = self.modality_classifiers[modality](cls_token)
                 all_logits.append(modality_logits)
@@ -1083,6 +973,68 @@ class EVANClassifier(nn.Module):
             logits = torch.stack(all_logits).mean(dim=0)
 
         return logits
+
+    def set_requires_grad(
+        self,
+        modality: str,
+        *,
+        patch_embedders: bool = False,
+        clsreg: bool = False,
+        msla: bool = False,
+        modality_encoders: bool = False,
+        mfla: bool = False,
+        blocks: bool = False,
+        norm: bool = False,
+        mask_token: bool = False,
+        classifier: bool = False,
+    ):
+        """
+        Set requires_grad for specific components of the model (EVAN + classifier).
+
+        Args:
+            modality: Either a modality key (e.g., 'rgb', 'vre'), 'backbone' for shared weights,
+                      or 'all' to apply to all modalities.
+            patch_embedders: Unfreeze patch embedders for this modality
+            clsreg: Unfreeze CLS and storage (register) tokens for this modality
+            msla: Unfreeze modality-specific layer adaptors (LoRAs or FFT blocks)
+            modality_encoders: Unfreeze modality encodings
+            mfla: Unfreeze modality fusion LoRA adaptors
+            blocks: Unfreeze shared transformer blocks (only when modality='backbone')
+            norm: Unfreeze shared norm layers (only when modality='backbone')
+            mask_token: Unfreeze mask token (only when modality='backbone')
+            classifier: Unfreeze classifier head(s)
+        """
+        # Delegate to EVAN's set_requires_grad for backbone components
+        self.evan.set_requires_grad(
+            modality,
+            patch_embedders=patch_embedders,
+            clsreg=clsreg,
+            msla=msla,
+            modality_encoders=modality_encoders,
+            mfla=mfla,
+            blocks=blocks,
+            norm=norm,
+            mask_token=mask_token,
+        )
+
+        # Handle classifier
+        if classifier:
+            if self.classifier is not None:
+                for param in self.classifier.parameters():
+                    param.requires_grad = True
+            if self.modality_classifiers is not None:
+                if modality == 'all':
+                    for mod_classifier in self.modality_classifiers.values():
+                        for param in mod_classifier.parameters():
+                            param.requires_grad = True
+                elif modality in self.modality_classifiers:
+                    for param in self.modality_classifiers[modality].parameters():
+                        param.requires_grad = True
+
+    def freeze_all(self):
+        """Freeze all parameters in the model (EVAN + classifier)."""
+        for param in self.parameters():
+            param.requires_grad = False
 
 
 if __name__ == '__main__':

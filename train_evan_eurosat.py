@@ -556,10 +556,10 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
     ).to(device)
 
     # Ensure target modality components exist (create if needed)
-    if target_modality not in evan.patch_embedders:
-        print(f"  Creating {target_modality} modality components...")
-        evan._create_modality_components(target_modality, num_target_channels)
-        print(f"  Created: {target_modality} patch embedder, modality-specific LoRAs, modality encoding, fusion LoRAs")
+    # if target_modality not in evan.patch_embedders:
+    #     print(f"  Creating {target_modality} modality components...")
+    #     evan.create_modality_components(target_modality, num_target_channels)
+    #     print(f"  Created: {target_modality} patch embedder, modality-specific LoRAs, modality encoding, fusion LoRAs")
 
     # Freeze everything
     for param in model.parameters():
@@ -778,7 +778,7 @@ if __name__ == '__main__':
     # Note: evan_preset models automatically loads pretrained weights from facebook/dinov3 pretrained models
 
     # Create classifier
-    model = EVANClassifier(evan, num_classes=10, fusion_strategy=args.fusion_strategy,device=device)
+    model = EVANClassifier(evan, num_classes=10, classifier_strategy=args.fusion_strategy,device=device)
     model = model.to(device)
 
     # Freeze EVAN backbone, train only classifier(s)
