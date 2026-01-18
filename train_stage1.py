@@ -134,7 +134,6 @@ def main():
     evan = model_fn(
         tz_fusion_time=config['tz_fusion_time'],
         tz_lora_rank=config['tz_lora_rank'],
-        tz_modality_specific_layer_augmenter=config['train_mode'],
         n_storage_tokens=4,
         device=device
     )

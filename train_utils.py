@@ -1,5 +1,6 @@
 """Training utilities for EVAN on EuroSAT."""
 
+import copy
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -96,6 +97,47 @@ class SimpleMAEDecoder(nn.Module):
         x = self.decoder(x_full)
         x = self.decoder_pred(x)
         return x
+
+
+class FullSequenceMAEDecoder(nn.Module):
+    """
+    MAE decoder that takes the full sequence including mask token positions.
+
+    Unlike SimpleMAEDecoder which expects only unmasked tokens + ids_restore,
+    this decoder takes the full sequence where masked positions already contain
+    the mask token. Simpler interface for fusion MAE training.
+    """
+
+    def __init__(self, embed_dim, num_channels, patch_size, decoder_depth=1, decoder_heads=8, ffn_factor=4):
+        super().__init__()
+        self.patch_size = patch_size
+        self.num_channels = num_channels
+        self.embed_dim = embed_dim
+
+        # Transformer decoder
+        from torch.nn import TransformerEncoderLayer, TransformerEncoder
+        decoder_layer = TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=decoder_heads,
+            dim_feedforward=embed_dim * ffn_factor,
+            batch_first=True,
+            norm_first=True
+        )
+        self.decoder = TransformerEncoder(decoder_layer, num_layers=decoder_depth)
+
+        # Linear projection to reconstruct pixels
+        self.pred = nn.Linear(embed_dim, patch_size * patch_size * num_channels)
+
+    def forward(self, x):
+        """
+        Args:
+            x: [B, num_patches, embed_dim] - Full sequence with mask tokens at masked positions
+
+        Returns:
+            reconstructed patches: [B, num_patches, patch_size^2 * channels]
+        """
+        x = self.decoder(x)
+        return self.pred(x)
 
 
 def evaluate(model, dataloader, criterion, device, modality_bands_dict,
@@ -337,7 +379,8 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
                              modality_bands_dict, criterion, optimizer, num_epochs,
                              train_modalities, newmod=None, phase_name="Training",
                              modality_masking=None,
-                             use_wandb=False, wandb_prefix=None, freeze_rgb=False):
+                             use_wandb=False, wandb_prefix=None, freeze_rgb=False,
+                             eval_single_modalities=False):
     """
     General supervised training loop for EVAN with multi-modal support.
 
@@ -355,10 +398,12 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
         phase_name: Name of this training phase for logging
         modality_masking: Optional dict mapping modality name to masking probability (e.g., {'rgb': 0.3, 'vre': 0.2})
                          During training, one modality is randomly masked out per batch based on these probabilities.
+        eval_single_modalities: If True, evaluate on RGB-only, newmod-only, and RGB+newmod separately.
+                               If False (default), only evaluate on train_modalities.
 
     Returns:
         Tuple of (train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi)
-        (test_acc_newmod is None if eval_newmod_only=False)
+        When eval_single_modalities=False, test_acc_rgb/newmod/multi are None (only test_acc_train is meaningful)
     """
 
     # Determine training modality string for logging
@@ -444,36 +489,45 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
             modality_bands_dict, modalities_to_use=train_modalities
         )
 
-        # Evaluation on RGB-only
-        test_loss_rgb, test_acc_rgb = evaluate(
-            model, test_loader_full, criterion, device,
-            modality_bands_dict, modalities_to_use=('rgb',)
-        )
-
+        # Initialize optional metrics
+        test_acc_rgb = None
         test_acc_newmod = None
-        if newmod:
-            test_loss_newmod, test_acc_newmod = evaluate(
+        test_acc_multi = None
+        test_loss_rgb = None
+        test_loss_newmod = None
+        test_loss_multi = None
+
+        if eval_single_modalities:
+            # Evaluation on RGB-only
+            test_loss_rgb, test_acc_rgb = evaluate(
                 model, test_loader_full, criterion, device,
-                modality_bands_dict, modalities_to_use=(newmod,)
+                modality_bands_dict, modalities_to_use=('rgb',)
             )
 
-        # Evaluation on RGB+newmod
-        if newmod:
-            test_loss_multi, test_acc_multi = evaluate(
-                model, test_loader_full, criterion, device,
-                modality_bands_dict, modalities_to_use=('rgb', newmod)
-            )
+            if newmod:
+                test_loss_newmod, test_acc_newmod = evaluate(
+                    model, test_loader_full, criterion, device,
+                    modality_bands_dict, modalities_to_use=(newmod,)
+                )
+
+            # Evaluation on RGB+newmod
+            if newmod:
+                test_loss_multi, test_acc_multi = evaluate(
+                    model, test_loader_full, criterion, device,
+                    modality_bands_dict, modalities_to_use=('rgb', newmod)
+                )
 
         # Print epoch results
         print(f"\n{phase_name} Epoch {epoch+1}/{num_epochs}:")
         print(f"  Train ({train_mod_str}):      Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
         print(f"  Test ({train_mod_str}):       Loss: {test_loss_train:.4f}, Acc: {test_acc_train:.2f}%")
-        print(f"  Test (RGB only):       Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
-        if newmod:
-            print(f"  Test ({newmod.upper()} only):        Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
-        print(f"  Test (RGB+{newmod.upper()}):         Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%")
-        if newmod:
-            print(f"  Multi-modal gain:      {test_acc_multi - test_acc_rgb:+.2f}%")
+        if eval_single_modalities:
+            print(f"  Test (RGB only):       Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
+            if newmod:
+                print(f"  Test ({newmod.upper()} only):        Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
+            if newmod:
+                print(f"  Test (RGB+{newmod.upper()}):         Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%")
+                print(f"  Multi-modal gain:      {test_acc_multi - test_acc_rgb:+.2f}%")
         print()
 
         # Log epoch-level metrics to wandb
@@ -481,17 +535,20 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
             log_dict = {
                 f'{wandb_prefix}/train_loss_epoch': train_loss,
                 f'{wandb_prefix}/train_acc': train_acc,
-                f'{wandb_prefix}/eval_loss_multi': test_loss_multi,
-                f'{wandb_prefix}/eval_acc_rgb': test_acc_rgb,
-                f'{wandb_prefix}/eval_acc_multi': test_acc_multi,
+                f'{wandb_prefix}/eval_loss_train': test_loss_train,
+                f'{wandb_prefix}/eval_acc_train': test_acc_train,
                 f'{wandb_prefix}/epoch': epoch + 1,
             }
-            if newmod:
-                log_dict[f'{wandb_prefix}/eval_loss_newmod'] = test_loss_newmod
-                log_dict[f'{wandb_prefix}/eval_acc_newmod'] = test_acc_newmod
+            if eval_single_modalities:
+                log_dict[f'{wandb_prefix}/eval_acc_rgb'] = test_acc_rgb
+                if newmod:
+                    log_dict[f'{wandb_prefix}/eval_loss_newmod'] = test_loss_newmod
+                    log_dict[f'{wandb_prefix}/eval_acc_newmod'] = test_acc_newmod
+                    log_dict[f'{wandb_prefix}/eval_loss_multi'] = test_loss_multi
+                    log_dict[f'{wandb_prefix}/eval_acc_multi'] = test_acc_multi
             wandb.log(log_dict)
 
-    return train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi
+    return train_acc, test_acc_rgb, test_acc_newmod, test_acc_train
 
 
 def supervised_finetune_phase(model, evan, train_loader, test_loader_full, device, args,
@@ -748,6 +805,358 @@ def train_mae_phase(model, train_loader, test_loader_full, device, args, bands_t
     print("\n=== Phase 2a (MAE SSL) complete ===")
     return mae_decoder  # Return for potential analysis
 
+def train_mae_fusion_phase(
+    model, train_loader, test_loader, device, args,
+    bands_target: dict,
+    mae_modalities: list[str],
+    latent_reconstruct_modalities: list[str] = ["rgb"],
+    modality_bands_dict: dict = None
+):
+    """
+    Phase 2: Hybrid MAE training for fusion components.
+
+    Uses a hybrid loss combining:
+    - MAE reconstruction loss for mae_modalities (reconstruct raw pixels)
+    - Latent reconstruction loss for latent_reconstruct_modalities (match frozen teacher features)
+
+    Trains:
+    - modality_encoders (all modalities)
+    - modality_fusion_lora_adaptors (all modalities)
+    - mask_token (shared across modalities)
+
+    Frozen:
+    - Backbone blocks, patch_embedders, modality_specific_layer_adaptors, cls/storage tokens
+    """
+    print("\n" + "="*70)
+    print(f"=== PHASE 2: Hybrid MAE Training for Fusion Blocks ===")
+    print("="*70)
+
+    # Validate no overlap between modality lists
+    overlap = set(mae_modalities) & set(latent_reconstruct_modalities)
+    if overlap:
+        raise ValueError(
+            f"Modality cannot be in both mae_modalities and latent_reconstruct_modalities: {overlap}"
+        )
+
+    all_modalities = list(set(mae_modalities + latent_reconstruct_modalities))
+    print(f"  MAE modalities (pixel reconstruction): {mae_modalities}")
+    print(f"  Latent modalities (feature matching): {latent_reconstruct_modalities}")
+
+    evan = model.evan
+    patch_size = evan.patch_size
+    num_patches = (evan.img_size // patch_size) ** 2
+
+    # Create MAE decoders for mae_modalities (pixel reconstruction)
+    mae_decoders = nn.ModuleDict()
+    for mod in mae_modalities:
+        num_channels = len(bands_target[mod])
+        mae_decoders[mod] = FullSequenceMAEDecoder(
+            embed_dim=evan.embed_dim,
+            num_channels=num_channels,
+            patch_size=patch_size,
+            decoder_depth=1,
+            ffn_factor=2
+        ).to(device)
+        print(f"  Initialized FullSequenceMAEDecoder for {mod}, num_channels={num_channels}")
+
+    # Create latent projectors for latent_reconstruct_modalities (feature matching)
+    latent_projectors = nn.ModuleDict()
+    for mod in latent_reconstruct_modalities:
+        latent_projectors[mod] = nn.Sequential(
+            nn.Linear(evan.embed_dim, evan.embed_dim),
+            nn.GELU(),
+            nn.Linear(evan.embed_dim, evan.embed_dim),
+        ).to(device)
+        print(f"  Initialized Latent Projector for {mod}")
+
+    # Create frozen teacher for latent targets
+    teacher_evan = copy.deepcopy(evan)
+    for p in teacher_evan.parameters():
+        p.requires_grad = False
+    teacher_evan.eval()
+    print("  Created frozen teacher EVAN for latent targets")
+
+    # Freeze everything, then unfreeze fusion components + mask_token
+    model.freeze_all()
+    model.set_requires_grad("all", modality_encoders=True, mfla=True)
+    model.set_requires_grad("backbone", mask_token=True)
+    print("  Unfroze: modality_encoders, modality_fusion_lora_adaptors, mask_token")
+
+    # Count parameters
+    trainable_in_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
+    total_in_evan = sum(p.numel() for p in evan.parameters())
+    trainable_decoder = sum(p.numel() for p in mae_decoders.parameters())
+    trainable_projector = sum(p.numel() for p in latent_projectors.parameters())
+    trainable_total = trainable_in_evan + trainable_decoder + trainable_projector
+    print(f"\nTrainable parameters: {trainable_total}")
+    print(f"    EVAN: {trainable_in_evan} ({100*trainable_in_evan/total_in_evan:.2f}%)")
+    print(f"    MAE decoders: {trainable_decoder}")
+    print(f"    Latent projectors: {trainable_projector}")
+
+    # Optimizer
+    params = (
+        list(filter(lambda p: p.requires_grad, evan.parameters())) +
+        list(mae_decoders.parameters()) +
+        list(latent_projectors.parameters())
+    )
+    optimizer = torch.optim.AdamW(params, lr=args.ssl_lr)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
+
+    # Use modality_bands_dict if provided, otherwise use bands_target
+    if modality_bands_dict is None:
+        modality_bands_dict = bands_target
+
+    # Loss function for latent reconstruction
+    mse_fn = nn.MSELoss(reduction='none')
+
+    # Training loop
+    global_step = 0
+    for epoch in range(args.stage2_fusion_epochs):
+        evan.train()
+        mae_decoders.train()
+        latent_projectors.train()
+        train_loss = 0.0
+        train_mae_loss = 0.0
+        train_latent_loss = 0.0
+        train_count = 0
+
+        pbar = tqdm(train_loader, desc=f"Fusion MAE Epoch {epoch+1}/{args.stage2_fusion_epochs}")
+        for batch in pbar:
+            # Step 1: Create input tensors for all modalities
+            evan_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=tuple(all_modalities)
+            )
+            evan_input = {k: v.to(device) for k, v in evan_input.items()}
+            B = next(iter(evan_input.values())).shape[0]
+
+            # Step 2: Get modality-specific features (student)
+            mod_specific = evan.forward_modality_specific_features(evan_input)
+            # {mod: [B, 1+n_storage+num_patches, embed_dim]}
+
+            # Step 3: Get teacher targets (unmasked, frozen)
+            with torch.no_grad():
+                teacher_out = teacher_evan.forward_features(evan_input)
+                # {mod: {'x_norm_patchtokens': [B, num_patches, embed_dim], ...}}
+
+            # Step 4: Generate independent random masks per modality
+            # This forces cross-modal learning: when RGB position is masked but newmod is visible,
+            # the model must use newmod features to help reconstruct RGB latents
+            len_keep = int(num_patches * (1 - args.mae_mask_ratio))
+            modality_masks = {}  # {mod: [B, num_patches] bool tensor, True=masked}
+            for mod in all_modalities:
+                noise = torch.rand(B, num_patches, device=device)
+                ids_shuffle = torch.argsort(noise, dim=1)
+                mask = torch.ones(B, num_patches, device=device, dtype=torch.bool)
+                mask.scatter_(1, ids_shuffle[:, :len_keep], False)
+                modality_masks[mod] = mask
+
+            # Step 5: Apply per-modality mask to patch tokens (replace masked with mask_token)
+            masked_mod_features = {}
+            for mod, features in mod_specific.items():
+                # features: [B, 1+n_storage+num_patches, embed_dim]
+                n_prefix = evan.n_storage_tokens + 1
+                cls_storage = features[:, :n_prefix, :]  # [B, 1+n_storage, embed_dim]
+                patches = features[:, n_prefix:, :]  # [B, num_patches, embed_dim]
+
+                # Replace masked positions with mask_token (using this modality's mask)
+                mask_expanded = modality_masks[mod].unsqueeze(-1)  # [B, num_patches, 1]
+                mask_token_expanded = evan.mask_token.unsqueeze(0).expand(B, num_patches, -1)
+                masked_patches = torch.where(mask_expanded, mask_token_expanded, patches)
+
+                # Reconstruct full sequence with masked patches
+                masked_mod_features[mod] = torch.cat([cls_storage, masked_patches], dim=1)
+
+            # Step 6: Forward through fusion blocks
+            student_fused = evan.forward_fusion_from_modality_features(masked_mod_features)
+            # {mod: {'x_norm_patchtokens': [B, num_patches, embed_dim], ...}}
+
+            # Step 7: Compute losses (each modality uses its own mask)
+            total_loss = 0.0
+            batch_mae_loss = 0.0
+            batch_latent_loss = 0.0
+
+            # MAE loss: decode to pixels, loss on masked patches only
+            for mod in mae_modalities:
+                student_patches = student_fused[mod]['x_norm_patchtokens']  # [B, num_patches, embed_dim]
+                pred_pixels = mae_decoders[mod](student_patches)  # [B, num_patches, patch_size^2 * C]
+
+                target_img = evan_input[mod]  # [B, C, H, W]
+                target_patches = patchify(target_img, patch_size)  # [B, num_patches, patch_size^2 * C]
+
+                mask_float = modality_masks[mod].float()
+                mae_loss = mae_reconstruction_loss(pred_pixels, target_patches, mask_float)
+                total_loss = total_loss + mae_loss
+                batch_mae_loss += mae_loss.item()
+
+            # Latent loss: project and match teacher, loss on masked patches + CLS token
+            for mod in latent_reconstruct_modalities:
+                student_patches = student_fused[mod]['x_norm_patchtokens']  # [B, num_patches, embed_dim]
+                teacher_patches = teacher_out[mod]['x_norm_patchtokens'].detach()  # [B, num_patches, embed_dim]
+                student_cls = student_fused[mod]['x_norm_clstoken']  # [B, embed_dim]
+                teacher_cls = teacher_out[mod]['x_norm_clstoken'].detach()  # [B, embed_dim]
+
+                # Concatenate CLS with patches: treat CLS as an extra "patch" for projection
+                student_all = torch.cat([student_cls.unsqueeze(1), student_patches], dim=1)  # [B, 1+num_patches, embed_dim]
+                teacher_all = torch.cat([teacher_cls.unsqueeze(1), teacher_patches], dim=1)  # [B, 1+num_patches, embed_dim]
+
+                projected = latent_projectors[mod](student_all)  # [B, 1+num_patches, embed_dim]
+
+                # Create mask that includes CLS token (always compute loss on CLS)
+                mask_float = modality_masks[mod].float()
+                cls_ones = torch.ones(B, 1, device=device)
+                mask_with_cls = torch.cat([cls_ones, mask_float], dim=1)  # [B, 1+num_patches]
+
+                # MSE loss on CLS + masked patches
+                mse = mse_fn(projected, teacher_all).mean(dim=-1)  # [B, 1+num_patches]
+                latent_loss = (mse * mask_with_cls).sum() / mask_with_cls.sum()
+
+                total_loss = total_loss + latent_loss
+                batch_latent_loss += latent_loss.item()
+
+            # Step 8: Backward pass
+            optimizer.zero_grad()
+            total_loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=float('inf'))
+            optimizer.step()
+
+            train_loss += total_loss.item()
+            train_mae_loss += batch_mae_loss
+            train_latent_loss += batch_latent_loss
+            train_count += 1
+            global_step += 1
+
+            pbar.set_postfix({
+                'loss': f'{total_loss.item():.4f}',
+                'mae': f'{batch_mae_loss:.4f}',
+                'latent': f'{batch_latent_loss:.4f}',
+                'grad': f'{grad_norm:.4f}'
+            })
+
+            # Log to wandb every step
+            wandb.log({
+                'phase2_fusion/train_loss': total_loss.item(),
+                'phase2_fusion/mae_loss': batch_mae_loss,
+                'phase2_fusion/latent_loss': batch_latent_loss,
+                'phase2_fusion/grad_norm': grad_norm.item(),
+                'phase2_fusion/epoch': epoch + 1,
+                'phase2_fusion/step': global_step,
+                'phase2_fusion/lr': optimizer.param_groups[0]['lr'],
+            })
+
+        # Epoch summary
+        train_loss /= train_count
+        train_mae_loss /= train_count
+        train_latent_loss /= train_count
+
+        scheduler.step(train_loss)
+
+        # Evaluation on test set
+        evan.eval()
+        mae_decoders.eval()
+        latent_projectors.eval()
+        eval_loss = 0.0
+        eval_mae_loss = 0.0
+        eval_latent_loss = 0.0
+        eval_count = 0
+
+        with torch.no_grad():
+            for batch in test_loader:
+                evan_input = create_multimodal_batch(
+                    batch, modality_bands_dict=modality_bands_dict,
+                    modalities=tuple(all_modalities)
+                )
+                evan_input = {k: v.to(device) for k, v in evan_input.items()}
+                B = next(iter(evan_input.values())).shape[0]
+
+                # Get modality-specific features
+                mod_specific = evan.forward_modality_specific_features(evan_input)
+
+                # Get teacher targets
+                teacher_out = teacher_evan.forward_features(evan_input)
+
+                # Generate independent random masks per modality (same as training)
+                len_keep = int(num_patches * (1 - args.mae_mask_ratio))
+                modality_masks = {}
+                for mod in all_modalities:
+                    noise = torch.rand(B, num_patches, device=device)
+                    ids_shuffle = torch.argsort(noise, dim=1)
+                    mask = torch.ones(B, num_patches, device=device, dtype=torch.bool)
+                    mask.scatter_(1, ids_shuffle[:, :len_keep], False)
+                    modality_masks[mod] = mask
+
+                # Apply per-modality mask
+                masked_mod_features = {}
+                for mod, features in mod_specific.items():
+                    n_prefix = evan.n_storage_tokens + 1
+                    cls_storage = features[:, :n_prefix, :]
+                    patches = features[:, n_prefix:, :]
+                    mask_expanded = modality_masks[mod].unsqueeze(-1)
+                    mask_token_expanded = evan.mask_token.unsqueeze(0).expand(B, num_patches, -1)
+                    masked_patches = torch.where(mask_expanded, mask_token_expanded, patches)
+                    masked_mod_features[mod] = torch.cat([cls_storage, masked_patches], dim=1)
+
+                # Forward through fusion
+                student_fused = evan.forward_fusion_from_modality_features(masked_mod_features)
+
+                # Compute losses (each modality uses its own mask)
+                batch_loss = 0.0
+                batch_mae = 0.0
+                batch_latent = 0.0
+
+                for mod in mae_modalities:
+                    student_patches = student_fused[mod]['x_norm_patchtokens']
+                    pred_pixels = mae_decoders[mod](student_patches)
+                    target_img = evan_input[mod]
+                    target_patches = patchify(target_img, patch_size)
+                    mask_float = modality_masks[mod].float()
+                    mae_loss = mae_reconstruction_loss(pred_pixels, target_patches, mask_float)
+                    batch_loss += mae_loss.item()
+                    batch_mae += mae_loss.item()
+
+                for mod in latent_reconstruct_modalities:
+                    student_patches = student_fused[mod]['x_norm_patchtokens']
+                    teacher_patches = teacher_out[mod]['x_norm_patchtokens']
+                    student_cls = student_fused[mod]['x_norm_clstoken']
+                    teacher_cls = teacher_out[mod]['x_norm_clstoken']
+                    student_all = torch.cat([student_cls.unsqueeze(1), student_patches], dim=1)
+                    teacher_all = torch.cat([teacher_cls.unsqueeze(1), teacher_patches], dim=1)
+                    projected = latent_projectors[mod](student_all)
+                    mask_float = modality_masks[mod].float()
+                    cls_ones = torch.ones(B, 1, device=device)
+                    mask_with_cls = torch.cat([cls_ones, mask_float], dim=1)
+                    mse = mse_fn(projected, teacher_all).mean(dim=-1)
+                    latent_loss = (mse * mask_with_cls).sum() / mask_with_cls.sum()
+                    batch_loss += latent_loss.item()
+                    batch_latent += latent_loss.item()
+
+                eval_loss += batch_loss
+                eval_mae_loss += batch_mae
+                eval_latent_loss += batch_latent
+                eval_count += 1
+
+        eval_loss /= eval_count
+        eval_mae_loss /= eval_count
+        eval_latent_loss /= eval_count
+
+        # Log epoch-level metrics
+        wandb.log({
+            'phase2_fusion/train_loss_epoch': train_loss,
+            'phase2_fusion/mae_loss_epoch': train_mae_loss,
+            'phase2_fusion/latent_loss_epoch': train_latent_loss,
+            'phase2_fusion/eval_loss_epoch': eval_loss,
+            'phase2_fusion/eval_mae_loss_epoch': eval_mae_loss,
+            'phase2_fusion/eval_latent_loss_epoch': eval_latent_loss,
+            'phase2_fusion/epoch': epoch + 1,
+        })
+
+        print(f"\nFusion MAE Epoch {epoch+1}/{args.stage2_fusion_epochs}:")
+        print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}")
+        print(f"  Eval  - Total: {eval_loss:.4f}, MAE: {eval_mae_loss:.4f}, Latent: {eval_latent_loss:.4f}")
+
+    print("\n=== Phase 2 (Fusion MAE Training) complete ===")
+    return mae_decoders, latent_projectors
+
 
 def evaluate_rgb_distillation(evan, projector, dataloader, device, target_modality, modality_bands_dict):
     """Evaluate RGB distillation loss on test set."""
@@ -879,338 +1288,3 @@ def train_distillrgb_phase(model, train_loader, test_loader_full, device, args, 
     print("\n=== Phase 1a (RGB Distillation) complete ===")
     return projector  # Return for potential analysis
 
-
-# ==================== Multi-Modal Fusion MAE (Stage 3) ====================
-
-class MultiModalMaskingStrategy:
-    """
-    Asymmetric masking strategy for multi-modal fusion MAE.
-
-    - RGB: 50% modality-level drop + 25% token masking when present
-    - NewMod: Always present, 75% token masking
-    """
-
-    def __init__(
-        self,
-        rgb_modality_drop_prob: float = 0.5,
-        rgb_token_mask_ratio: float = 0.25,
-        newmod_token_mask_ratio: float = 0.75
-    ):
-        self.rgb_modality_drop_prob = rgb_modality_drop_prob
-        self.rgb_token_mask_ratio = rgb_token_mask_ratio
-        self.newmod_token_mask_ratio = newmod_token_mask_ratio
-
-    def _generate_mask(self, batch_size: int, num_patches: int, mask_ratio: float, device):
-        """Generate random mask for patches."""
-        len_keep = int(num_patches * (1 - mask_ratio))
-
-        # Random shuffle
-        noise = torch.rand(batch_size, num_patches, device=device)
-        ids_shuffle = torch.argsort(noise, dim=1)
-        ids_restore = torch.argsort(ids_shuffle, dim=1)
-
-        # Keep first len_keep patches
-        ids_keep = ids_shuffle[:, :len_keep]
-
-        # Create mask: 0 is keep, 1 is masked
-        mask = torch.ones([batch_size, num_patches], device=device)
-        mask[:, :len_keep] = 0
-        mask = torch.gather(mask, dim=1, index=ids_restore)
-
-        return ids_keep, mask.bool(), ids_restore
-
-    def __call__(self, batch_size: int, num_patches: int, device, newmod_key: str):
-        """
-        Generate masking info for a batch.
-
-        Returns:
-            Dict[modality] -> {
-                'present': bool,
-                'ids_keep': Tensor [B, num_keep],
-                'mask': Tensor [B, num_patches] (True=masked),
-                'ids_restore': Tensor [B, num_patches]
-            }
-        """
-        import random
-        result = {}
-
-        # RGB: potentially dropped entirely
-        rgb_present = random.random() > self.rgb_modality_drop_prob
-        if rgb_present:
-            ids_keep, mask, ids_restore = self._generate_mask(
-                batch_size, num_patches, self.rgb_token_mask_ratio, device
-            )
-            result['rgb'] = {
-                'present': True,
-                'ids_keep': ids_keep,
-                'mask': mask,
-                'ids_restore': ids_restore
-            }
-        else:
-            result['rgb'] = {'present': False}
-
-        # NewMod: always present, always masked at token level
-        ids_keep, mask, ids_restore = self._generate_mask(
-            batch_size, num_patches, self.newmod_token_mask_ratio, device
-        )
-        result[newmod_key] = {
-            'present': True,
-            'ids_keep': ids_keep,
-            'mask': mask,
-            'ids_restore': ids_restore
-        }
-
-        return result
-
-
-class MultiModalMAEDecoder(nn.Module):
-    """
-    Shared decoder backbone with per-modality prediction heads for multi-modal MAE.
-    """
-
-    def __init__(self, embed_dim, patch_size, decoder_depth=2, decoder_heads=8, ffn_factor=4):
-        super().__init__()
-        self.patch_size = patch_size
-        self.embed_dim = embed_dim
-
-        # Shared mask token for masked positions
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-
-        # Shared transformer decoder
-        from torch.nn import TransformerEncoderLayer, TransformerEncoder
-        decoder_layer = TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=decoder_heads,
-            dim_feedforward=embed_dim * ffn_factor,
-            batch_first=True,
-            norm_first=True
-        )
-        self.decoder = TransformerEncoder(decoder_layer, num_layers=decoder_depth)
-
-        # Per-modality prediction heads (populated dynamically)
-        self.modality_pred_heads = nn.ModuleDict()
-
-        # Initialize mask token
-        torch.nn.init.normal_(self.mask_token, std=0.02)
-
-    def register_modality(self, modality_name: str, num_channels: int):
-        """Register a modality with its channel count."""
-        self.modality_pred_heads[modality_name] = nn.Linear(
-            self.embed_dim,
-            self.patch_size * self.patch_size * num_channels
-        )
-
-    def forward(self, x_full, modality_name: str):
-        """
-        Decode and predict for a specific modality.
-
-        Args:
-            x_full: [B, num_patches, embed_dim] - Full sequence with mask tokens already inserted
-            modality_name: Which modality's prediction head to use
-
-        Returns:
-            pred: [B, num_patches, patch_size^2 * num_channels]
-        """
-        # Process through decoder
-        x = self.decoder(x_full)
-
-        # Use modality-specific prediction head
-        if modality_name not in self.modality_pred_heads:
-            raise ValueError(f"Modality '{modality_name}' not registered. Call register_modality first.")
-
-        pred = self.modality_pred_heads[modality_name](x)
-        return pred
-
-
-def train_multimodal_fusion_mae_phase(
-    model, evan, train_loader, test_loader_full, device, args,
-    newmod, modality_bands_dict, use_wandb=False
-):
-    """
-    Phase A of Stage 3: Train modality encoding + fusion LoRAs via multi-modal MAE.
-
-    Trains:
-    - modality_encoders[newmod]
-    - modality_fusion_lora_adaptors[newmod]
-    - MultiModalMAEDecoder
-
-    Frozen:
-    - patch_embedders (both RGB and newmod)
-    - modality_specific_layer_adaptors (both)
-    - classifiers
-    - shared DINO backbone
-
-    Returns:
-        MultiModalMAEDecoder (for potential analysis)
-    """
-    print("\n" + "="*70)
-    print(f"=== Stage 3 Phase A: Multi-modal Fusion MAE ===")
-    print("="*70)
-
-    bands_rgb = modality_bands_dict['rgb']
-    bands_newmod = modality_bands_dict[newmod]
-
-    # Create shared decoder with per-modality prediction heads
-    mae_decoder = MultiModalMAEDecoder(
-        embed_dim=evan.embed_dim,
-        patch_size=evan.patch_size,
-        decoder_depth=2,
-        decoder_heads=8
-    ).to(device)
-
-    # Register modalities
-    mae_decoder.register_modality('rgb', num_channels=len(bands_rgb))
-    mae_decoder.register_modality(newmod, num_channels=len(bands_newmod))
-
-    # Ensure newmod components exist
-    if newmod not in evan.patch_embedders:
-        num_newmod_channels = len(bands_newmod)
-        print(f"  Creating {newmod} modality components...")
-        evan.create_modality_components(newmod, num_newmod_channels)
-
-    # Freeze everything first
-    for param in model.parameters():
-        param.requires_grad = False
-
-    # Unfreeze: modality encoding (newmod) and fusion LoRAs (newmod)
-    evan.modality_encoders[newmod].requires_grad_(True)
-    print(f"  Unfroze: {newmod.capitalize()} modality encoding")
-
-    evan.modality_fusion_lora_adaptors[newmod].requires_grad_(True)
-    print(f"  Unfroze: {newmod.capitalize()} fusion LoRAs")
-
-    print(f"  Frozen: Patch embedders, modality-specific LoRAs, classifiers, DINO backbone")
-
-    # Count parameters
-    trainable_params_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
-    trainable_params_decoder = sum(p.numel() for p in mae_decoder.parameters())
-    print(f"\nTrainable parameters: {trainable_params_evan + trainable_params_decoder:,}")
-    print(f"  EVAN (encoding + fusion LoRAs): {trainable_params_evan:,}")
-    print(f"  MAE Decoder: {trainable_params_decoder:,}")
-
-    # Create masking strategy
-    masking_strategy = MultiModalMaskingStrategy(
-        rgb_modality_drop_prob=getattr(args, 'rgb_modality_drop_prob', 0.5),
-        rgb_token_mask_ratio=getattr(args, 'rgb_token_mask_ratio', 0.25),
-        newmod_token_mask_ratio=getattr(args, 'newmod_token_mask_ratio', 0.75)
-    )
-    print(f"\nMasking strategy:")
-    print(f"  RGB: {masking_strategy.rgb_modality_drop_prob:.0%} modality drop, {masking_strategy.rgb_token_mask_ratio:.0%} token mask")
-    print(f"  {newmod.upper()}: {masking_strategy.newmod_token_mask_ratio:.0%} token mask (always present)")
-
-    # Create optimizer
-    mae_params = (
-        list(filter(lambda p: p.requires_grad, model.parameters())) +
-        list(mae_decoder.parameters())
-    )
-    optimizer = torch.optim.AdamW(mae_params, lr=getattr(args, 'mae_fusion_lr', 1e-4))
-
-    num_epochs = getattr(args, 'mae_fusion_epochs', 4)
-    print(f"\n=== Training for {num_epochs} epochs ===")
-    print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
-
-    # Pre-compute band indices
-    rgb_indices = get_band_indices(bands_rgb)
-    newmod_indices = get_band_indices(bands_newmod)
-    patch_size = evan.patch_size
-    num_patches = (224 // patch_size) ** 2
-
-    # Training loop
-    global_step = 0
-    for epoch in range(num_epochs):
-        model.train()
-        mae_decoder.train()
-        train_loss = 0.0
-        train_count = 0
-
-        pbar = tqdm(train_loader, desc=f"Fusion MAE Epoch {epoch+1}/{num_epochs}")
-        for batch in pbar:
-            images = batch['image']
-            B = images.shape[0]
-
-            # Normalize both modalities
-            rgb_normalized = normalize_bands(images, rgb_indices, BAND_MINS, BAND_MAXS).to(device)
-            newmod_normalized = normalize_bands(images, newmod_indices, BAND_MINS, BAND_MAXS).to(device)
-
-            # Generate masks
-            mask_info = masking_strategy(B, num_patches, device, newmod)
-
-            # Build input dict (RGB may be dropped)
-            modal_input = {}
-            if mask_info['rgb']['present']:
-                modal_input['rgb'] = rgb_normalized
-            modal_input[newmod] = newmod_normalized
-
-            # Forward through fusion with masking
-            features, recon_info = evan.forward_features_masked_multimodal(modal_input, mask_info)
-
-            # Compute reconstruction loss for each present modality
-            total_loss = 0.0
-            loss_count = 0
-
-            for mod_name in modal_input.keys():
-                # Get target patches
-                if mod_name == 'rgb':
-                    target_img = rgb_normalized
-                else:
-                    target_img = newmod_normalized
-                target_patches = patchify(target_img, patch_size)
-
-                # Extract patch features (skip CLS/storage)
-                patch_features = features[mod_name][:, evan.n_storage_tokens + 1:, :]
-
-                # Get mask
-                mask = recon_info[mod_name]['mask']
-
-                # Decode with modality-specific head
-                pred_patches = mae_decoder(patch_features, mod_name)
-
-                # Loss only on masked patches
-                loss = mae_reconstruction_loss(pred_patches, target_patches, mask)
-                total_loss += loss
-                loss_count += 1
-
-            # Average loss across modalities
-            total_loss = total_loss / loss_count
-
-            optimizer.zero_grad()
-            total_loss.backward()
-
-            # Compute gradient norm
-            grad_norm = torch.nn.utils.clip_grad_norm_(mae_params, max_norm=float('inf'))
-
-            optimizer.step()
-
-            train_loss += total_loss.item()
-            train_count += 1
-            global_step += 1
-
-            pbar.set_postfix({
-                'loss': f'{total_loss.item():.4f}',
-                'grad_norm': f'{grad_norm:.4f}',
-                'mods': '+'.join(modal_input.keys())
-            })
-
-            # Log to wandb
-            if use_wandb:
-                wandb.log({
-                    'stage3_mae/train_loss': total_loss.item(),
-                    'stage3_mae/grad_norm': grad_norm.item(),
-                    'stage3_mae/step': global_step,
-                    'stage3_mae/rgb_present': 1.0 if mask_info['rgb']['present'] else 0.0,
-                })
-
-        train_loss /= train_count
-
-        # Log epoch-level metrics
-        if use_wandb:
-            wandb.log({
-                'stage3_mae/train_loss_epoch': train_loss,
-                'stage3_mae/epoch': epoch + 1,
-            })
-
-        print(f"\nFusion MAE Epoch {epoch+1}/{num_epochs}:")
-        print(f"  Train reconstruction loss: {train_loss:.4f}")
-
-    print("\n=== Stage 3 Phase A (Fusion MAE) complete ===")
-    return mae_decoder

@@ -44,8 +44,8 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 
 def main():
     parser = argparse.ArgumentParser(description='stage 2: Train fusion LoRAs and classifier (after stage 1 MAE)')
-    parser.add_argument('--stage1_checkpoint', type=str, required=True,
-                        help='Path to stage 1 MAE checkpoint (required)')
+    parser.add_argument('--stage2_checkpoint', type=str, required=True,
+                        help='Path to stage 2 checkpoint (required)')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size for training (default: 32)')
     parser.add_argument('--num_workers', type=int, default=4,

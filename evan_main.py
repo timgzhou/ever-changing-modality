@@ -519,7 +519,7 @@ class EVAN(nn.Module):
 
         return x, (H, W)
 
-    def forward_features(self, x: Tensor | Dict[str, Tensor] | List[Tensor], masks: Optional[Tensor] = None) -> Dict[str, Tensor]:
+    def forward_features(self, x: Dict[str, Tensor] | List[Tensor], masks: Optional[Tensor] = None) -> Dict[str, Tensor]:
         """
         Forward features with multi-modality support.
 
@@ -710,6 +710,127 @@ class EVAN(nn.Module):
             embedded_modalities[modality_key] = x_mod
 
         return embedded_modalities
+
+    def forward_fusion_from_modality_features(
+        self,
+        embedded_modalities: Dict[str, Tensor],
+    ) -> Dict[str, Dict[str, Tensor]]:
+        """
+        Forward through fusion blocks only, starting from pre-computed modality-specific features.
+
+        Useful for MAE training where masking is applied between modality-specific and fusion stages.
+        This method extracts the fusion logic from forward_features (steps 3-5).
+
+        Args:
+            embedded_modalities: Dict mapping modality_key -> tensor [B, 1+n_storage+num_patches, embed_dim]
+                                Output from forward_modality_specific_features (possibly with masking applied)
+
+        Returns:
+            Dictionary with normalized features per modality (same format as forward_features):
+            {modality: {'x_norm_clstoken', 'x_norm_patchtokens', 'x_storage_tokens', 'x_prenorm'}}
+        """
+        # Step 1: Concatenate patches for fusion (allow cross-modal attention)
+        modality_info = {}
+        all_cls_storage = {}
+        all_patches = []
+        current_idx = 0
+
+        for modality_key in sorted(embedded_modalities.keys()):
+            x_mod = embedded_modalities[modality_key]
+
+            # Extract CLS and storage tokens (keep separate per modality)
+            all_cls_storage[modality_key] = x_mod[:, :self.n_storage_tokens + 1, :]
+
+            # Extract patch tokens
+            patches = x_mod[:, self.n_storage_tokens + 1:, :]
+            num_patches = patches.shape[1]
+
+            # Store metadata for later splitting
+            modality_info[modality_key] = {
+                'num_patches': num_patches,
+                'start_idx': current_idx,
+                'end_idx': current_idx + num_patches
+            }
+
+            all_patches.append(patches)
+            current_idx += num_patches
+
+        # Concatenate all patches along sequence dimension for cross-modal attention
+        x_patches_concat = torch.cat(all_patches, dim=1)  # [B, sum(num_patches), embed_dim]
+
+        # Concatenate all CLS/storage tokens from all modalities
+        all_cls_storage_list = [all_cls_storage[k] for k in sorted(all_cls_storage.keys())]
+        x_cls_storage_concat = torch.cat(all_cls_storage_list, dim=1)
+        n_cls_storage_per_modality = self.n_storage_tokens + 1
+        n_modalities = len(all_cls_storage)
+
+        # Compute H, W from image size and patch size
+        H = W = self.img_size // self.patch_size
+
+        # Combine for fusion processing
+        x_fused = torch.cat([x_cls_storage_concat, x_patches_concat], dim=1)
+
+        # Step 2: Process through fusion blocks with cross-modal attention
+        for i in range(self.tz_fusion_time, len(self.blocks)):
+            if self.rope_embed is not None:
+                rope_sincos = self.rope_embed(H=H, W=W)
+            else:
+                rope_sincos = None
+
+            # Shared block forward on concatenated representation
+            x_fused = self.blocks[i](x_fused, rope_sincos)
+
+            # Add fusion LoRA: sum LoRAs from all present modalities
+            lora_idx = i - self.tz_fusion_time
+            lora_output = 0
+            for modality_key in embedded_modalities.keys():
+                lora = self.modality_fusion_lora_adaptors[modality_key][lora_idx]
+                lora_output = lora_output + lora(x_fused)
+
+            x_fused = x_fused + lora_output
+
+        # Step 3: Split fused representation back into modality-specific outputs
+        total_cls_storage = n_modalities * n_cls_storage_per_modality
+        x_cls_storage_fused = x_fused[:, :total_cls_storage, :]
+        x_patches_fused = x_fused[:, total_cls_storage:, :]
+
+        # Split back into modality-specific outputs
+        output_dict = {}
+        sorted_modalities = sorted(embedded_modalities.keys())
+        for mod_idx, modality_key in enumerate(sorted_modalities):
+            # Extract this modality's CLS/storage tokens
+            cls_start = mod_idx * n_cls_storage_per_modality
+            cls_end = cls_start + n_cls_storage_per_modality
+            x_cls_storage_mod = x_cls_storage_fused[:, cls_start:cls_end, :]
+
+            # Extract this modality's patches
+            info = modality_info[modality_key]
+            patch_start, patch_end = info['start_idx'], info['end_idx']
+            patches = x_patches_fused[:, patch_start:patch_end, :]
+
+            # Recombine this modality's CLS/storage with its patches
+            x_mod = torch.cat([x_cls_storage_mod, patches], dim=1)
+
+            # Apply normalization
+            if self.untie_cls_and_patch_norms or self.untie_global_and_local_cls_norm:
+                if self.untie_cls_and_patch_norms:
+                    x_norm_cls_reg = self.cls_norm(x_mod[:, :self.n_storage_tokens + 1])
+                else:
+                    x_norm_cls_reg = self.norm(x_mod[:, :self.n_storage_tokens + 1])
+                x_norm_patch = self.norm(x_mod[:, self.n_storage_tokens + 1:])
+            else:
+                x_norm = self.norm(x_mod)
+                x_norm_cls_reg = x_norm[:, :self.n_storage_tokens + 1]
+                x_norm_patch = x_norm[:, self.n_storage_tokens + 1:]
+
+            output_dict[modality_key] = {
+                "x_norm_clstoken": x_norm_cls_reg[:, 0],
+                "x_storage_tokens": x_norm_cls_reg[:, 1:],
+                "x_norm_patchtokens": x_norm_patch,
+                "x_prenorm": x_mod,
+            }
+
+        return output_dict
 
     def set_requires_grad(
         self,
