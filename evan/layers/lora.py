@@ -27,12 +27,11 @@ class LoRALayer(nn.Module):
         self,
         dim: int,
         rank: int = 8,
-        alpha: float = 1.0,
         device=None,
     ) -> None:
         super().__init__()
         self.rank = rank
-        self.alpha = alpha
+        self.alpha = float(rank)
 
         # Low-rank matrices: A (dim x rank), B (rank x dim)
         # Zero-initialized so LoRA initially produces zero output
@@ -40,7 +39,7 @@ class LoRALayer(nn.Module):
         self.lora_B = nn.Parameter(torch.zeros(rank, dim, device=device))
 
         # Scaling factor (typically alpha / rank)
-        self.scaling = alpha / rank if rank > 0 else 1.0
+        self.scaling = self.alpha / rank if rank > 0 else 1.0
 
     def forward(self, x: Tensor) -> Tensor:
         """
