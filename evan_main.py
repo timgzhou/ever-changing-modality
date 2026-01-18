@@ -1,22 +1,13 @@
-import argparse
-import sys
-from pathlib import Path
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch.utils.data import DataLoader
-from einops import rearrange
-from transformers import AutoImageProcessor
-from torchgeo.datasets import EuroSAT
-from tqdm import tqdm
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
-from evan.layers import LayerScale, LoRALayer, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
+from evan.layers import LoRALayer, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
 from functools import partial
 
 logger = logging.getLogger("evan")
+
 ffn_layer_dict = {
     "mlp": Mlp,
     "swiglu": SwiGLUFFN,
@@ -64,7 +55,7 @@ class EVAN(nn.Module):
         ffn_layer: str = "mlp",
         ffn_bias: bool = True,
         proj_bias: bool = True,
-        n_storage_tokens: int = 0,
+        n_storage_tokens: int = 4,
         mask_k_bias: bool = False,
         untie_cls_and_patch_norms: bool = False,
         untie_global_and_local_cls_norm: bool = False,
@@ -72,6 +63,7 @@ class EVAN(nn.Module):
         tz_modality_specific_layer_augmenter: Literal["lora", "fft"] = "lora",
         tz_fusion_time: int = 3,
         tz_lora_rank: int=32,
+        starting_modality: str='rgb',
         **ignored_kwargs,
     ):
         super().__init__()
@@ -90,6 +82,7 @@ class EVAN(nn.Module):
         self.tz_fusion_time = tz_fusion_time
         self.tz_lora_rank = tz_lora_rank
         self.tz_modality_specific_layer_augmenter = tz_modality_specific_layer_augmenter
+        self.starting_modality=starting_modality
 
         self.patch_embedders = nn.ModuleDict()
         rgb_embedder = PatchEmbed(
@@ -99,15 +92,15 @@ class EVAN(nn.Module):
             embed_dim=embed_dim,
             flatten_embedding=False,
         )
-        self.patch_embedders['rgb'] = rgb_embedder
+        self.patch_embedders[starting_modality] = rgb_embedder
 
         # Per-modality CLS and storage tokens
         self.n_storage_tokens = n_storage_tokens
         self.cls_tokens = nn.ParameterDict()
-        self.cls_tokens['rgb'] = nn.Parameter(torch.empty(1, 1, embed_dim, device=device))
+        self.cls_tokens[starting_modality] = nn.Parameter(torch.empty(1, 1, embed_dim, device=device))
         self.storage_tokens = nn.ParameterDict()
         if self.n_storage_tokens > 0:
-            self.storage_tokens['rgb'] = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim, device=device))
+            self.storage_tokens[starting_modality] = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim, device=device))
         self.rope_embed = RopePositionEmbedding(
             embed_dim=embed_dim,
             num_heads=num_heads,
@@ -167,12 +160,12 @@ class EVAN(nn.Module):
         # Initialize modality-specific LoRA adaptors for first tz_fusion_time blocks
         self.modality_specific_layer_adaptors = nn.ModuleDict()
         if tz_modality_specific_layer_augmenter=="lora":
-            self.modality_specific_layer_adaptors['rgb'] = nn.ModuleList([
+            self.modality_specific_layer_adaptors[starting_modality] = nn.ModuleList([
                 LoRALayer(embed_dim, rank=self.tz_lora_rank, device=device)
                 for _ in range(tz_fusion_time)
             ])
         elif tz_modality_specific_layer_augmenter=="fft":    
-            self.modality_specific_layer_adaptors['rgb'] = nn.ModuleList([
+            self.modality_specific_layer_adaptors[starting_modality] = nn.ModuleList([
                 SelfAttentionBlock(
                     dim=embed_dim,
                     num_heads=num_heads,
@@ -194,14 +187,14 @@ class EVAN(nn.Module):
 
         # Initialize modality encodings (per-token embeddings added after modality-specific processing)
         self.modality_encoders = nn.ParameterDict()
-        self.modality_encoders['rgb'] = nn.Parameter(
+        self.modality_encoders[starting_modality] = nn.Parameter(
             torch.zeros(1, 1, embed_dim, device=device)
         )
 
         # Initialize fusion LoRA adaptors for remaining blocks (after tz_fusion_time)
         self.modality_fusion_lora_adaptors = nn.ModuleDict()
         num_fusion_blocks = depth - tz_fusion_time
-        self.modality_fusion_lora_adaptors['rgb'] = nn.ModuleList([
+        self.modality_fusion_lora_adaptors[starting_modality] = nn.ModuleList([
             LoRALayer(embed_dim, rank=self.tz_lora_rank, device=device)
             for _ in range(num_fusion_blocks)
         ])
@@ -253,7 +246,6 @@ class EVAN(nn.Module):
             new_key = new_key.replace('layer.', 'blocks.')
 
             # Attention mapping: separate q,k,v to combined qkv
-            # We'll handle this separately below
             if '.attention.q_proj.' in new_key or '.attention.k_proj.' in new_key or '.attention.v_proj.' in new_key:
                 continue  # Skip for now, handle qkv merging below
 
@@ -315,7 +307,7 @@ class EVAN(nn.Module):
         # Count transferred parameters
         transferred_params = sum(p.numel() for p in checkpoint.values())
         checkpoint_params = transferred_params - created_params  # Actual params from checkpoint
-        print(f"    - From checkpoint: {checkpoint_params:,}")
+        print(f"    - From HuggingFace checkpoint: {checkpoint_params:,}")
         print(f"    - Created (K bias zeros): {created_params:,}")
 
         # For FFT mode: Copy first tz_fusion_time blocks to RGB modality-specific layers
@@ -349,18 +341,7 @@ class EVAN(nn.Module):
             return False
 
         # Report missing keys (in EVAN but not in DINO checkpoint)
-        expected_missing = [k for k in result.missing_keys if is_expected_missing(k)]
         unexpected_missing = [k for k in result.missing_keys if not is_expected_missing(k)]
-
-        if len(expected_missing) > 0:
-            expected_missing_params = sum(
-                self.state_dict()[k].numel()
-                for k in expected_missing
-                if k in self.state_dict()
-            )
-            # print(f"  Expected missing keys (in EVAN but not in DINO): {len(expected_missing)}")
-            # print(f"    Keys: {expected_missing}")
-            # print(f"    Parameters: {expected_missing_params:,}")
 
         if len(unexpected_missing) > 0:
             unexpected_missing_params = sum(
@@ -368,7 +349,7 @@ class EVAN(nn.Module):
                 for k in unexpected_missing
                 if k in self.state_dict()
             )
-            print(f"  ⚠️  Unexpected missing keys (in EVAN but not in DINO): {len(unexpected_missing)}")
+            print(f"  !!  Unexpected missing keys (in EVAN but not in DINO): {len(unexpected_missing)}")
             print(f"    Keys: {unexpected_missing}")
             print(f"    Parameters: {unexpected_missing_params:,}")
 
@@ -379,7 +360,7 @@ class EVAN(nn.Module):
                 for k in result.unexpected_keys
                 if k in checkpoint
             )
-            print(f"  ⚠️  Unexpected keys (in DINO but not loaded into EVAN): {len(result.unexpected_keys)}")
+            print(f"  !!  Unexpected keys (in DINO but not loaded into EVAN): {len(result.unexpected_keys)}")
             print(f"    First 10 keys: {result.unexpected_keys[:10]}")
             print(f"    Untransferred parameters: {untransferred_params:,}")
 
@@ -430,11 +411,11 @@ class EVAN(nn.Module):
         self.modality_specific_layer_adaptors[modality_key] = adaptor_list
 
         # 3. Create modality-specific CLS token (initialized from RGB)
-        self.cls_tokens[modality_key] = nn.Parameter(self.cls_tokens['rgb'].data.clone())
+        self.cls_tokens[modality_key] = nn.Parameter(self.cls_tokens[self.starting_modality].data.clone())
 
         # 4. Create modality-specific storage tokens (initialized from RGB)
         if self.n_storage_tokens > 0:
-            self.storage_tokens[modality_key] = nn.Parameter(self.storage_tokens['rgb'].data.clone())
+            self.storage_tokens[modality_key] = nn.Parameter(self.storage_tokens[self.starting_modality].data.clone())
 
         # 5. Create modality encoding (per-token embedding)
         modality_encoding = nn.Parameter(
@@ -1015,7 +996,7 @@ class EVANClassifier(nn.Module):
             # Per-modality classifiers that get ensembled
             self.classifier = None
             self.modality_classifiers = nn.ModuleDict()
-            self.instantiate_modality_classifier('rgb')
+            self.instantiate_modality_classifier(evan_model.starting_modality)
         else:
             raise ValueError(f"Unknown fusion strategy: {classifier_strategy}")
 
@@ -1089,7 +1070,22 @@ class EVANClassifier(nn.Module):
             logits = torch.stack(all_logits).mean(dim=0)
 
         return logits
-
+    
+    def mean_to_ensemble(self, new_key:str='rgb'):
+        """Convert from 'mean' to 'ensemble' strategy, the existing classifier becomes new_key classifier"""
+        assert self.classifier_strategy == 'mean'
+        self.modality_classifiers = nn.ModuleDict()
+        self.modality_classifiers[new_key]=self.classifier
+        self.classifier=None
+        self.classifier_strategy='ensemble'
+        
+    def ensemble_to_mean(self, key_to_keep:str='rgb'):
+        """Convert from 'ensemble' to 'mean' strategy, keeping only key_to_keep classifier"""
+        assert self.classifier_strategy == 'ensemble'
+        self.classifier=self.modality_classifiers[key_to_keep]
+        self.modality_classifiers=None
+        self.classifier_strategy = 'mean'
+        
     def set_requires_grad(
         self,
         modality: str,
