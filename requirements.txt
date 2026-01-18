@@ -10,3 +10,4 @@ torch
 torchvision
 accelerate
 torchgeo
+seaborn

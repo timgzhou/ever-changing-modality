@@ -279,7 +279,7 @@ def evaluate_mae_reconstruction(evan, mae_decoder, dataloader, device,
 def single_modality_training_loop(model, train_loader, test_loader, device,
                                    modality_bands_dict, criterion, optimizer, num_epochs,
                                    modality, phase_name="Training",
-                                   use_wandb=False, wandb_prefix=None, clip_norm=float('inf')):
+                                   use_wandb=False, wandb_prefix=None, clip_norm=10):
     """
     Simple training loop for single-modality EVAN training (Stage 0).
 
@@ -304,6 +304,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
     global_step = 0
     best_test_acc = 0
     best_epoch = 0
+    scheduler = ReduceLROnPlateau(optimizer,factor=0.5,patience=0,min_lr=1e-6)
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
@@ -356,6 +357,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
             model, test_loader, criterion, device,
             modality_bands_dict, modalities_to_use=(modality,)
         )
+        scheduler.step(train_loss)
         if (epoch%8==1) or (epoch+1==num_epochs):
             print(f"  Train ({mod_str}): Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
             print(f"  Test ({mod_str}):  Loss: {test_loss:.4f}, Acc: {test_acc:.2f}% (epoch {epoch+1}/{num_epochs})")
@@ -370,6 +372,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                 f'{wandb_prefix}/eval_loss': test_loss,
                 f'{wandb_prefix}/eval_acc': test_acc,
                 f'{wandb_prefix}/epoch': epoch + 1,
+                f'{wandb_prefix}/lr': optimizer.param_groups[0]['lr'],
             })
 
     return train_acc, test_acc, best_test_acc, best_epoch
@@ -1156,6 +1159,262 @@ def train_mae_fusion_phase(
 
     print("\n=== Phase 2 (Fusion MAE Training) complete ===")
     return mae_decoders, latent_projectors
+
+
+def train_hybrid_phase(model, train_loader, test_loader_full, device, args, bands_target, target_modality, modality_bands_dict):
+    """
+    Phase 1: Hybrid training combining MAE reconstruction + RGB latent distillation.
+
+    Uses a hybrid loss combining:
+    - MAE reconstruction loss for target_modality (reconstruct raw pixels)
+    - Latent distillation loss from RGB (match frozen RGB features)
+
+    Trains:
+    - Target modality patch embedder
+    - Target modality cls/reg tokens
+    - Target modality modality-specific LoRA
+
+    Frozen:
+    - Everything else (DINO-initialized backbone, RGB components, fusion LoRA, classifier)
+    """
+    print("\n" + "="*70)
+    print(f"=== PHASE 1: Hybrid Training (MAE + RGB Distillation) for {target_modality} ===")
+    print("="*70)
+
+    evan = model.evan
+    patch_size = evan.patch_size
+    num_target_channels = len(bands_target)
+    num_patches = (evan.img_size // patch_size) ** 2
+
+    # Create MAE decoder for pixel reconstruction
+    mae_decoder = FullSequenceMAEDecoder(
+        embed_dim=evan.embed_dim,
+        num_channels=num_target_channels,
+        patch_size=patch_size,
+        decoder_depth=1,
+        ffn_factor=2
+    ).to(device)
+    print(f"  Initialized FullSequenceMAEDecoder for {target_modality}, num_channels={num_target_channels}")
+
+    # Create latent projector for RGB feature matching
+    latent_projector = nn.Sequential(
+        nn.Linear(evan.embed_dim, evan.embed_dim),
+        nn.GELU(),
+        nn.Linear(evan.embed_dim, evan.embed_dim),
+    ).to(device)
+    print(f"  Initialized Latent Projector for RGB distillation")
+
+    # Freeze everything, then unfreeze target modality components
+    model.freeze_all()
+    model.set_requires_grad(target_modality, patch_embedders=True, clsreg=True, msla=True, mfla=False, classifier=False)
+    print(f"  Unfroze: {target_modality} patch embedder, cls/reg tokens, modality-specific layer adaptors")
+
+    # Count parameters
+    trainable_in_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
+    total_in_evan = sum(p.numel() for p in evan.parameters())
+    trainable_decoder = sum(p.numel() for p in mae_decoder.parameters())
+    trainable_projector = sum(p.numel() for p in latent_projector.parameters())
+    trainable_total = trainable_in_evan + trainable_decoder + trainable_projector
+    print(f"\nTrainable parameters for Hybrid Training: {trainable_total}")
+    print(f"    EVAN: {trainable_in_evan} ({100*trainable_in_evan/total_in_evan:.2f}%)")
+    print(f"    MAE decoder: {trainable_decoder}")
+    print(f"    Latent projector: {trainable_projector}")
+
+    # Optimizer
+    params = (
+        list(filter(lambda p: p.requires_grad, evan.parameters())) +
+        list(mae_decoder.parameters()) +
+        list(latent_projector.parameters())
+    )
+    optimizer = torch.optim.AdamW(params, lr=args.ssl_lr)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
+
+    # Loss function
+    mse_fn = nn.MSELoss(reduction='none')
+
+    # Pre-compute band indices for target modality
+    target_modality_indices = get_band_indices(bands_target)
+
+    # Training loop
+    global_step = 0
+    for epoch in range(args.stage1_ssl_epochs):
+        evan.train()
+        mae_decoder.train()
+        latent_projector.train()
+        train_loss = 0.0
+        train_mae_loss = 0.0
+        train_latent_loss = 0.0
+        train_count = 0
+
+        pbar = tqdm(train_loader, desc=f"Hybrid Epoch {epoch+1}/{args.stage1_ssl_epochs}")
+        for batch in pbar:
+            # Create input for both RGB and target modality
+            evan_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=('rgb', target_modality)
+            )
+            evan_input = {k: v.to(device) for k, v in evan_input.items()}
+            B = evan_input[target_modality].shape[0]
+
+            # Get modality-specific features for both modalities
+            mod_specific = evan.forward_modality_specific_features(evan_input)
+            # {mod: [B, 1+n_storage+num_patches, embed_dim]}
+
+            # RGB features are frozen teacher targets
+            rgb_features = mod_specific['rgb'].detach()  # [B, 1+n_storage+num_patches, embed_dim]
+            target_features = mod_specific[target_modality]  # [B, 1+n_storage+num_patches, embed_dim]
+
+            # Extract patch tokens for MAE
+            n_prefix = evan.n_storage_tokens + 1
+            target_patches = target_features[:, n_prefix:, :]  # [B, num_patches, embed_dim]
+
+            # Random masking for MAE loss (loss computed only on masked patches)
+            len_keep = int(num_patches * (1 - args.mae_mask_ratio))
+            noise = torch.rand(B, num_patches, device=device)
+            ids_shuffle = torch.argsort(noise, dim=1)
+            mask = torch.ones(B, num_patches, device=device, dtype=torch.bool)
+            mask.scatter_(1, ids_shuffle[:, :len_keep], False)
+
+            # MAE Loss: Predict pixels from features
+            pred_pixels = mae_decoder(target_patches)  # [B, num_patches, patch_size^2 * C]
+
+            # Get target patches (raw pixels)
+            target_img = evan_input[target_modality]  # [B, C, H, W]
+            target_pixel_patches = patchify(target_img, patch_size)  # [B, num_patches, patch_size^2 * C]
+
+            # MAE loss on masked patches only
+            mask_float = mask.float()
+            mae_loss = mae_reconstruction_loss(pred_pixels, target_pixel_patches, mask_float)
+
+            # Latent distillation loss: Project target features to match RGB features (CLS + patches only, no storage tokens)
+            # Extract CLS token (index 0) and patch tokens (after storage tokens)
+            target_cls = target_features[:, 0:1, :]  # [B, 1, embed_dim]
+            target_patch_tokens = target_features[:, n_prefix:, :]  # [B, num_patches, embed_dim]
+            target_for_distill = torch.cat([target_cls, target_patch_tokens], dim=1)  # [B, 1+num_patches, embed_dim]
+
+            rgb_cls = rgb_features[:, 0:1, :]  # [B, 1, embed_dim]
+            rgb_patch_tokens = rgb_features[:, n_prefix:, :]  # [B, num_patches, embed_dim]
+            rgb_for_distill = torch.cat([rgb_cls, rgb_patch_tokens], dim=1)  # [B, 1+num_patches, embed_dim]
+
+            projected_features = latent_projector(target_for_distill)  # [B, 1+num_patches, embed_dim]
+            latent_loss = mse_fn(projected_features, rgb_for_distill).mean()
+
+            # Combined loss
+            total_loss = mae_loss + latent_loss
+
+            optimizer.zero_grad()
+            total_loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=float('inf'))
+            optimizer.step()
+
+            train_loss += total_loss.item()
+            train_mae_loss += mae_loss.item()
+            train_latent_loss += latent_loss.item()
+            train_count += 1
+            global_step += 1
+
+            pbar.set_postfix({
+                'loss': f'{total_loss.item():.4f}',
+                'mae': f'{mae_loss.item():.4f}',
+                'latent': f'{latent_loss.item():.4f}',
+                'grad': f'{grad_norm:.4f}'
+            })
+
+            # Log to wandb every step
+            wandb.log({
+                'phase1_hybrid/train_loss': total_loss.item(),
+                'phase1_hybrid/mae_loss': mae_loss.item(),
+                'phase1_hybrid/latent_loss': latent_loss.item(),
+                'phase1_hybrid/grad_norm': grad_norm.item(),
+                'phase1_hybrid/epoch': epoch + 1,
+                'phase1_hybrid/step': global_step,
+                'phase1_hybrid/lr': optimizer.param_groups[0]['lr'],
+            })
+
+        # Epoch summary
+        train_loss /= train_count
+        train_mae_loss /= train_count
+        train_latent_loss /= train_count
+
+        scheduler.step(train_loss)
+
+        # Evaluation on test set
+        evan.eval()
+        mae_decoder.eval()
+        latent_projector.eval()
+        eval_loss = 0.0
+        eval_mae_loss = 0.0
+        eval_latent_loss = 0.0
+        eval_count = 0
+
+        with torch.no_grad():
+            for batch in test_loader_full:
+                evan_input = create_multimodal_batch(
+                    batch, modality_bands_dict=modality_bands_dict,
+                    modalities=('rgb', target_modality)
+                )
+                evan_input = {k: v.to(device) for k, v in evan_input.items()}
+                B = evan_input[target_modality].shape[0]
+
+                mod_specific = evan.forward_modality_specific_features(evan_input)
+                rgb_features = mod_specific['rgb']
+                target_features = mod_specific[target_modality]
+
+                n_prefix = evan.n_storage_tokens + 1
+                target_patches = target_features[:, n_prefix:, :]
+
+                # Random masking
+                len_keep = int(num_patches * (1 - args.mae_mask_ratio))
+                noise = torch.rand(B, num_patches, device=device)
+                ids_shuffle = torch.argsort(noise, dim=1)
+                mask = torch.ones(B, num_patches, device=device, dtype=torch.bool)
+                mask.scatter_(1, ids_shuffle[:, :len_keep], False)
+
+                # MAE loss
+                pred_pixels = mae_decoder(target_patches)
+                target_img = evan_input[target_modality]
+                target_pixel_patches = patchify(target_img, patch_size)
+                mask_float = mask.float()
+                mae_loss = mae_reconstruction_loss(pred_pixels, target_pixel_patches, mask_float)
+
+                # Latent loss (CLS + patches only, no storage tokens)
+                target_cls = target_features[:, 0:1, :]
+                target_patch_tokens = target_features[:, n_prefix:, :]
+                target_for_distill = torch.cat([target_cls, target_patch_tokens], dim=1)
+
+                rgb_cls = rgb_features[:, 0:1, :]
+                rgb_patch_tokens = rgb_features[:, n_prefix:, :]
+                rgb_for_distill = torch.cat([rgb_cls, rgb_patch_tokens], dim=1)
+
+                projected_features = latent_projector(target_for_distill)
+                latent_loss = mse_fn(projected_features, rgb_for_distill).mean()
+
+                eval_loss += (mae_loss.item() + latent_loss.item())
+                eval_mae_loss += mae_loss.item()
+                eval_latent_loss += latent_loss.item()
+                eval_count += 1
+
+        eval_loss /= eval_count
+        eval_mae_loss /= eval_count
+        eval_latent_loss /= eval_count
+
+        # Log epoch-level metrics
+        wandb.log({
+            'phase1_hybrid/train_loss_epoch': train_loss,
+            'phase1_hybrid/mae_loss_epoch': train_mae_loss,
+            'phase1_hybrid/latent_loss_epoch': train_latent_loss,
+            'phase1_hybrid/eval_loss_epoch': eval_loss,
+            'phase1_hybrid/eval_mae_loss_epoch': eval_mae_loss,
+            'phase1_hybrid/eval_latent_loss_epoch': eval_latent_loss,
+            'phase1_hybrid/epoch': epoch + 1,
+        })
+
+        print(f"\nHybrid Epoch {epoch+1}/{args.stage1_ssl_epochs}:")
+        print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}")
+        print(f"  Eval  - Total: {eval_loss:.4f}, MAE: {eval_mae_loss:.4f}, Latent: {eval_latent_loss:.4f}")
+
+    print("\n=== Phase 1 (Hybrid Training) complete ===")
+    return mae_decoder, latent_projector
 
 
 def evaluate_rgb_distillation(evan, projector, dataloader, device, target_modality, modality_bands_dict):

@@ -42,15 +42,16 @@ def main():
                         help='n modality-independent layers before fusion')
     parser.add_argument('--tz_lora_rank', type=int, default=32,
                         help='rank of lora adaptors')
+    parser.add_argument('--tz_modality_specific_layer_augmenter',type=str, default='lora', choices=['lora', 'fft'])
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help='Directory to save checkpoints')
     parser.add_argument('--wandb_project', type=str, default='evan-eurosat-stage0(supervised)',
                         help='Wandb project name')
     parser.add_argument('--global_rep', type=str, default='clstoken', choices=['clstoken','mean_patch'])
     parser.add_argument('--modality', type=str, default='rgb', choices=['rgb','vre','nir','swir','aw'])
-    parser.add_argument('--train_mode', type=str, default='probe', choices=['probe','lora','fft','emb+probe'])
+    parser.add_argument('--train_mode', type=str, default='emb+probe', choices=['probe','adaptor','fft','emb+probe'])
     args = parser.parse_args()
-    tz_modality_specific_layer_augmenter='fft' if args.train_mode=="fft" else 'lora'
+
     # Initialize wandb if enabled
     if args.wandb_project:
         wandb.init(
@@ -110,7 +111,7 @@ def main():
     evan = model_fn(
         tz_fusion_time=args.tz_fusion_time,
         tz_lora_rank=args.tz_lora_rank,
-        tz_modality_specific_layer_augmenter=tz_modality_specific_layer_augmenter,
+        tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
         n_storage_tokens=4,
         device=device
     )
@@ -132,10 +133,10 @@ def main():
         model.set_requires_grad('backbone', blocks=True, norm=True)
         model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, classifier=True)
         print(f"Mode=fft, Freezing lora paths, training full layers and classifier.")
-    elif args.train_mode == 'lora':
+    elif args.train_mode == 'adaptor':
         # Train LoRA adaptors + patch embedder + classifier
         model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, classifier=True)
-        print(f"Mode=lora, Freezing backbone, only training lora adaptors and classifier.")
+        print(f"Mode=adaptor, Freezing backbone, training embedder, lora or fft adaptors and classifier.")
     elif args.train_mode == 'probe':
         # Train only classifier
         model.set_requires_grad(args.modality, classifier=True)
@@ -187,6 +188,7 @@ def main():
             'train_split': 'train1',
             'tz_fusion_time': args.tz_fusion_time,
             'tz_lora_rank': args.tz_lora_rank,
+            'global_rep': args.global_rep,
             'train_mode': args.train_mode,
             'modality': args.modality,
             'bands': bands_mod,
@@ -205,12 +207,12 @@ def main():
     
     filename="train_stage0_res.csv"
     file_exists=os.path.isfile("train_stage0_res.csv")
-    fieldnames=["model_type","modality","train_mode","tz_lora_rank","learning_rate","test_accuracy","epoch","best_test_accuracy(oracle)","best_epoch","saved_checkpoint"]
+    fieldnames=["model_type","modality","train_mode","tz_lora_rank","tz_modality_specific_layer_augmenter","learning_rate","test_accuracy","epoch","best_test_accuracy(oracle)","best_epoch","saved_checkpoint","global_rep"]
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
         if not file_exists:
             writer.writerow(fieldnames)
-        writer.writerow([args.model,args.modality,args.train_mode,args.tz_lora_rank,args.lr,f"{test_acc:.2f}",num_epochs,f"{best_test_acc:.2f}",best_epoch,checkpoint_path])
+        writer.writerow([args.model,args.modality,args.train_mode,args.tz_lora_rank,args.tz_modality_specific_layer_augmenter,args.lr,f"{test_acc:.2f}",num_epochs,f"{best_test_acc:.2f}",best_epoch,checkpoint_path])
     
     # Finish wandb run
     if args.wandb_project:

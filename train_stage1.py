@@ -27,9 +27,9 @@ from eurosat_data_utils import (
 from train_utils import (
     load_split_indices,
     single_modality_training_loop,
-    supervised_finetune_phase,
     train_distillrgb_phase,
     train_mae_phase,
+    train_hybrid_phase,
 )
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
@@ -48,8 +48,8 @@ def main():
     parser.add_argument('--stage1_lr', type=float, default=1e-3,
                         help='Learning rate for supervised mode (default: 1e-3)')
     parser.add_argument('--stage1_train_method', type=str, default='mae',
-                        choices=['supervised', 'mae', 'distillrgb'],
-                        help='Stage 1 training method: supervised (all components) or mae (embedder + modality-specific only)')
+                        choices=['mae', 'distillrgb', 'hybrid'],
+                        help='Stage 1 training method: mae (reconstruction), distillrgb (feature distillation), or hybrid (mae + latent distillation)')
     parser.add_argument('--stage1_ssl_epochs', type=int, default=4,
                         help='Number of MAE epochs for mae mode (default: 4)')
     parser.add_argument('--mae_mask_ratio', type=float, default=0.85,
@@ -174,11 +174,17 @@ def main():
         print(f"\n=== Stage 1 (MAE) checkpoint saved to: {checkpoint_path_stage1} ===")
         print(f"Trained components: {newmod} patch embedder, {newmod} cls and reg tokens, {newmod} modality-specific LoRAs")
 
-    if args.stage1_train_method == 'distillrgb':
+    elif args.stage1_train_method == 'distillrgb':
         # ========== Distill RGB TRAINING (trains embedder + modality-specific only) ==========
         print(f"\nUsing Distill RGB training method (trains embedder + modality-specific LoRAs for {newmod=})")
         train_distillrgb_phase(model, train2_loader, test_loader_full, device, args, bands_newmod, newmod, modality_bands_dict)
         checkpoint_path_stage1 = os.path.join(args.checkpoint_dir, f'evan_eurosat_stage1_distillrgb_{timestamp_stage1}.pt')
+
+    elif args.stage1_train_method == 'hybrid':
+        # ========== HYBRID TRAINING (MAE + latent distillation) ==========
+        print(f"\nUsing Hybrid training method (MAE reconstruction + RGB latent distillation for {newmod=})")
+        train_hybrid_phase(model, train2_loader, test_loader_full, device, args, bands_newmod, newmod, modality_bands_dict)
+        checkpoint_path_stage1 = os.path.join(args.checkpoint_dir, f'evan_eurosat_stage1_hybrid_{timestamp_stage1}.pt')
 
     checkpoint_stage1 = {
             'model_state_dict': model.state_dict(),
@@ -208,7 +214,7 @@ def main():
     model.set_requires_grad(newmod, patch_embedders=False, clsreg=False, msla=False, mfla=True, modality_encoders=True, classifier=True)
     print(f"Freezing modality-specific tokenizer, cls-reg tokens, modality-specific layer adaptors, training modality-fusion layer adaptors, modality_encoders, classifier.")
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=0.0001)
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=0.001)
     print(f"\n=== Training for {num_supervised_epochs} epochs ===")
     print(f"Strategy: Train and evaluate on {newmod} only (train2 split)")
     train_acc, test_acc, best_test_acc, best_epoch = single_modality_training_loop(
