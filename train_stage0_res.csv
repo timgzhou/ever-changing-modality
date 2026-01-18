@@ -1,11 +1,4 @@
 model_type,modality,train_mode,tz_lora_rank,learning_rate,test_accuracy,epoch,best_test_accuracy(oracle),best_epoch,saved_checkpoint
-evan_small,rgb,probe,32,0.001,95.69,1,95.69,1,checkpoints/evan_eurosat_stage0_rgb_20260117_032349.pt
-evan_small,vre,lora,32,0.001,71.43,1,71.43,1,checkpoints/evan_eurosat_stage0_vre_20260117_032548.pt
-evan_small,rgb,lora,32,0.001,34.81,1,34.81,1,checkpoints/evan_eurosat_stage0_rgb_20260117_032751.pt
-evan_small,rgb,lora,32,0.0001,91.65,1,91.65,1,checkpoints/evan_eurosat_stage0_rgb_20260117_033006.pt
-evan_small,rgb,probe,32,0.0001,93.50,1,93.50,1,checkpoints/evan_eurosat_stage0_rgb_20260117_033212.pt
-evan_small,rgb,lora,32,0.0003,85.00,1,85.00,1,checkpoints/evan_eurosat_stage0_rgb_20260117_033411.pt
-evan_small,rgb,fft,32,0.0001,96.26,1,96.26,1,checkpoints/evan_eurosat_stage0_rgb_20260117_033642.pt
 evan_small,rgb,fft,32,0.0001,98.04,5,98.04,5,checkpoints/evan_eurosat_stage0_rgb_20260117_034834.pt
 evan_small,rgb,probe,32,0.0001,96.93,32,97.00,25,checkpoints/evan_eurosat_stage0_rgb_20260117_040609.pt
 evan_small,rgb,lora,32,0.0001,95.00,32,96.67,30,checkpoints/evan_eurosat_stage0_rgb_20260117_040718.pt
@@ -16,3 +9,15 @@ evan_small,swir,probe,32,0.0001,66.37,32,67.67,27,checkpoints/evan_eurosat_stage
 evan_small,swir,lora,32,0.0001,80.87,32,80.87,32,checkpoints/evan_eurosat_stage0_swir_20260117_043552.pt
 evan_small,vre,fft,32,0.0001,84.94,64,86.24,53,checkpoints/evan_eurosat_stage0_vre_20260117_045832.pt
 evan_small,swir,fft,32,0.0001,83.09,64,85.91,60,checkpoints/evan_eurosat_stage0_swir_20260117_052931.pt
+evan_small,aw,probe,32,0.0001,33.52,32,34.20,29,checkpoints/evan_eurosat_stage0_aw_20260117_125241.pt
+evan_small,nir,probe,32,0.0001,57.44,32,57.44,32,checkpoints/evan_eurosat_stage0_nir_20260117_130531.pt
+evan_small,aw,lora,32,0.0001,46.13,32,47.22,27,checkpoints/evan_eurosat_stage0_aw_20260117_130810.pt
+evan_small,nir,lora,32,0.0001,70.24,32,70.63,31,checkpoints/evan_eurosat_stage0_nir_20260117_131952.pt
+evan_small,vre,emb+probe,32,0.0001,65.57,1,65.57,1,checkpoints/evan_eurosat_stage0_vre_20260117_132051.pt
+evan_small,rgb,emb+probe,32,0.0001,96.00,32,96.54,29,checkpoints/evan_eurosat_stage0_rgb_20260117_133813.pt
+evan_small,aw,fft,32,0.0001,56.06,64,59.20,14,checkpoints/evan_eurosat_stage0_aw_20260117_133902.pt
+evan_small,nir,fft,32,0.0001,80.48,64,80.57,63,checkpoints/evan_eurosat_stage0_nir_20260117_134827.pt
+evan_small,vre,emb+probe,32,0.0001,86.24,32,86.87,30,checkpoints/evan_eurosat_stage0_vre_20260117_135319.pt
+evan_small,nir,emb+probe,32,0.0001,72.59,32,72.59,32,checkpoints/evan_eurosat_stage0_nir_20260117_140814.pt
+evan_small,swir,emb+probe,32,0.0001,83.56,32,83.89,28,checkpoints/evan_eurosat_stage0_swir_20260117_142302.pt
+evan_small,aw,emb+probe,32,0.0001,50.26,32,50.67,29,checkpoints/evan_eurosat_stage0_aw_20260117_143719.pt

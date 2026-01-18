@@ -32,8 +32,8 @@ def main():
                         help='EVAN model size (default: evan_small)')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size for training (default: 32)')
-    parser.add_argument('--lr', type=float, default=1e-3,
-                        help='Learning rate (default: 1e-3)')
+    parser.add_argument('--lr', type=float, default=1e-4,
+                        help='Learning rate (default: 1e-4)')
     parser.add_argument('--epochs', type=int, default=1,
                         help='Number of training epochs (default: 1)')
     parser.add_argument('--num_workers', type=int, default=4,
@@ -48,7 +48,7 @@ def main():
                         help='Wandb project name')
     parser.add_argument('--global_rep', type=str, default='clstoken', choices=['clstoken','mean_patch'])
     parser.add_argument('--modality', type=str, default='rgb', choices=['rgb','vre','nir','swir','aw'])
-    parser.add_argument('--train_mode', type=str, default='probe', choices=['probe','lora','fft'])
+    parser.add_argument('--train_mode', type=str, default='probe', choices=['probe','lora','fft','emb+probe'])
     args = parser.parse_args()
     tz_modality_specific_layer_augmenter='fft' if args.train_mode=="fft" else 'lora'
     # Initialize wandb if enabled
@@ -140,6 +140,10 @@ def main():
         # Train only classifier
         model.set_requires_grad(args.modality, classifier=True)
         print(f"Mode=Probe, Freezing backbone, only training classifier.")
+    elif args.train_mode == 'emb+probe':
+        # Train embedder with  classifier
+        model.set_requires_grad(args.modality, patch_embedders=True, classifier=True)
+        print(f"Mode=Emb+Probe, Freezing backbone, training embedder(tokenizer) and classifier.")
 
     # Print parameter info
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -21,7 +21,7 @@ VRE_BAND_NAMES = [
     'B05', 'B06', 'B07'
 ]
 NIR_BAND_NAMES = [
-    'B08', 'B08A'
+    'B08', 'B8A'
 ]
 SWIR_BAND_NAMES = [
     'B11', 'B12'
@@ -271,7 +271,7 @@ def create_multimodal_batch(
 
     for modality in modalities:
         if modality not in bands_dict:
-            raise ValueError(f"Modality '{modality}' not found in bands dictionary. Available: {list(bands_dict.keys())}")
+            raise ValueError(f"Modality {modality} not found in bands dictionary. Available: {list(bands_dict.keys())}")
 
         bands = bands_dict[modality]
         indices = get_band_indices(bands)

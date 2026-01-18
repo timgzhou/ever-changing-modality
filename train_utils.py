@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 from einops import rearrange
 from eurosat_data_utils import (
@@ -199,10 +200,9 @@ def patchify(imgs, patch_size):
     return patches
 
 
-def evaluate_mae_reconstruction(model, evan, mae_decoder, dataloader, device,
+def evaluate_mae_reconstruction(evan, mae_decoder, dataloader, device,
                                 bands_target, patch_size, mask_ratio, target_modality):
     """Evaluate MAE reconstruction loss on test set."""
-    model.eval()
     mae_decoder.eval()
     total_loss = 0.0
     count = 0
@@ -318,7 +318,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
             print(f"  Train ({mod_str}): Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
             print(f"  Test ({mod_str}):  Loss: {test_loss:.4f}, Acc: {test_acc:.2f}% (epoch {epoch+1}/{num_epochs})")
         if test_acc > best_test_acc:
-            print(f"    New record: {test_acc:.2f}> previous {best_test_acc:.2f} at epoch {epoch+1}")
+            print(f"    New record: {test_acc:.2f} > previous {best_test_acc:.2f} at epoch {epoch+1}")
             best_test_acc=test_acc
             best_epoch=epoch+1
         if use_wandb and wandb_prefix:
@@ -528,18 +528,18 @@ def supervised_finetune_phase(model, evan, train_loader, test_loader_full, devic
     if newmod not in evan.patch_embedders:
         num_newmod_channels = len(bands_newmod)
         print(f"  Creating {newmod} modality components (embedder, LoRAs, encoders)...")
-        evan._create_modality_components(newmod, num_newmod_channels)
+        evan.create_modality_components(newmod, num_newmod_channels)
 
     # Freeze everything first
     for param in model.parameters():
         param.requires_grad = False
 
     # Unfreeze classifier(s)
-    if model.fusion_strategy == 'mean':
+    if model.classifier_strategy == 'mean':
         for param in model.classifier.parameters():
             param.requires_grad = True
         print("  Unfroze: Classifier (mean fusion)")
-    elif model.fusion_strategy == 'ensemble':
+    elif model.classifier_strategy == 'ensemble':
         # Ensure new modality classifier exists
         if newmod not in model.modality_classifiers:
             print(f"  Creating {newmod} classifier")
@@ -618,7 +618,7 @@ def supervised_finetune_phase(model, evan, train_loader, test_loader_full, devic
         model, train_loader, test_loader_full, device,
         modality_bands_dict, criterion, optimizer, num_epochs,
         train_modalities=('rgb', newmod), newmod=newmod, phase_name=phase_name,
-        eval_newmod_only=True, modality_masking=modality_masking,
+        modality_masking=modality_masking,
         use_wandb=use_wandb, wandb_prefix=wandb_prefix, freeze_rgb=freeze_rgb
     )
 
@@ -627,10 +627,9 @@ def supervised_finetune_phase(model, evan, train_loader, test_loader_full, devic
     return optimizer, train_acc, test_acc_rgb, test_acc_newmod, test_acc_multi
 
 
-def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
-                    bands_target, target_modality, use_wandb=False):
+def train_mae_phase(model, train_loader, test_loader_full, device, args, bands_target, target_modality):
     """
-    Phase 2a: MAE SSL training for target_modality components.
+    Phase 1: MAE SSL training for target_modality components.
 
     Trains:
     - Target modality patch embedder
@@ -640,9 +639,9 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
     - Everything else (DINO-initialized backbone, RGB components, fusion LoRA, classifier)
     """
     print("\n" + "="*70)
-    print(f"=== PHASE 2a: MAE SSL Training for {target_modality} ===")
+    print(f"=== PHASE 1a: MAE SSL Training for {target_modality} ===")
     print("="*70)
-
+    evan=model.evan
     # Create MAE decoder
     patch_size = evan.patch_size  # EVAN patch size
     num_target_channels = len(bands_target)
@@ -650,50 +649,39 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
         embed_dim=evan.embed_dim,
         num_channels=num_target_channels,
         patch_size=patch_size,
-        decoder_depth=2,
+        decoder_depth=1,
         decoder_heads=8
     ).to(device)
 
-    # Ensure target modality components exist (create if needed)
-    if target_modality not in evan.patch_embedders:
-        print(f"  Creating {target_modality} modality components...")
-        evan._create_modality_components(target_modality, num_target_channels)
-        print(f"  Created: {target_modality} patch embedder, modality-specific LoRAs, modality encoding, fusion LoRAs")
+    model.freeze_all() # Freeze everything
+    model.set_requires_grad(target_modality, patch_embedders=True, clsreg=True, msla=True, mfla=False, classifier=False)
+    print(f"  Unfroze: patch embedder, clsreg tokens, modality-specific layers adaptors")
 
-    # Freeze everything
-    for param in model.parameters():
-        param.requires_grad = False
-
-    # Unfreeze target modality patch embedder and modality-specific layers for MAE training
-    for param in evan.patch_embedders[target_modality].parameters():
-        param.requires_grad = True
-    for param in evan.modality_specific_layer_adaptors[target_modality].parameters():
-        param.requires_grad = True
-    print(f"  Unfroze: {target_modality} patch embedder")
-    print(f"  Unfroze: {target_modality} modality-specific layers")
-
-    trainable_params_in_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
-    trainable_params_decoder = sum(p.numel() for p in mae_decoder.parameters())
-    trainable_total = trainable_params_in_evan+trainable_params_decoder
-    print(f"\nTrainable parameters for MAE: {trainable_total}\n    {trainable_params_in_evan=} and {trainable_params_decoder=}")
+    trainable_in_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
+    total_in_evan = sum(p.numel() for p in evan.parameters())
+    trainable_decoder = sum(p.numel() for p in mae_decoder.parameters())
+    trainable_total = trainable_in_evan+trainable_decoder
+    assert trainable_decoder!=0 and trainable_in_evan!=0
+    print(f"\nTrainable parameters for MAE: {trainable_total}\n    {trainable_in_evan=} ({100*trainable_in_evan/total_in_evan:.2f}% of EVAN) and {trainable_decoder=}")
 
     # Optimizer for MAE phase - collect trainable parameters from model + all decoder parameters
-    mae_params = list(filter(lambda p: p.requires_grad, model.parameters())) + list(mae_decoder.parameters())
+    mae_params = list(filter(lambda p: p.requires_grad, evan.parameters())) + list(mae_decoder.parameters())
 
-    optimizer_mae = torch.optim.AdamW(mae_params, lr=args.mae_lr)
+    optimizer_mae = torch.optim.AdamW(mae_params, lr=args.ssl_lr)
+    scheduler_mae = ReduceLROnPlateau(optimizer_mae,factor=0.5,patience=1,min_lr=1e-6)
 
     # Pre-compute target modality indices
     target_modality_indices = get_band_indices(bands_target)
 
     # Training loop
     global_step = 0
-    for epoch in range(args.stage2_mae_epochs):
-        model.train()
+    for epoch in range(args.stage1_ssl_epochs):
+        evan.train()
         mae_decoder.train()
         train_loss = 0.0
         train_count = 0
 
-        pbar = tqdm(train_loader, desc=f"MAE Epoch {epoch+1}/{args.stage2_mae_epochs}")
+        pbar = tqdm(train_loader, desc=f"MAE Epoch {epoch+1}/{args.stage1_ssl_epochs}")
         for batch in pbar:
             # Extract and normalize target modality bands
             images = batch['image']  # [B, 13, H, W]
@@ -729,36 +717,167 @@ def train_mae_phase(model, evan, train_loader, test_loader_full, device, args,
             pbar.set_postfix({'mae_loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'})
 
             # Log to wandb every step
-            if use_wandb:
-                wandb.log({
-                    'phase2a_mae/train_loss': loss.item(),
-                    'phase2a_mae/grad_norm': grad_norm.item(),
-                    'phase2a_mae/epoch': epoch + 1,
-                    'phase2a_mae/step': global_step,
-                })
+            wandb.log({
+                'phase1_mae/train_loss': loss.item(),
+                'phase1_mae/grad_norm': grad_norm.item(),
+                'phase1_mae/epoch': epoch + 1,
+                'phase1_mae/step': global_step,
+                'phase1_mae/lr': optimizer_mae.param_groups[0]['lr'],
+            })
 
         train_loss /= train_count
 
         # Evaluation: Show reconstruction quality on test set
         eval_loss = evaluate_mae_reconstruction(
-            model, evan, mae_decoder, test_loader_full, device,
+            evan, mae_decoder, test_loader_full, device,
             bands_target, patch_size, args.mae_mask_ratio, target_modality
         )
+        scheduler_mae.step(train_loss)
 
         # Log epoch-level metrics
-        if use_wandb:
-            wandb.log({
-                'phase2a_mae/train_loss_epoch': train_loss,
-                'phase2a_mae/eval_loss': eval_loss,
-                'phase2a_mae/epoch': epoch + 1,
-            })
+        wandb.log({
+            'phase2a_mae/train_loss_epoch': train_loss,
+            'phase2a_mae/eval_loss': eval_loss,
+            'phase2a_mae/epoch': epoch + 1,
+        })
 
-        print(f"\nMAE Epoch {epoch+1}/{args.stage2_mae_epochs}:")
+        print(f"\nMAE Epoch {epoch+1}/{args.stage1_ssl_epochs}:")
         print(f"  Train reconstruction loss: {train_loss:.4f}")
         print(f"  Test reconstruction loss:  {eval_loss:.4f}\n")
 
     print("\n=== Phase 2a (MAE SSL) complete ===")
     return mae_decoder  # Return for potential analysis
+
+
+def evaluate_rgb_distillation(evan, projector, dataloader, device, target_modality, modality_bands_dict):
+    """Evaluate RGB distillation loss on test set."""
+    evan.eval()
+    projector.eval()
+    total_loss = 0.0
+    count = 0
+    mse_loss_fn = nn.MSELoss()
+
+    with torch.no_grad():
+        for batch in dataloader:
+            evan_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict, modalities=('rgb', target_modality)
+            )
+            evan_input = {k: v.to(device) for k, v in evan_input.items()}
+
+            outputs = evan.forward_modality_specific_features(evan_input)
+
+            rgb_features = outputs['rgb']
+            target_features = outputs[target_modality]
+            projected_features = projector(target_features)
+
+            loss = mse_loss_fn(projected_features, rgb_features)
+            total_loss += loss.item()
+            count += 1
+
+    return total_loss / count
+
+
+def train_distillrgb_phase(model, train_loader, test_loader_full, device, args, bands_target, target_modality, modality_bands_dict):
+    """
+    Phase 1: distill rgb training for target_modality components.
+
+    Trains:
+    - Target modality patch embedder
+    - Target modality modality-specific LoRA
+
+    Frozen:
+    - Everything else (DINO-initialized backbone, RGB components, fusion LoRA, classifier)
+    """
+    print("\n" + "="*70)
+    print(f"=== PHASE 1a: Feature Distillation Training for {target_modality} ===")
+    print("="*70)
+    evan = model.evan
+
+    # Create projector: newmod features -> RGB feature space (nonlinear)
+    projector = nn.Sequential(
+        nn.Linear(evan.embed_dim, evan.embed_dim),
+        nn.GELU(),
+        nn.Linear(evan.embed_dim, evan.embed_dim),
+    ).to(device)
+
+    model.freeze_all()  # Freeze everything
+    model.set_requires_grad(target_modality, patch_embedders=True, clsreg=True, msla=True, mfla=False, classifier=False)
+    print(f"  Unfroze: patch embedder, clsreg tokens, modality-specific layers adaptors")
+
+    trainable_in_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
+    total_in_evan = sum(p.numel() for p in evan.parameters())
+    trainable_projector = sum(p.numel() for p in projector.parameters())
+    trainable_total = trainable_in_evan + trainable_projector
+    print(f"\nTrainable parameters for Feature Distillation: {trainable_total}\n    {trainable_in_evan=} ({100*trainable_in_evan/total_in_evan:.2f}% of EVAN) and {trainable_projector=}")
+
+    # Optimizer - trainable EVAN params + projector
+    feadist_params = list(filter(lambda p: p.requires_grad, evan.parameters())) + list(projector.parameters())
+    optimizer = torch.optim.AdamW(feadist_params, lr=args.ssl_lr)
+    scheduler = ReduceLROnPlateau(optimizer,factor=0.5,patience=1,min_lr=1e-6)
+    # Training loop
+    global_step = 0
+    mse_loss_fn = nn.MSELoss()
+    for epoch in range(args.stage1_ssl_epochs):
+        evan.train()
+        projector.train()
+        train_loss = 0.0
+        train_count = 0
+
+        pbar = tqdm(train_loader, desc=f"RGB Distiller Epoch {epoch+1}/{args.stage1_ssl_epochs}")
+        for batch in pbar:
+            evan_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict, modalities=('rgb', target_modality)
+            )
+            evan_input = {k: v.to(device) for k, v in evan_input.items()}
+
+            optimizer.zero_grad()
+            outputs = evan.forward_modality_specific_features(evan_input)
+
+            # Project target modality features to RGB feature space
+            rgb_features = outputs['rgb'].detach()  # Teacher (frozen)
+            target_features = outputs[target_modality]
+            projected_features = projector(target_features)
+
+            loss = mse_loss_fn(projected_features, rgb_features)
+
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(feadist_params, max_norm=float('inf'))
+            optimizer.step()
+            train_loss += loss.item()
+            train_count += 1
+            global_step += 1
+            pbar.set_postfix({'l2 loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'})
+
+            # Log to wandb every step
+            wandb.log({
+                'phase1_distillrgb/train_loss': loss.item(),
+                'phase1_distillrgb/grad_norm': grad_norm.item(),
+                'phase1_distillrgb/epoch': epoch + 1,
+                'phase1_distillrgb/step': global_step,
+                'phase1_distillrgb/lr': optimizer.param_groups[0]['lr'],
+            })
+
+        train_loss /= train_count
+
+        # Evaluation: Show distillation quality on test set
+        eval_loss = evaluate_rgb_distillation(
+            evan, projector, test_loader_full, device,
+            target_modality, modality_bands_dict
+        )
+        scheduler.step(train_loss)
+        # Log epoch-level metrics
+        wandb.log({
+            'phase1_distillrgb/train_loss_epoch': train_loss,
+            'phase1_distillrgb/eval_loss': eval_loss,
+            'phase1_distillrgb/epoch': epoch + 1,
+        })
+
+        print(f"RGB Distillation Epoch {epoch+1}/{args.stage1_ssl_epochs}:")
+        print(f"  Train l2 loss: {train_loss:.4f}")
+        print(f"  Test l2 loss:  {eval_loss:.4f}\n")
+
+    print("\n=== Phase 1a (RGB Distillation) complete ===")
+    return projector  # Return for potential analysis
 
 
 # ==================== Multi-Modal Fusion MAE (Stage 3) ====================
@@ -947,7 +1066,7 @@ def train_multimodal_fusion_mae_phase(
     if newmod not in evan.patch_embedders:
         num_newmod_channels = len(bands_newmod)
         print(f"  Creating {newmod} modality components...")
-        evan._create_modality_components(newmod, num_newmod_channels)
+        evan.create_modality_components(newmod, num_newmod_channels)
 
     # Freeze everything first
     for param in model.parameters():

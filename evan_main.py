@@ -394,7 +394,6 @@ class EVAN(nn.Module):
             modality_key: Name/identifier for the new modality
             in_chans: Number of input channels for this modality
         """
-        # Track parameter count
         params_before = sum(p.numel() for p in self.parameters())
 
         # 1. Create patch embedder
@@ -676,10 +675,6 @@ class EVAN(nn.Module):
         hw_tuples = {}
 
         for modality_key, modality_tensor in x.items():
-            if modality_key not in self.patch_embedders:
-                in_chans = modality_tensor.shape[1]
-                self.create_modality_components(modality_key, in_chans)
-
             x_mod, (H, W) = self.prepare_tokens_with_masks(modality_tensor, modality_key, masks=masks)
             embedded_modalities[modality_key] = x_mod
             hw_tuples[modality_key] = (H, W)
