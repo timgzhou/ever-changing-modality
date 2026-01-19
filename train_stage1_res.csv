@@ -11,3 +11,4 @@ evan_small,vre,distillrgb,3e-05,128,32,81.48,82.39,31,checkpoints/evan_eurosat_s
 evan_small,swir,distillrgb,3e-05,128,32,76.24,76.24,32,checkpoints/evan_eurosat_stage0_rgb_20260117_040718.pt,checkpoints/evan_eurosat_stage1_distillrgb_20260118_015406.pt
 evan_small,swir,mae,3e-05,64,16,69.26,69.37,15,checkpoints/evan_eurosat_stage0_rgb_20260117_040718.pt,checkpoints/evan_eurosat_stage1_mae_20260118_031125.pt
 evan_small,vre,hybrid,3e-05,128,32,81.70,81.70,32,checkpoints/evan_eurosat_stage0_rgb_20260117_042421.pt,checkpoints/evan_eurosat_stage1_hybrid_20260118_170625.pt
+evan_small,vre,hybrid,3e-05,128,32,81.37,81.85,31,checkpoints/evan_eurosat_stage0_rgb_20260117_042421.pt,checkpoints/evan_eurosat_stage1_hybrid_20260118_174801.pt

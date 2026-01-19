@@ -1,0 +1,195 @@
+"""stage 2: Train fusion LoRAs and classifier on train2 split.
+
+It trains:
+- New modality fusion LoRAs
+- New modality encoding
+- Classifier(s)
+
+While keeping frozen:
+- New modality patch embedder (trained in stage 2 MAE)
+- New modality modality-specific LoRAs (trained in stage 2 MAE)
+- RGB components
+- Shared DINO backbone
+"""
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
+from torchgeo.datasets import EuroSAT
+from torchvision import transforms
+import logging
+import os
+import argparse
+import csv
+from datetime import datetime
+import wandb
+
+from evan_main import evan_small, evan_base, evan_large, EVANClassifier
+from eurosat_data_utils import (
+    DictTransform,
+    ALL_BAND_NAMES,
+    get_modality_bands_dict
+)
+from train_utils import (
+    evaluate,
+    load_split_indices,
+    single_modality_training_loop,
+    supervised_training_loop,
+    train_mae_fusion_phase,
+    train_pseudo_supervised,
+    train_self_distillation
+)
+
+logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
+
+
+def main():
+    parser = argparse.ArgumentParser(description='stage 2: Train fusion LoRAs and classifier (after stage 2 MAE)')
+    parser.add_argument('--stage2_checkpoint', type=str, required=True)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--num_workers', type=int, default=4,)
+    parser.add_argument('--stage3_train_method', type=str, default='distill', choices=['distill','pseudo'])
+    parser.add_argument('--temperature', type=float, default=3.0)
+    parser.add_argument('--stage3_lr', type=float, default=1e-3)
+    parser.add_argument('--stage3_epochs', type=int, default=4)
+    parser.add_argument('--classifier_strategy', type=str, default="ensemble", choices=["ensemble","mean"])
+    parser.add_argument('--objective', type=str, default="multimodal", choices=["monomodal","multimodal"])
+    parser.add_argument('--wandb_project', type=str, default='evan-eurosat-stage3(predictor)',help='Wandb project name')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
+    args = parser.parse_args()
+
+    # Load stage 2 checkpoint
+    print(f"\n=== Loading stage 2 checkpoint from: {args.stage2_checkpoint} ===")
+    checkpoint = torch.load(args.stage2_checkpoint, map_location='cpu')
+    config = checkpoint['config']
+
+    print(f"stage 2 config:")
+    for k, v in config.items():
+        print(f"  {k}: {v}")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"\nUsing device: {device}")
+
+    # Get newmod from config
+    newmod = config['newmod']
+    bands_newmod = config['bands_newmod']
+
+    # Initialize wandb if enabled
+    wandb.init(
+        project=args.wandb_project,
+        config={**config, **vars(args)},
+        name=f"stage2_{config['model_type']}_{newmod}_{args.stage3_train_method}"
+    )
+
+    modality_bands_dict = get_modality_bands_dict('rgb', newmod)
+    bands_full = tuple(ALL_BAND_NAMES)
+
+    # Create datasets
+    print("\n=== Creating datasets ===")
+
+    resize_transform = DictTransform(transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True))
+
+    train_dataset_full = EuroSAT(
+        root='datasets',
+        split='train',
+        bands=bands_full,
+        transforms=resize_transform,
+        download=True,
+        checksum=False
+    )
+
+    train1_indices = load_split_indices('datasets/eurosat-train1.txt', train_dataset_full)
+    train1_dataset = Subset(train_dataset_full, train1_indices)
+    train2_indices = load_split_indices('datasets/eurosat-train2.txt', train_dataset_full)
+    train2_dataset = Subset(train_dataset_full, train2_indices)
+
+    test_dataset_full = EuroSAT(
+        root='datasets',
+        split='test',
+        bands=bands_full,
+        transforms=resize_transform,
+        download=True,
+        checksum=False
+    )
+
+    print(f"Loaded {len(train1_indices)} and {len(train2_indices)} samples from train1 and train2 splits.")
+    print(f"Test samples: {len(test_dataset_full)}")
+
+    # Create dataloaders
+    train1_loader = DataLoader(train1_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    train2_loader = DataLoader(train2_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    test_loader = DataLoader(test_dataset_full, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+
+    # Recreate EVAN model with same config
+    print("\n=== Recreating EVAN model ===")
+    model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[config['model_type']]
+    evan = model_fn(
+        tz_fusion_time=config['tz_fusion_time'],
+        tz_lora_rank=config['tz_lora_rank'],
+        n_storage_tokens=4,
+        device=device
+    )
+
+    # Create classifier
+    num_newmod_channels = len(bands_newmod)
+    if newmod not in evan.patch_embedders:
+        print(f"  Creating {newmod} modality components...")
+        evan.create_modality_components(newmod,num_newmod_channels)
+    model = EVANClassifier(evan, num_classes=config['num_classes'], classifier_strategy='mean', device=device)
+    model = model.to(device)
+    # Load state dict from checkpoint - this loads the MAE-trained components
+    model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+    print(f"Loaded model weights from stage 2 checkpoint")
+    print(f"SSL-trained components loaded: {newmod} patch embedder, {newmod} modality-specific LoRAs")
+
+    # _, new_mod_test_acc = evaluate(
+    #         model, test_loader, nn.CrossEntropyLoss(), device,
+    #         modality_bands_dict, modalities_to_use=(newmod,)
+    #     )
+    # _, rgb_test_acc = evaluate(
+    #         model, test_loader, nn.CrossEntropyLoss(), device,
+    #         modality_bands_dict, modalities_to_use=('rgb',)
+    #     )
+    # print(f"  {newmod} test acc: {new_mod_test_acc} \n  rgb test acc: {rgb_test_acc}")
+    
+    model.switch_strategy(args.classifier_strategy,"rgb")
+    # ========================================= TRAIN =====================================
+    if args.stage3_train_method=="distill":
+        print(f"\n Using self distillation to train new classifier.")
+        
+        train_self_distillation(
+            model=model,
+            train_loader=train2_loader,
+            test_loader=test_loader,
+            device=device,
+            args=args,
+            modality_bands_dict=modality_bands_dict,
+            student_mod=newmod,
+            teacher_mod="rgb",
+        )
+    
+    if args.stage3_train_method=="pseudo":
+        print(f"\n Using self distillation to train new classifier.")
+        train_pseudo_supervised(
+            model=model,
+            unlabeled_train_loader=train2_loader,
+            labeled_train_loader=train1_loader,
+            test_loader=test_loader,
+            device=device,
+            args=args,
+            modality_bands_dict=modality_bands_dict,
+            student_mod=newmod,
+            teacher_mod="rgb",
+        )
+
+
+if __name__ == '__main__':
+    main()
+
+
+# python -u train_stage3.py --stage2_checkpoint checkpoints/evan_eurosat_stage2_mae_20260118_104035.pt --objective monomodal --stage3_train_method pseudo
+
+
+# python -u train_stage3.py --stage2_checkpoint checkpoints/evan_eurosat_stage2_mae_20260118_080900.pt --objective monomodal --stage3_train_method pseudo
+
+# checkpoints/evan_eurosat_stage2_mae_20260119_140629.pt is the checkpoint where we use stage 1 to train everything other than classifier; learned to use mm clstoken for classification.

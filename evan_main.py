@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch import Tensor
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
+import copy
 from evan.layers import LoRALayer, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
 from functools import partial
 
@@ -61,6 +62,7 @@ class EVAN(nn.Module):
         untie_global_and_local_cls_norm: bool = False,
         device: Any | None = None,
         tz_modality_specific_layer_augmenter: Literal["lora", "fft"] = "lora",
+        tz_modality_fusion_layer_augmenter: Literal["lora", "fft"] = "lora",
         tz_fusion_time: int = 3,
         tz_lora_rank: int=32,
         starting_modality: str='rgb',
@@ -82,6 +84,7 @@ class EVAN(nn.Module):
         self.tz_fusion_time = tz_fusion_time
         self.tz_lora_rank = tz_lora_rank
         self.tz_modality_specific_layer_augmenter = tz_modality_specific_layer_augmenter
+        self.tz_modality_fusion_layer_augmenter = tz_modality_fusion_layer_augmenter
         self.starting_modality=starting_modality
 
         self.patch_embedders = nn.ModuleDict()
@@ -288,10 +291,6 @@ class EVAN(nn.Module):
             qkv_weight = torch.cat([q_weight, k_weight, v_weight], dim=0)
             checkpoint[f'blocks.{layer_idx}.attn.qkv.weight'] = qkv_weight
 
-            # Merge biases (only q and v have bias, k does not)
-            # NOTE: HuggingFace checkpoint doesn't include k_proj.bias (it's implicitly zero)
-            # but DINOv3's combined qkv.bias expects [q_bias, k_bias, v_bias] concatenated.
-            # We create a zero tensor for k_bias to maintain proper dimensions.
             q_bias_key = f'layer.{layer_idx}.attention.q_proj.bias'
             v_bias_key = f'layer.{layer_idx}.attention.v_proj.bias'
 
@@ -320,6 +319,21 @@ class EVAN(nn.Module):
                     if key.startswith(f'blocks.{i}.'):
                         # Create corresponding key for RGB modality-specific layer
                         rgb_key = key.replace(f'blocks.{i}.', f'modality_specific_layer_adaptors.rgb.{i}.')
+                        checkpoint[rgb_key] = value.clone()
+                        fft_params_copied += value.numel()
+            print(f"    Copied {fft_params_copied:,} parameters for RGB FFT blocks")
+
+        result = self.load_state_dict(checkpoint, strict=False)
+        
+        if self.tz_modality_fusion_layer_augmenter == "fft":
+            print(f"\n  FFT mode: Copying last {self.n_blocks} - {self.tz_fusion_time} DINO blocks to RGB modality-specific layers...")
+            fft_params_copied = 0
+            for i in range(self.tz_fusion_time,self.n_blocks,1):
+                # Copy all weights from blocks[i] to modality_fusion_lora_adaptors.rgb[i]
+                for key, value in list(checkpoint.items()):
+                    if key.startswith(f'blocks.{i}.'):
+                        # Create corresponding key for RGB modality-specific layer
+                        rgb_key = key.replace(f'blocks.{i}.', f'modality_fusion_lora_adaptors.rgb.{i}.')
                         checkpoint[rgb_key] = value.clone()
                         fft_params_copied += value.numel()
             print(f"    Copied {fft_params_copied:,} parameters for RGB FFT blocks")
@@ -400,7 +414,6 @@ class EVAN(nn.Module):
             # FFT mode: copy first tz_fusion_time transformer blocks from DINO
             adaptor_list = nn.ModuleList()
             for i in range(self.tz_fusion_time):
-                import copy
                 block_copy = copy.deepcopy(self.blocks[i])
                 if self.device is not None:
                     block_copy = block_copy.to(self.device)
@@ -424,12 +437,20 @@ class EVAN(nn.Module):
         self.modality_encoders[modality_key] = modality_encoding
 
         # 6. Create fusion LoRAs (for remaining blocks after tz_fusion_time)
-        num_fusion_blocks = len(self.blocks) - self.tz_fusion_time
-        fusion_lora_list = nn.ModuleList([
-            LoRALayer(self.embed_dim, rank=self.tz_lora_rank, device=self.device)
-            for _ in range(num_fusion_blocks)
-        ])
-        self.modality_fusion_lora_adaptors[modality_key] = fusion_lora_list
+        num_fusion_blocks = self.n_blocks - self.tz_fusion_time
+        if self.tz_modality_fusion_layer_augmenter == "lora":
+            fusion_adaptor_list = nn.ModuleList([
+                LoRALayer(self.embed_dim, rank=self.tz_lora_rank, device=self.device)
+                for _ in range(num_fusion_blocks)
+            ])
+        elif self.tz_modality_fusion_layer_augmenter == "fft":
+            fusion_adaptor_list = nn.ModuleList()
+            for i in range(self.tz_fusion_time,self.n_blocks):
+                block_copy = copy.deepcopy(self.blocks[i])
+                if self.device is not None:
+                    fusion_adaptor_list = block_copy.to(self.device)
+                fusion_adaptor_list.append(block_copy)
+        self.modality_fusion_lora_adaptors[modality_key] = fusion_adaptor_list
 
         # Count new parameters
         params_after = sum(p.numel() for p in self.parameters())
@@ -437,19 +458,21 @@ class EVAN(nn.Module):
 
         # Verbose logging
         embedder_params = sum(p.numel() for p in embedder.parameters())
-        adaptor_params = sum(p.numel() for p in adaptor_list.parameters())
+        modality_specific_adaptor_params = sum(p.numel() for p in adaptor_list.parameters())
+        modality_fusion_adaptor_params = sum(p.numel() for p in fusion_adaptor_list.parameters())
         cls_token_params = self.cls_tokens[modality_key].numel()
         storage_token_params = self.storage_tokens[modality_key].numel() if self.n_storage_tokens > 0 else 0
         encoding_params = modality_encoding.numel()
-        fusion_lora_params = sum(p.numel() for p in fusion_lora_list.parameters())
+        fusion_lora_params = sum(p.numel() for p in fusion_adaptor_list.parameters())
 
-        adaptor_type = "LoRAs" if self.tz_modality_specific_layer_augmenter == "lora" else "FFT blocks"
         logger.info(f"Initialized new modality: '{modality_key}'")
         logger.info(f"   - Input channels: {in_chans}")
-        logger.info(f"   - Augmenter mode: {self.tz_modality_specific_layer_augmenter}")
+        logger.info(f"   - Mod-spec Augmenter mode: {self.tz_modality_specific_layer_augmenter}")
+        logger.info(f"   - Mod-fuse Augmenter mode: {self.tz_modality_fusion_layer_augmenter}")
         logger.info(f"   - Components created:")
         logger.info(f"     • Patch embedder: {embedder_params:,} params")
-        logger.info(f"     • Modality-specific {adaptor_type} ({self.tz_fusion_time} blocks): {adaptor_params:,} params")
+        logger.info(f"     • Modality-specific {self.tz_modality_specific_layer_augmenter} ({self.tz_fusion_time} blocks): {modality_specific_adaptor_params:,} params")
+        logger.info(f"     • Modality-fusion {self.tz_modality_fusion_layer_augmenter} ({self.n_blocks-self.tz_fusion_time} blocks): {modality_fusion_adaptor_params:,} params")
         logger.info(f"     • CLS token: {cls_token_params:,} params")
         logger.info(f"     • Storage tokens: {storage_token_params:,} params")
         logger.info(f"     • Modality encoding: {encoding_params:,} params")
@@ -555,7 +578,6 @@ class EVAN(nn.Module):
         x_patches_concat = torch.cat(all_patches, dim=1)  # [B, sum(num_patches), embed_dim]
 
         # Concatenate all CLS/storage tokens from all modalities
-        # Each modality's CLS token will attend to all patches during fusion
         all_cls_storage_list = [all_cls_storage[k] for k in sorted(all_cls_storage.keys())]
         x_cls_storage_concat = torch.cat(all_cls_storage_list, dim=1)  # [B, n_modalities * (1 + n_storage), embed_dim]
         n_cls_storage_per_modality = self.n_storage_tokens + 1
@@ -575,29 +597,22 @@ class EVAN(nn.Module):
             else:
                 rope_sincos = None
 
-            # Shared block forward on concatenated representation
-            x_fused = self.blocks[i](x_fused, rope_sincos)
-
-            # Add fusion LoRA: sum LoRAs from all present modalities
-            lora_idx = i - self.tz_fusion_time
-            lora_output = 0
-            for modality_key in embedded_modalities.keys():
-                lora = self.modality_fusion_lora_adaptors[modality_key][lora_idx]
-                lora_output = lora_output + lora(x_fused)
-
-            x_fused = x_fused + lora_output
+            if self.tz_modality_fusion_layer_augmenter=="lora":
+                x_fused = self.blocks[i](x_fused, rope_sincos)
+                lora_idx = i - self.tz_fusion_time
+                lora_output = 0
+                for modality_key in embedded_modalities.keys():
+                    lora = self.modality_fusion_lora_adaptors[modality_key][lora_idx]
+                    lora_output = lora_output + lora(x_fused)
+                x_fused = x_fused + lora_output
+            elif self.tz_modality_fusion_layer_augmenter=="fft":
+                x_fused = self.modality_fusion_lora_adaptors[i](x_fused, rope_sincos)
 
         # Step 5: Split fused representation back into modality-specific outputs
         # Total CLS/storage tokens = n_modalities * (1 + n_storage_tokens)
         total_cls_storage = n_modalities * n_cls_storage_per_modality
-
-        # Extract all fused CLS/storage tokens
         x_cls_storage_fused = x_fused[:, :total_cls_storage, :]
-
-        # Extract fused patches (skip all CLS/storage tokens)
         x_patches_fused = x_fused[:, total_cls_storage:, :]
-
-        # Split back into modality-specific outputs
         output_dict = {}
         sorted_modalities = sorted(embedded_modalities.keys())
         for mod_idx, modality_key in enumerate(sorted_modalities):
@@ -1070,21 +1085,39 @@ class EVANClassifier(nn.Module):
             logits = torch.stack(all_logits).mean(dim=0)
 
         return logits
-    
+    def switch_strategy(self,target_strategy,key):
+        if self.classifier_strategy == 'strategy': 
+            print(f"Already using {target_strategy} head")
+        elif target_strategy=="mean":
+            self.ensemble_to_mean(key)
+        elif target_strategy=="ensemble":
+            self.mean_to_ensemble(key)
+            for mod in self.evan.patch_embedders.keys():
+                self.instantiate_modality_classifier(mod)
+        return
+            
     def mean_to_ensemble(self, new_key:str='rgb'):
         """Convert from 'mean' to 'ensemble' strategy, the existing classifier becomes new_key classifier"""
+        if self.classifier_strategy == 'ensemble':
+            print("!!!!  mean_to_ensemble was called on classifier but it already is ensemble. No changes made.")
+            return()
         assert self.classifier_strategy == 'mean'
         self.modality_classifiers = nn.ModuleDict()
         self.modality_classifiers[new_key]=self.classifier
         self.classifier=None
         self.classifier_strategy='ensemble'
+        print("!! Evan Classifier has switched strategy from mean to ensemble")
         
     def ensemble_to_mean(self, key_to_keep:str='rgb'):
         """Convert from 'ensemble' to 'mean' strategy, keeping only key_to_keep classifier"""
+        if self.classifier_strategy == 'mean':
+            print("!!!!  mean_to_ensemble was called on classifier but it already is mean. No changes made.")
+            return()
         assert self.classifier_strategy == 'ensemble'
         self.classifier=self.modality_classifiers[key_to_keep]
         self.modality_classifiers=None
         self.classifier_strategy = 'mean'
+        print("!! Evan Classifier has switched strategy from ensemble to mean")
         
     def set_requires_grad(
         self,

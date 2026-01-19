@@ -3,6 +3,7 @@
 import copy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
@@ -422,6 +423,7 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
 
     # Training loop
     global_step = 0
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0.0
@@ -485,6 +487,7 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
 
         train_loss /= len(train_loader)
         train_acc = 100. * train_correct / train_total
+        scheduler.step(train_loss)
 
         # Evaluation on training modalities
         test_loss_train, test_acc_train = evaluate(
@@ -541,6 +544,7 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
                 f'{wandb_prefix}/eval_loss_train': test_loss_train,
                 f'{wandb_prefix}/eval_acc_train': test_acc_train,
                 f'{wandb_prefix}/epoch': epoch + 1,
+                f'{wandb_prefix}/lr': optimizer.param_groups[0]['lr'],
             }
             if eval_single_modalities:
                 log_dict[f'{wandb_prefix}/eval_acc_rgb'] = test_acc_rgb
@@ -808,6 +812,219 @@ def train_mae_phase(model, train_loader, test_loader_full, device, args, bands_t
     print("\n=== Phase 2a (MAE SSL) complete ===")
     return mae_decoder  # Return for potential analysis
 
+def train_pseudo_supervised(model,unlabeled_train_loader,labeled_train_loader,test_loader,device,args,modality_bands_dict,student_mod,teacher_mod="rgb"):
+    # Create frozen teacher model before modifying student
+    model.freeze_all()
+    model.eval()
+    evan=model.evan
+    projector=nn.Sequential(
+        nn.Linear(evan.embed_dim,evan.embed_dim*4),
+        nn.GELU(),
+        nn.Linear(evan.embed_dim*4,evan.embed_dim)
+    )
+    projector = projector.to(device)
+
+    # Optimizer
+    params = (list(filter(lambda p: p.requires_grad, projector.parameters())))
+    optimizer = torch.optim.AdamW(params, lr=args.stage3_lr)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
+
+    # Loss function for knowledge distillation
+    criteria = nn.MSELoss()
+
+    for epoch in range(args.stage3_epochs):
+        train_loss = 0.0
+
+        pbar = tqdm(unlabeled_train_loader, desc=f"Modality ClsToken Projector Epoch {epoch+1}/{args.stage3_epochs}")
+        for batch in pbar:
+            # Step 1: Create input tensors for all modalities
+            multimodal_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=(student_mod,teacher_mod)
+            )
+            multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
+            teacher_input = {teacher_mod: multimodal_input[teacher_mod]}
+            student_input = {student_mod: multimodal_input[student_mod]}
+            teacher_clstoken = evan.forward_features(teacher_input)[teacher_mod]["x_norm_clstoken"]
+            student_clstoken= evan.forward_features(student_input)[student_mod]["x_norm_clstoken"]
+            projected_student_clstoken=projector(teacher_clstoken)
+            loss = criteria(student_clstoken,projected_student_clstoken)
+            optimizer.zero_grad()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=5)
+            optimizer.step()
+            train_loss += loss.item()
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'grad': f'{grad_norm:.4f}'
+            })
+        avg_train_loss = train_loss / len(unlabeled_train_loader)
+        scheduler.step(avg_train_loss)
+        
+    # Stage 2: learn a classifier
+    projector.eval()
+    for p in projector.parameters():
+        p.requires_grad = False
+    if args.objective=="multimodal":
+        raise NotImplementedError("this only support monomodal right now")
+    
+    classifier=copy.deepcopy(model.modality_classifiers[student_mod])
+    classifier=classifier.to(device)
+    model_eval=copy.deepcopy(model)
+    model_eval.modality_classifiers[student_mod]=classifier
+    model_eval.eval()
+    model_eval.freeze_all()
+    classifier.train()
+    for p in classifier.parameters():
+        p.requires_grad = True
+    params = (list(filter(lambda p: p.requires_grad, classifier.parameters())))
+    optimizer = torch.optim.AdamW(params, lr=args.stage3_lr)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
+    ce_criteria = nn.CrossEntropyLoss()
+    for epoch in range(args.stage3_epochs):
+        train_loss = 0.0
+        pbar = tqdm(labeled_train_loader, desc=f"Pseudo Supervision Epoch {epoch+1}/{args.stage3_epochs}")
+        for batch in pbar:
+            labels=batch["label"].to(device)
+            teacher_mod_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=(teacher_mod,)
+            )
+            teacher_mod_input = {k: v.to(device) for k, v in teacher_mod_input.items()}
+
+            teacher_clstoken = evan.forward_features(teacher_mod_input)[teacher_mod]["x_norm_clstoken"]
+            projected_student_clstoken=projector(teacher_clstoken).detach()
+            projected_student_prediction=classifier(projected_student_clstoken)
+            loss = ce_criteria(projected_student_prediction,labels)
+            optimizer.zero_grad()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=5)
+            optimizer.step()
+            train_loss += loss.item()
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'grad': f'{grad_norm:.4f}'
+            })
+        avg_train_loss = train_loss / len(labeled_train_loader)
+        scheduler.step(avg_train_loss)
+        # Evaluate test accuracy on student modality
+        _, test_acc = evaluate(
+            model_eval, test_loader, ce_criteria, device,
+            modality_bands_dict, modalities_to_use=(student_mod,)
+        )
+        print(f"  Test Acc ({student_mod}): {test_acc:.2f}%")
+    model.modality_classifiers[student_mod]=classifier
+
+def train_self_distillation(model,train_loader,test_loader,device,args,modality_bands_dict,student_mod,teacher_mod="rgb"):
+    # Create frozen teacher model before modifying student
+    teacher_model = copy.deepcopy(model)
+    teacher_model.eval()
+    for param in teacher_model.parameters():
+        param.requires_grad = False
+
+    model.freeze_all()
+    model.set_requires_grad("all", classifier=True)
+    trainable_in_evan = sum(p.numel() for p in model.evan.parameters() if p.requires_grad)
+    trainable_in_classifier = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert trainable_in_evan==0
+    print(f"\nTrainable parameters: {trainable_in_classifier}")
+
+    # Optimizer
+    params = (list(filter(lambda p: p.requires_grad, model.parameters())))
+    optimizer = torch.optim.AdamW(params, lr=args.stage3_lr)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
+
+    # Loss function for knowledge distillation
+    criteria = nn.KLDivLoss(reduction='batchmean')
+    ce_criteria = nn.CrossEntropyLoss()
+
+    for epoch in range(args.stage3_epochs):
+        model.train()
+        train_loss = 0.0
+
+        pbar = tqdm(train_loader, desc=f"Classifier Distillation Epoch {epoch+1}/{args.stage3_epochs}")
+        for batch in pbar:
+            # Step 1: Create input tensors for all modalities
+            multimodal_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=(student_mod,teacher_mod)
+            )
+            multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
+
+            teacher_input = {teacher_mod: multimodal_input[teacher_mod]}
+            with torch.no_grad():
+                teacher_output = teacher_model(teacher_input) / args.temperature
+            if args.objective=="multimodal":
+                student_input=multimodal_input
+            else:
+                student_input={student_mod: multimodal_input[student_mod]}
+            student_output = model(student_input) / args.temperature
+            # KLDivLoss expects log-probabilities as input, probabilities as target
+            loss = criteria(
+                F.log_softmax(student_output, dim=-1),
+                F.softmax(teacher_output, dim=-1)
+            )
+            optimizer.zero_grad()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=float('inf'))
+            optimizer.step()
+
+            train_loss += loss.item()
+
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'grad': f'{grad_norm:.4f}'
+            })
+
+        avg_train_loss = train_loss / len(train_loader)
+        scheduler.step(avg_train_loss)
+
+        # Evaluate test accuracy on student modality
+        test_loss, test_acc = evaluate(
+            model, test_loader, ce_criteria, device,
+            modality_bands_dict, modalities_to_use=(student_mod,teacher_mod)
+        )
+
+        # Evaluate distillation loss on test set
+        model.eval()
+        test_distill_loss = 0.0
+        with torch.no_grad():
+            for batch in test_loader:
+                multimodal_input = create_multimodal_batch(
+                    batch, modality_bands_dict=modality_bands_dict,
+                    modalities=(student_mod, teacher_mod)
+                )
+                multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
+
+                teacher_input = {teacher_mod: multimodal_input[teacher_mod]}
+                teacher_output = teacher_model(teacher_input) / args.temperature
+                if args.objective=="multimodal":
+                    student_input=multimodal_input
+                else:
+                    student_input={student_mod: multimodal_input[student_mod]}
+                student_output = model(student_input) / args.temperature
+
+                loss = criteria(
+                    F.log_softmax(student_output, dim=-1),
+                    F.softmax(teacher_output, dim=-1)
+                )
+                test_distill_loss += loss.item()
+        test_distill_loss /= len(test_loader)
+
+        print(f"\nDistillation Epoch {epoch+1}/{args.stage3_epochs}:")
+        print(f"  Train KL loss: {avg_train_loss:.4f}, Test KL loss: {test_distill_loss:.4f}")
+        print(f"  Test Acc: {test_acc:.2f}%")
+
+        wandb.log({
+            'phase3_classifier/train_loss': avg_train_loss,
+            'phase3_classifier/test_distill_loss': test_distill_loss,
+            'phase3_classifier/test_loss': test_loss,
+            'phase3_classifier/test_acc': test_acc,
+            'phase3_classifier/grad_norm': grad_norm,
+            'phase3_classifier/epoch': epoch + 1,
+            'phase3_classifier/lr': optimizer.param_groups[0]['lr'],
+        })
+        
 def train_mae_fusion_phase(
     model, train_loader, test_loader, device, args,
     bands_target: dict,
@@ -881,8 +1098,9 @@ def train_mae_fusion_phase(
 
     # Freeze everything, then unfreeze fusion components + mask_token
     model.freeze_all()
-    model.set_requires_grad("all", modality_encoders=True, mfla=True)
-    model.set_requires_grad("backbone", mask_token=True)
+    model.set_requires_grad("all", modality_encoders=True, mfla=True, msla=True, patch_embedders=True) # NOTE !! This used to be msla=False
+    # model.set_requires_grad("backbone", mask_token=True)
+    model.set_requires_grad("backbone", mask_token=True, blocks=True)
     print("  Unfroze: modality_encoders, modality_fusion_lora_adaptors, mask_token")
 
     # Count parameters
@@ -910,7 +1128,7 @@ def train_mae_fusion_phase(
         modality_bands_dict = bands_target
 
     # Loss function for latent reconstruction
-    mse_fn = nn.MSELoss(reduction='none')
+    mse_fn = nn.MSELoss()
 
     # Training loop
     global_step = 0
@@ -939,7 +1157,8 @@ def train_mae_fusion_phase(
 
             # Step 3: Get teacher targets (unmasked, frozen)
             with torch.no_grad():
-                teacher_out = teacher_evan.forward_features(evan_input)
+                teacher_input={teacher_mod:evan_input[teacher_mod] for teacher_mod in latent_reconstruct_modalities}
+                teacher_out = teacher_evan.forward_features(teacher_input)
                 # {mod: {'x_norm_patchtokens': [B, num_patches, embed_dim], ...}}
 
             # Step 4: Generate independent random masks per modality
@@ -1005,15 +1224,7 @@ def train_mae_fusion_phase(
 
                 projected = latent_projectors[mod](student_all)  # [B, 1+num_patches, embed_dim]
 
-                # Create mask that includes CLS token (always compute loss on CLS)
-                mask_float = modality_masks[mod].float()
-                cls_ones = torch.ones(B, 1, device=device)
-                mask_with_cls = torch.cat([cls_ones, mask_float], dim=1)  # [B, 1+num_patches]
-
-                # MSE loss on CLS + masked patches
-                mse = mse_fn(projected, teacher_all).mean(dim=-1)  # [B, 1+num_patches]
-                latent_loss = (mse * mask_with_cls).sum() / mask_with_cls.sum()
-
+                latent_loss = mse_fn(projected, teacher_all)
                 total_loss = total_loss + latent_loss
                 batch_latent_loss += latent_loss.item()
 
@@ -1053,110 +1264,9 @@ def train_mae_fusion_phase(
         train_latent_loss /= train_count
 
         scheduler.step(train_loss)
-
-        # Evaluation on test set
-        evan.eval()
-        mae_decoders.eval()
-        latent_projectors.eval()
-        eval_loss = 0.0
-        eval_mae_loss = 0.0
-        eval_latent_loss = 0.0
-        eval_count = 0
-
-        with torch.no_grad():
-            for batch in test_loader:
-                evan_input = create_multimodal_batch(
-                    batch, modality_bands_dict=modality_bands_dict,
-                    modalities=tuple(all_modalities)
-                )
-                evan_input = {k: v.to(device) for k, v in evan_input.items()}
-                B = next(iter(evan_input.values())).shape[0]
-
-                # Get modality-specific features
-                mod_specific = evan.forward_modality_specific_features(evan_input)
-
-                # Get teacher targets
-                teacher_out = teacher_evan.forward_features(evan_input)
-
-                # Generate independent random masks per modality (same as training)
-                len_keep = int(num_patches * (1 - args.mae_mask_ratio))
-                modality_masks = {}
-                for mod in all_modalities:
-                    noise = torch.rand(B, num_patches, device=device)
-                    ids_shuffle = torch.argsort(noise, dim=1)
-                    mask = torch.ones(B, num_patches, device=device, dtype=torch.bool)
-                    mask.scatter_(1, ids_shuffle[:, :len_keep], False)
-                    modality_masks[mod] = mask
-
-                # Apply per-modality mask
-                masked_mod_features = {}
-                for mod, features in mod_specific.items():
-                    n_prefix = evan.n_storage_tokens + 1
-                    cls_storage = features[:, :n_prefix, :]
-                    patches = features[:, n_prefix:, :]
-                    mask_expanded = modality_masks[mod].unsqueeze(-1)
-                    mask_token_expanded = evan.mask_token.unsqueeze(0).expand(B, num_patches, -1)
-                    masked_patches = torch.where(mask_expanded, mask_token_expanded, patches)
-                    masked_mod_features[mod] = torch.cat([cls_storage, masked_patches], dim=1)
-
-                # Forward through fusion
-                student_fused = evan.forward_fusion_from_modality_features(masked_mod_features)
-
-                # Compute losses (each modality uses its own mask)
-                batch_loss = 0.0
-                batch_mae = 0.0
-                batch_latent = 0.0
-
-                for mod in mae_modalities:
-                    student_patches = student_fused[mod]['x_norm_patchtokens']
-                    pred_pixels = mae_decoders[mod](student_patches)
-                    target_img = evan_input[mod]
-                    target_patches = patchify(target_img, patch_size)
-                    mask_float = modality_masks[mod].float()
-                    mae_loss = mae_reconstruction_loss(pred_pixels, target_patches, mask_float)
-                    batch_loss += mae_loss.item()
-                    batch_mae += mae_loss.item()
-
-                for mod in latent_reconstruct_modalities:
-                    student_patches = student_fused[mod]['x_norm_patchtokens']
-                    teacher_patches = teacher_out[mod]['x_norm_patchtokens']
-                    student_cls = student_fused[mod]['x_norm_clstoken']
-                    teacher_cls = teacher_out[mod]['x_norm_clstoken']
-                    student_all = torch.cat([student_cls.unsqueeze(1), student_patches], dim=1)
-                    teacher_all = torch.cat([teacher_cls.unsqueeze(1), teacher_patches], dim=1)
-                    projected = latent_projectors[mod](student_all)
-                    mask_float = modality_masks[mod].float()
-                    cls_ones = torch.ones(B, 1, device=device)
-                    mask_with_cls = torch.cat([cls_ones, mask_float], dim=1)
-                    mse = mse_fn(projected, teacher_all).mean(dim=-1)
-                    latent_loss = (mse * mask_with_cls).sum() / mask_with_cls.sum()
-                    batch_loss += latent_loss.item()
-                    batch_latent += latent_loss.item()
-
-                eval_loss += batch_loss
-                eval_mae_loss += batch_mae
-                eval_latent_loss += batch_latent
-                eval_count += 1
-
-        eval_loss /= eval_count
-        eval_mae_loss /= eval_count
-        eval_latent_loss /= eval_count
-
-        # Log epoch-level metrics
-        wandb.log({
-            'phase2_fusion/train_loss_epoch': train_loss,
-            'phase2_fusion/mae_loss_epoch': train_mae_loss,
-            'phase2_fusion/latent_loss_epoch': train_latent_loss,
-            'phase2_fusion/eval_loss_epoch': eval_loss,
-            'phase2_fusion/eval_mae_loss_epoch': eval_mae_loss,
-            'phase2_fusion/eval_latent_loss_epoch': eval_latent_loss,
-            'phase2_fusion/epoch': epoch + 1,
-        })
-
         print(f"\nFusion MAE Epoch {epoch+1}/{args.stage2_fusion_epochs}:")
         print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}")
-        print(f"  Eval  - Total: {eval_loss:.4f}, MAE: {eval_mae_loss:.4f}, Latent: {eval_latent_loss:.4f}")
-
+        
     print("\n=== Phase 2 (Fusion MAE Training) complete ===")
     return mae_decoders, latent_projectors
 

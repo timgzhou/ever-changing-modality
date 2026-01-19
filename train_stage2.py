@@ -34,7 +34,6 @@ from train_utils import (
     evaluate,
     load_split_indices,
     single_modality_training_loop,
-    supervised_finetune_phase,
     supervised_training_loop,
     train_mae_fusion_phase
 )
@@ -126,7 +125,7 @@ def main():
     print(f"Test samples: {len(test_dataset_full)}")
 
     # Create dataloaders
-    train1_loader = DataLoader(train1_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    # train1_loader = DataLoader(train1_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     train2_loader = DataLoader(train2_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     test_loader = DataLoader(test_dataset_full, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
@@ -253,15 +252,16 @@ def main():
     model.set_requires_grad('all', classifier=True)
     optimizer_rgb = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.stage2_lr)
 
-    train_acc_rgb, test_acc_rgb_single, best_test_acc_rgb, best_epoch_rgb = single_modality_training_loop(
-        model, train2_loader, test_loader, device,
-        modality_bands_dict, criterion, optimizer_rgb, args.num_supervised_epochs,
-        modality='rgb', phase_name="Stage 2 RGB-only eval"
-    )
-    print(f"RGB-only Result: {train_acc_rgb=:.2f} {test_acc_rgb_single=:.2f} {best_test_acc_rgb=:.2f} at epoch {best_epoch_rgb}")
+    train_acc_rgb, test_acc_rgb_single, best_test_acc_rgb, best_epoch_rgb=-1,-1,-1,-1
+    # train_acc_rgb, test_acc_rgb_single, best_test_acc_rgb, best_epoch_rgb = single_modality_training_loop(
+    #     model, train2_loader, test_loader, device,
+    #     modality_bands_dict, criterion, optimizer_rgb, args.num_supervised_epochs,
+    #     modality='rgb', phase_name="Stage 2 RGB-only eval"
+    # )
+    # print(f"RGB-only Result: {train_acc_rgb=:.2f} {test_acc_rgb_single=:.2f} {best_test_acc_rgb=:.2f} at epoch {best_epoch_rgb}")
 
-    # Reload checkpoint to reset classifier before newmod evaluation
-    model.load_state_dict(checkpoint_stage2['model_state_dict'], strict=True)
+    # # Reload checkpoint to reset classifier before newmod evaluation
+    # model.load_state_dict(checkpoint_stage2['model_state_dict'], strict=True)
 
     # Newmod-only evaluation
     print("\n" + "-"*50)
