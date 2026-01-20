@@ -201,6 +201,8 @@ class EVAN(nn.Module):
             LoRALayer(embed_dim, rank=self.tz_lora_rank, device=device)
             for _ in range(num_fusion_blocks)
         ])
+        
+        self.modality_specific_mask_tokens = nn.ParameterDict()
 
     def load_pretrained_dino(self, model_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m"):
         """
@@ -699,10 +701,6 @@ class EVAN(nn.Module):
                 else:
                     raise ValueError(f"Unknown augmenter mode: {self.tz_modality_specific_layer_augmenter}")
 
-            # Add modality encoding (per-token embedding)
-            modality_encoding = self.modality_encoders[modality_key]
-            x_mod = x_mod + modality_encoding
-
             embedded_modalities[modality_key] = x_mod
 
         return embedded_modalities
@@ -725,7 +723,12 @@ class EVAN(nn.Module):
             Dictionary with normalized features per modality (same format as forward_features):
             {modality: {'x_norm_clstoken', 'x_norm_patchtokens', 'x_storage_tokens', 'x_prenorm'}}
         """
-        # Step 1: Concatenate patches for fusion (allow cross-modal attention)
+        # Step 1: Add modality encoding to each modality's features
+        for modality_key in embedded_modalities.keys():
+            modality_encoding = self.modality_encoders[modality_key]
+            embedded_modalities[modality_key] = embedded_modalities[modality_key] + modality_encoding
+
+        # Step 2: Concatenate patches for fusion (allow cross-modal attention)
         modality_info = {}
         all_cls_storage = {}
         all_patches = []
@@ -827,6 +830,52 @@ class EVAN(nn.Module):
             }
 
         return output_dict
+
+    def forward_features_with_pseudo_modality(
+        self,
+        x: Dict[str, Tensor],
+        pseudo_modalities: List[str],
+        cls_projectors: nn.ModuleDict,
+    ) -> Dict[str, Dict[str, Tensor]]:
+        """
+        Forward pass with pseudo-modalities using mask tokens and projected CLS.
+
+        When a modality is missing at inference time, this method creates pseudo-features
+        using learned mask tokens for patches and projected CLS tokens from RGB.
+
+        Args:
+            x: Dictionary of available modality tensors (must include 'rgb')
+            pseudo_modalities: List of modality names to hallucinate (e.g., ['infrared'])
+            cls_projectors: Trained projectors mapping rgb CLS -> other modality CLS
+
+        Returns:
+            Dictionary with normalized features per modality (same format as forward_features)
+        """
+        # Step 1: Get real modality features
+        embedded = self.forward_modality_specific_features(x)
+
+        # Step 2: Create pseudo-features for missing modalities
+        B = next(iter(embedded.values())).shape[0]
+        num_patches = (self.img_size // self.patch_size) ** 2
+        n_prefix = self.n_storage_tokens + 1
+
+        # Get RGB CLS for projection (before modality encoding, which is added in fusion)
+        rgb_cls = embedded['rgb'][:, 0:1, :]  # [B, 1, embed_dim]
+
+        for mod in pseudo_modalities:
+            # Project RGB CLS to target modality CLS
+            projected_cls = cls_projectors[mod](rgb_cls)  # [B, 1, embed_dim]
+
+            # Use zeros for storage tokens (no prior info), mask token for patches
+            mask_token = self.modality_specific_mask_tokens[mod]  # [embed_dim]
+            storage_tokens = torch.zeros(B, self.n_storage_tokens, self.embed_dim, device=rgb_cls.device)
+            patch_tokens = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
+
+            # Combine: [CLS, storage, patches]
+            embedded[mod] = torch.cat([projected_cls, storage_tokens, patch_tokens], dim=1)
+
+        # Step 3: Forward through fusion (modality encoding added here)
+        return self.forward_fusion_from_modality_features(embedded)
 
     def set_requires_grad(
         self,
@@ -1034,57 +1083,65 @@ class EVANClassifier(nn.Module):
         self.modality_classifiers[modality_key] = classifier
         print(f"  Created new classifier for modality: {modality_key}")
 
-    def forward(self, x):
+    def classify_from_features(self, features_dict):
+        """
+        Classify from pre-computed features dict.
+
+        Args:
+            features_dict: Output from evan.forward_features or forward_features_with_pseudo_modality
+
+        Returns:
+            logits: [B, num_classes]
+        """
+        if self.classifier_strategy == 'mean':
+            cls_tokens = []
+            for modality in sorted(features_dict.keys()):
+                if self.global_rep == "clstoken":
+                    cls_tokens.append(features_dict[modality]['x_norm_clstoken'])
+                elif self.global_rep == "mean_patch":
+                    cls_tokens.append(features_dict[modality]['x_norm_patchtokens'].mean(1))
+            fused = torch.stack(cls_tokens).mean(dim=0)
+            return self.classifier(fused)
+
+        elif self.classifier_strategy == 'ensemble':
+            all_logits = []
+            for modality in sorted(features_dict.keys()):
+                if modality not in self.modality_classifiers:
+                    self.instantiate_modality_classifier(modality)
+                if self.global_rep == "clstoken":
+                    cls_token = features_dict[modality]['x_norm_clstoken']
+                elif self.global_rep == "mean_patch":
+                    cls_token = features_dict[modality]['x_norm_patchtokens'].mean(1)
+                else:
+                    raise ValueError(f"unrecognized global_rep arg, choices are clstoken or mean_patch, received {self.global_rep}")
+                modality_logits = self.modality_classifiers[modality](cls_token)
+                all_logits.append(modality_logits)
+            return torch.stack(all_logits).mean(dim=0)
+
+        else:
+            raise ValueError(f"Unknown classifier strategy: {self.classifier_strategy}")
+
+    def forward(self, x, pseudo_modalities=None, cls_projectors=None):
         """
         Forward pass supporting both single tensor and dict inputs.
 
         Args:
             x: Either a tensor [B, C, H, W] or dict {modality: tensor}
-            train_modality: Optional str specifying which modality to use for loss during training
-                           (only applies in ensemble mode). If None, uses all modalities.
-                           During eval, always uses all modalities for ensemble.
+            pseudo_modalities: Optional list of modalities to hallucinate using mask tokens
+            cls_projectors: Required if pseudo_modalities is provided; trained CLS projectors
 
         Returns:
             logits: [B, num_classes]
         """
-        # Get features from EVAN
-        features_dict = self.evan.forward_features(x)
+        if pseudo_modalities is not None:
+            features_dict = self.evan.forward_features_with_pseudo_modality(
+                x, pseudo_modalities, cls_projectors
+            )
+        else:
+            features_dict = self.evan.forward_features(x)
 
-        if self.classifier_strategy == 'mean':
-            # Extract CLS tokens from each modality
-            cls_tokens = []
-            for modality in sorted(features_dict.keys()):
-                if self.global_rep=="clstoken":
-                    cls_tokens.append(features_dict[modality]['x_norm_clstoken'])
-                elif self.global_rep=="mean_patch":
-                    cls_tokens.append(features_dict[modality]['x_norm_patchtokens'].mean(1))
-
-            # Average CLS tokens
-            fused = torch.stack(cls_tokens).mean(dim=0)
-
-            # Classify
-            logits = self.classifier(fused)
-
-        elif self.classifier_strategy == 'ensemble':
-            all_logits = []
-            for modality in sorted(features_dict.keys()):
-                # Create classifier for this modality if it doesn't exist
-                if modality not in self.modality_classifiers:
-                    self.instantiate_modality_classifier(modality)
-                if self.global_rep=="clstoken":
-                    cls_token=features_dict[modality]['x_norm_clstoken']
-                elif self.global_rep=="mean_patch":
-                    cls_token=features_dict[modality]['x_norm_patchtokens'].mean(1)
-                else:
-                    raise ValueError(f"unrecognized global_rep arg, choices are clstoken or mean_patch, received {self.global_rep}")
-                # Get logits from modality-specific classifier
-                modality_logits = self.modality_classifiers[modality](cls_token)
-                all_logits.append(modality_logits)
-
-            # Ensemble by averaging logits
-            logits = torch.stack(all_logits).mean(dim=0)
-
-        return logits
+        return self.classify_from_features(features_dict)
+    
     def switch_strategy(self,target_strategy,key):
         if self.classifier_strategy == 'strategy': 
             print(f"Already using {target_strategy} head")

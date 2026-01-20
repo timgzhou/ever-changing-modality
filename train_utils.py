@@ -142,7 +142,7 @@ class FullSequenceMAEDecoder(nn.Module):
 
 
 def evaluate(model, dataloader, criterion, device, modality_bands_dict,
-             modalities_to_use=('rgb',)):
+             modalities_to_use=('rgb',), pseudo_modalities=None, cls_projectors=None):
     """
     Evaluate model on a dataloader.
 
@@ -154,8 +154,12 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
         modality_bands_dict: Dict mapping modality names to their band tuples
                             e.g., {'rgb': ('B04', 'B03', 'B02'), 'infrared': ('B08', 'B8A', 'B09', 'B10')}
         modalities_to_use: Tuple of modality names to use for evaluation (e.g., ('rgb',) or ('rgb', 'infrared'))
+        pseudo_modalities: Optional list of modalities to hallucinate using mask tokens
+        cls_projectors: Required if pseudo_modalities is provided; trained CLS projectors
     """
     model.eval()
+    if cls_projectors is not None:
+        cls_projectors.eval()
     total_loss = 0.0
     correct = 0
     total = 0
@@ -169,7 +173,11 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
                 batch, modality_bands_dict=modality_bands_dict, modalities=modalities_to_use
             )
             modal_input = {k: v.to(device) for k, v in modal_input.items()}
-            outputs = model(modal_input)
+
+            if pseudo_modalities is not None:
+                outputs = model(modal_input, pseudo_modalities=pseudo_modalities, cls_projectors=cls_projectors)
+            else:
+                outputs = model(modal_input)
 
             loss = criterion(outputs, labels)
 
@@ -280,7 +288,9 @@ def evaluate_mae_reconstruction(evan, mae_decoder, dataloader, device,
 def single_modality_training_loop(model, train_loader, test_loader, device,
                                    modality_bands_dict, criterion, optimizer, num_epochs,
                                    modality, phase_name="Training",
-                                   use_wandb=False, wandb_prefix=None, clip_norm=10):
+                                   use_wandb=False, wandb_prefix=None, clip_norm=10,
+                                   hallucinate_modality=False, pseudo_modalities=None,
+                                   cls_projectors=None):
     """
     Simple training loop for single-modality EVAN training (Stage 0).
 
@@ -297,17 +307,30 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         phase_name: Name of this training phase for logging
         use_wandb: Whether to log to wandb
         wandb_prefix: Prefix for wandb metrics
+        clip_norm: Max gradient norm for clipping
+        hallucinate_modality: If True, use pseudo-modality inference
+        pseudo_modalities: List of modalities to hallucinate (required if hallucinate_modality=True)
+        cls_projectors: Trained CLS projectors for pseudo-modality (required if hallucinate_modality=True)
 
     Returns:
-        Tuple of (train_acc, test_acc)
+        Tuple of (train_acc, test_acc, best_test_acc, best_epoch)
     """
     mod_str = modality.upper()
     global_step = 0
     best_test_acc = 0
     best_epoch = 0
     scheduler = ReduceLROnPlateau(optimizer,factor=0.5,patience=0,min_lr=1e-6)
+
+    # Validate hallucinate_modality requirements
+    if hallucinate_modality:
+        assert pseudo_modalities is not None, "pseudo_modalities required when hallucinate_modality=True"
+        assert cls_projectors is not None, "cls_projectors required when hallucinate_modality=True"
+        print(f"  Using pseudo-modality inference: {modality} + hallucinated {pseudo_modalities}")
+
     for epoch in range(num_epochs):
         model.train()
+        if cls_projectors is not None:
+            cls_projectors.train()
         train_loss = 0.0
         train_correct = 0
         train_total = 0
@@ -322,7 +345,12 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
             modal_input = {k: v.to(device) for k, v in modal_input.items()}
 
             optimizer.zero_grad()
-            outputs = model(modal_input)
+
+            if hallucinate_modality:
+                outputs = model(modal_input, pseudo_modalities=pseudo_modalities, cls_projectors=cls_projectors)
+            else:
+                outputs = model(modal_input)
+
             loss = criterion(outputs, labels)
             loss.backward()
 
@@ -353,11 +381,18 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         train_loss /= len(train_loader)
         train_acc = 100. * train_correct / train_total
 
-        # Evaluate on same modality
-        test_loss, test_acc = evaluate(
-            model, test_loader, criterion, device,
-            modality_bands_dict, modalities_to_use=(modality,)
-        )
+        # Evaluate on same modality (with pseudo-modality if enabled)
+        if hallucinate_modality:
+            test_loss, test_acc = evaluate(
+                model, test_loader, criterion, device,
+                modality_bands_dict, modalities_to_use=(modality,),
+                pseudo_modalities=pseudo_modalities, cls_projectors=cls_projectors
+            )
+        else:
+            test_loss, test_acc = evaluate(
+                model, test_loader, criterion, device,
+                modality_bands_dict, modalities_to_use=(modality,)
+            )
         scheduler.step(train_loss)
         if (epoch%8==1) or (epoch+1==num_epochs):
             print(f"  Train ({mod_str}): Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
@@ -813,111 +848,224 @@ def train_mae_phase(model, train_loader, test_loader_full, device, args, bands_t
     return mae_decoder  # Return for potential analysis
 
 def train_pseudo_supervised(model,unlabeled_train_loader,labeled_train_loader,test_loader,device,args,modality_bands_dict,student_mod,teacher_mod="rgb"):
-    # Create frozen teacher model before modifying student
+    """
+    Train classifiers using pseudo-supervision from hallucinated CLS tokens.
+
+    Monomodal: Learn rgb_cls_mono -> student_cls_mono, train student classifier
+    Multimodal: Learn rgb_cls_mono -> rgb_cls_mm and rgb_cls_mono -> student_cls_mm,
+                train ensemble classifier on hallucinated multimodal CLS tokens
+    """
     model.freeze_all()
     model.eval()
-    evan=model.evan
-    projector=nn.Sequential(
-        nn.Linear(evan.embed_dim,evan.embed_dim*4),
-        nn.GELU(),
-        nn.Linear(evan.embed_dim*4,evan.embed_dim)
-    )
-    projector = projector.to(device)
+    evan = model.evan
+    is_multimodal = args.objective == "multimodal"
 
-    # Optimizer
-    params = (list(filter(lambda p: p.requires_grad, projector.parameters())))
+    # Create projector(s)
+    def make_projector():
+        return nn.Sequential(
+            nn.Linear(evan.embed_dim, evan.embed_dim * 4),
+            nn.GELU(),
+            nn.Linear(evan.embed_dim * 4, evan.embed_dim)
+        ).to(device)
+
+    if is_multimodal:
+        # Two projectors: rgb_cls_mono -> rgb_cls_mm, rgb_cls_mono -> student_cls_mm
+        projector_rgb = make_projector()
+        projector_student = make_projector()
+        projectors = nn.ModuleDict({teacher_mod: projector_rgb, student_mod: projector_student})
+        params = list(projectors.parameters())
+    else:
+        # Single projector: rgb_cls_mono -> student_cls_mono
+        projector_student = make_projector()
+        params = list(projector_student.parameters())
+
     optimizer = torch.optim.AdamW(params, lr=args.stage3_lr)
     scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
-
-    # Loss function for knowledge distillation
     criteria = nn.MSELoss()
 
+    # Stage 1: Train projector(s) on unlabeled data
     for epoch in range(args.stage3_epochs):
         train_loss = 0.0
-
-        pbar = tqdm(unlabeled_train_loader, desc=f"Modality ClsToken Projector Epoch {epoch+1}/{args.stage3_epochs}")
+        pbar = tqdm(unlabeled_train_loader, desc=f"ClsToken Projector Epoch {epoch+1}/{args.stage3_epochs}")
         for batch in pbar:
-            # Step 1: Create input tensors for all modalities
             multimodal_input = create_multimodal_batch(
                 batch, modality_bands_dict=modality_bands_dict,
-                modalities=(student_mod,teacher_mod)
+                modalities=(student_mod, teacher_mod)
             )
             multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
-            teacher_input = {teacher_mod: multimodal_input[teacher_mod]}
-            student_input = {student_mod: multimodal_input[student_mod]}
-            teacher_clstoken = evan.forward_features(teacher_input)[teacher_mod]["x_norm_clstoken"]
-            student_clstoken= evan.forward_features(student_input)[student_mod]["x_norm_clstoken"]
-            projected_student_clstoken=projector(teacher_clstoken)
-            loss = criteria(student_clstoken,projected_student_clstoken)
+
+            # Get monomodal rgb CLS token (source for projection)
+            teacher_mono_input = {teacher_mod: multimodal_input[teacher_mod]}
+            rgb_cls_mono = evan.forward_features(teacher_mono_input)[teacher_mod]["x_norm_clstoken"]
+
+            if is_multimodal:
+                # Get multimodal CLS tokens (targets)
+                mm_features = evan.forward_features(multimodal_input)
+                rgb_cls_mm = mm_features[teacher_mod]["x_norm_clstoken"]
+                student_cls_mm = mm_features[student_mod]["x_norm_clstoken"]
+
+                # Project and compute loss for both
+                projected_rgb = projectors[teacher_mod](rgb_cls_mono)
+                projected_student = projectors[student_mod](rgb_cls_mono)
+                loss = criteria(projected_rgb, rgb_cls_mm) + criteria(projected_student, student_cls_mm)
+            else:
+                # Get monomodal student CLS token (target)
+                student_mono_input = {student_mod: multimodal_input[student_mod]}
+                student_cls_mono = evan.forward_features(student_mono_input)[student_mod]["x_norm_clstoken"]
+
+                projected_student = projector_student(rgb_cls_mono)
+                loss = criteria(projected_student, student_cls_mono)
+
             optimizer.zero_grad()
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=5)
             optimizer.step()
             train_loss += loss.item()
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'grad': f'{grad_norm:.4f}'
-            })
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'})
+
         avg_train_loss = train_loss / len(unlabeled_train_loader)
         scheduler.step(avg_train_loss)
-        
-    # Stage 2: learn a classifier
-    projector.eval()
-    for p in projector.parameters():
-        p.requires_grad = False
-    if args.objective=="multimodal":
-        raise NotImplementedError("this only support monomodal right now")
-    
-    classifier=copy.deepcopy(model.modality_classifiers[student_mod])
-    classifier=classifier.to(device)
-    model_eval=copy.deepcopy(model)
-    model_eval.modality_classifiers[student_mod]=classifier
-    model_eval.eval()
-    model_eval.freeze_all()
-    classifier.train()
-    for p in classifier.parameters():
-        p.requires_grad = True
-    params = (list(filter(lambda p: p.requires_grad, classifier.parameters())))
+        print(f"  Projector Epoch {epoch+1}: avg loss = {avg_train_loss:.4f}")
+
+    # Freeze projector(s)
+    if is_multimodal:
+        projectors.eval()
+        for p in projectors.parameters():
+            p.requires_grad = False
+    else:
+        projector_student.eval()
+        for p in projector_student.parameters():
+            p.requires_grad = False
+
+    # Stage 2: Train classifier(s) on labeled data using hallucinated CLS tokens
+    ce_criteria = nn.CrossEntropyLoss()
+    use_ensemble = args.classifier_strategy == "ensemble"
+
+    if is_multimodal:
+        if use_ensemble:
+            # Train ensemble classifiers for both modalities
+            classifier_rgb = copy.deepcopy(model.modality_classifiers[teacher_mod]).to(device)
+            classifier_student = copy.deepcopy(model.modality_classifiers[student_mod]).to(device)
+            classifiers = nn.ModuleDict({teacher_mod: classifier_rgb, student_mod: classifier_student})
+
+            # Setup eval model with new classifiers
+            model_eval = copy.deepcopy(model)
+            model_eval.modality_classifiers[teacher_mod] = classifier_rgb
+            model_eval.modality_classifiers[student_mod] = classifier_student
+            model_eval.eval()
+            model_eval.freeze_all()
+
+            for clf in classifiers.values():
+                clf.train()
+                for p in clf.parameters():
+                    p.requires_grad = True
+
+            params = list(classifiers.parameters())
+        else:
+            # Mean strategy: train a single shared classifier on averaged CLS tokens
+            classifier_shared = copy.deepcopy(model.classifier).to(device)
+
+            # Setup eval model with shared classifier
+            model_eval = copy.deepcopy(model)
+            model_eval.classifier = classifier_shared
+            model_eval.eval()
+            model_eval.freeze_all()
+
+            classifier_shared.train()
+            for p in classifier_shared.parameters():
+                p.requires_grad = True
+
+            params = list(classifier_shared.parameters())
+    else:
+        classifier_student = copy.deepcopy(model.modality_classifiers['rgb']).to(device)
+        model_eval = copy.deepcopy(model)
+        model_eval.modality_classifiers[student_mod] = classifier_student
+        model_eval.eval()
+        model_eval.freeze_all()
+        classifier_student.train()
+        for p in classifier_student.parameters():
+            p.requires_grad = True
+        params = list(classifier_student.parameters())
+
     optimizer = torch.optim.AdamW(params, lr=args.stage3_lr)
     scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
-    ce_criteria = nn.CrossEntropyLoss()
+
     for epoch in range(args.stage3_epochs):
         train_loss = 0.0
         pbar = tqdm(labeled_train_loader, desc=f"Pseudo Supervision Epoch {epoch+1}/{args.stage3_epochs}")
         for batch in pbar:
-            labels=batch["label"].to(device)
+            labels = batch["label"].to(device)
+
+            # Only have RGB in labeled data
             teacher_mod_input = create_multimodal_batch(
                 batch, modality_bands_dict=modality_bands_dict,
                 modalities=(teacher_mod,)
             )
             teacher_mod_input = {k: v.to(device) for k, v in teacher_mod_input.items()}
 
-            teacher_clstoken = evan.forward_features(teacher_mod_input)[teacher_mod]["x_norm_clstoken"]
-            projected_student_clstoken=projector(teacher_clstoken).detach()
-            projected_student_prediction=classifier(projected_student_clstoken)
-            loss = ce_criteria(projected_student_prediction,labels)
+            # Get monomodal rgb CLS token
+            rgb_cls_mono = evan.forward_features(teacher_mod_input)[teacher_mod]["x_norm_clstoken"]
+
+            if is_multimodal:
+                # Hallucinate multimodal CLS tokens
+                projected_rgb_cls = projectors[teacher_mod](rgb_cls_mono).detach()
+                projected_student_cls = projectors[student_mod](rgb_cls_mono).detach()
+
+                if use_ensemble:
+                    # Train both classifiers (ensemble)
+                    pred_rgb = classifiers[teacher_mod](projected_rgb_cls)
+                    pred_student = classifiers[student_mod](projected_student_cls)
+                    loss = ce_criteria(pred_rgb, labels) + ce_criteria(pred_student, labels)
+                else:
+                    # Train shared classifier on mean of CLS tokens
+                    mean_cls = (projected_rgb_cls + projected_student_cls) / 2
+                    pred = classifier_shared(mean_cls)
+                    loss = ce_criteria(pred, labels)
+            else:
+                projected_student_cls = projector_student(rgb_cls_mono).detach()
+                pred_student = classifier_student(projected_student_cls)
+                loss = ce_criteria(pred_student, labels)
+
             optimizer.zero_grad()
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=5)
             optimizer.step()
             train_loss += loss.item()
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'grad': f'{grad_norm:.4f}'
-            })
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'})
+
         avg_train_loss = train_loss / len(labeled_train_loader)
         scheduler.step(avg_train_loss)
-        # Evaluate test accuracy on student modality
-        _, test_acc = evaluate(
-            model_eval, test_loader, ce_criteria, device,
-            modality_bands_dict, modalities_to_use=(student_mod,)
-        )
-        print(f"  Test Acc ({student_mod}): {test_acc:.2f}%")
-    model.modality_classifiers[student_mod]=classifier
 
-def train_self_distillation(model,train_loader,test_loader,device,args,modality_bands_dict,student_mod,teacher_mod="rgb"):
-    # Create frozen teacher model before modifying student
-    teacher_model = copy.deepcopy(model)
+        # Evaluate on test set (with actual multimodal data)
+        if is_multimodal:
+            _, test_acc = evaluate(
+                model_eval, test_loader, ce_criteria, device,
+                modality_bands_dict, modalities_to_use=(student_mod, teacher_mod)
+            )
+            print(f"  Test Acc (multimodal {teacher_mod}+{student_mod}, {args.classifier_strategy}): {test_acc:.2f}%")
+        else:
+            _, test_acc = evaluate(
+                model_eval, test_loader, ce_criteria, device,
+                modality_bands_dict, modalities_to_use=(student_mod,)
+            )
+            print(f"  Test Acc ({student_mod}): {test_acc:.2f}%")
+
+    # Update model with trained classifiers
+    if is_multimodal:
+        if use_ensemble:
+            model.modality_classifiers[teacher_mod] = classifier_rgb
+            model.modality_classifiers[student_mod] = classifier_student
+        else:
+            model.classifier = classifier_shared
+    else:
+        model.modality_classifiers[student_mod] = classifier_student
+
+    return test_acc
+
+def train_self_distillation(model,train_loader,test_loader,device,args,modality_bands_dict,student_mod,teacher_mod="rgb",teacher_model=None):
+    # Use provided teacher model or create from student
+    if teacher_model is None:
+        teacher_model = copy.deepcopy(model)
     teacher_model.eval()
     for param in teacher_model.parameters():
         param.requires_grad = False
@@ -980,10 +1128,16 @@ def train_self_distillation(model,train_loader,test_loader,device,args,modality_
         scheduler.step(avg_train_loss)
 
         # Evaluate test accuracy on student modality
-        test_loss, test_acc = evaluate(
-            model, test_loader, ce_criteria, device,
-            modality_bands_dict, modalities_to_use=(student_mod,teacher_mod)
-        )
+        if args.objective=="multimodal":
+            test_loss, test_acc = evaluate(
+                model, test_loader, ce_criteria, device,
+                modality_bands_dict, modalities_to_use=(student_mod,teacher_mod)
+            )
+        else:
+            test_loss, test_acc = evaluate(
+                model, test_loader, ce_criteria, device,
+                modality_bands_dict, modalities_to_use=(student_mod,)
+            )
 
         # Evaluate distillation loss on test set
         model.eval()
@@ -1024,7 +1178,8 @@ def train_self_distillation(model,train_loader,test_loader,device,args,modality_
             'phase3_classifier/epoch': epoch + 1,
             'phase3_classifier/lr': optimizer.param_groups[0]['lr'],
         })
-        
+    return test_acc
+
 def train_mae_fusion_phase(
     model, train_loader, test_loader, device, args,
     bands_target: dict,

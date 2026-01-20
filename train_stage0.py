@@ -188,6 +188,7 @@ def main():
             'train_split': 'train1',
             'tz_fusion_time': args.tz_fusion_time,
             'tz_lora_rank': args.tz_lora_rank,
+            'tz_modality_specific_layer_augmenter': args.tz_modality_specific_layer_augmenter,
             'global_rep': args.global_rep,
             'train_mode': args.train_mode,
             'modality': args.modality,

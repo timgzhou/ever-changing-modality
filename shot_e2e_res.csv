@@ -1,0 +1,5 @@
+model_type,new_modality,ssl_mode,ssl_lr,fusion_epochs,mask_ratio,supervised_epochs,test_acc_multi,multimodal_gain,test_acc_rgb_single,best_test_acc_rgb,test_acc_newmod_single,best_test_acc_newmod,stage0_checkpoint,shote2e_checkpoint
+evan_small,vre,shot,0.0001,16,0.75,2,-1.00,-78.39,77.39,77.50,79.56,79.56,checkpoints/evan_eurosat_stage0_rgb_20260117_034834.pt,checkpoints/evan_eurosat_stage2_shot_20260120_002732.pt
+evan_small,vre,shot,0.0001,32,0.75,2,85.85,+14.26,71.59,72.20,77.19,77.19,checkpoints/evan_eurosat_stage0_rgb_20260118_134254.pt,checkpoints/evan_eurosat_stage2_shot_20260120_011937.pt
+evan_small,vre,shot,0.0001,32,0.75,2,96.02,+1.61,94.41,94.48,80.17,80.17,checkpoints/evan_eurosat_stage0_rgb_20260118_134254.pt,checkpoints/evan_eurosat_stage2_shot_20260120_013529.pt
+evan_small,vre,shot,0.0001,64,0.75,16,97.93,+1.26,96.67,96.69,81.78,81.98,checkpoints/evan_eurosat_stage0_rgb_20260118_134254.pt,checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt

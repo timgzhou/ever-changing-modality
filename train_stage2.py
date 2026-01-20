@@ -12,6 +12,7 @@ While keeping frozen:
 - Shared DINO backbone
 """
 
+from shot import train_shot
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
@@ -49,7 +50,8 @@ def main():
                         help='Batch size for training (default: 32)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of dataloader workers (default: 4)')
-    parser.add_argument('--stage2_train_method', type=str, default='mae', choices=['mae','converge'],
+    parser.add_argument('--newmod', type=str, default='vre')
+    parser.add_argument('--stage2_train_method', type=str, default='shot', choices=['mae','shot'],
                         help='stage 2 training mode')
     parser.add_argument('--stage2_lr', type=float, default=1e-3,
                         help='Learning rate for supervised phase (default: 1e-3)')
@@ -79,8 +81,10 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nUsing device: {device}")
 
-    # Get newmod from config
-    newmod = config['newmod']
+    newmod = args.newmod
+    # Get newmod from config if existed
+    if 'newmod' in config.keys():
+        newmod=config['newmod']
     bands_newmod = config['bands_newmod']
 
     # Initialize wandb if enabled
@@ -125,7 +129,7 @@ def main():
     print(f"Test samples: {len(test_dataset_full)}")
 
     # Create dataloaders
-    # train1_loader = DataLoader(train1_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    train1_loader = DataLoader(train1_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     train2_loader = DataLoader(train2_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     test_loader = DataLoader(test_dataset_full, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
@@ -184,7 +188,21 @@ def main():
             modality_bands_dict=modality_bands_dict,
         )
         
-    
+
+    # ========================================== SHOT ===========================================
+    if args.stage2_train_method=="shot":
+        print(f"\n Using SHOT (a mix of MAE, Distillation, Contrastive) training method for fusion blocks")
+        _,_,mask_tokens=train_shot(
+            model=model,
+            train_loader=train2_loader,
+            test_loader=test_loader,
+            device=device,
+            args=args,
+            mae_modalities=[newmod],  # new modality reconstructs pixels
+            latent_reconstruct_modalities=['rgb'],  # rgb matches teacher latents
+            modality_bands_dict=modality_bands_dict,
+        )
+        
     # ========================================= CHECKPOINT =====================================
     timestamp_stage2 = datetime.now().strftime('%Y%m%d_%H%M%S')
     checkpoint_path_stage2 = os.path.join(args.checkpoint_dir, f'evan_eurosat_stage2_{args.stage2_train_method}_{timestamp_stage2}.pt')
@@ -222,7 +240,7 @@ def main():
 
     train_acc, _, _, test_acc_multi = supervised_training_loop(
         model=model,
-        train_loader=train2_loader,
+        train_loader=train1_loader,
         test_loader_full=test_loader,
         device=device,
         modality_bands_dict=modality_bands_dict,
@@ -234,7 +252,7 @@ def main():
         phase_name="Stage 2 supervised evaluation",
         use_wandb=True,
         wandb_prefix="stage2_eval",
-        eval_single_modalities=False,  # Skip redundant single-modality evals during multimodal training
+        eval_single_modalities=True,  # Skip redundant single-modality evals during multimodal training
     )
 
     print(f"\nMultimodal Eval Result:")
@@ -253,15 +271,15 @@ def main():
     optimizer_rgb = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.stage2_lr)
 
     train_acc_rgb, test_acc_rgb_single, best_test_acc_rgb, best_epoch_rgb=-1,-1,-1,-1
-    # train_acc_rgb, test_acc_rgb_single, best_test_acc_rgb, best_epoch_rgb = single_modality_training_loop(
-    #     model, train2_loader, test_loader, device,
-    #     modality_bands_dict, criterion, optimizer_rgb, args.num_supervised_epochs,
-    #     modality='rgb', phase_name="Stage 2 RGB-only eval"
-    # )
-    # print(f"RGB-only Result: {train_acc_rgb=:.2f} {test_acc_rgb_single=:.2f} {best_test_acc_rgb=:.2f} at epoch {best_epoch_rgb}")
+    train_acc_rgb, test_acc_rgb_single, best_test_acc_rgb, best_epoch_rgb = single_modality_training_loop(
+        model, train1_loader, test_loader, device,
+        modality_bands_dict, criterion, optimizer_rgb, args.num_supervised_epochs,
+        modality='rgb', phase_name="Stage 2 RGB-only eval"
+    )
+    print(f"RGB-only Result: {train_acc_rgb=:.2f} {test_acc_rgb_single=:.2f} {best_test_acc_rgb=:.2f} at epoch {best_epoch_rgb}")
 
-    # # Reload checkpoint to reset classifier before newmod evaluation
-    # model.load_state_dict(checkpoint_stage2['model_state_dict'], strict=True)
+    # Reload checkpoint to reset classifier before newmod evaluation
+    model.load_state_dict(checkpoint_stage2['model_state_dict'], strict=True)
 
     # Newmod-only evaluation
     print("\n" + "-"*50)
@@ -271,7 +289,7 @@ def main():
     optimizer_newmod = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.stage2_lr)
 
     train_acc_newmod_single, test_acc_newmod_single, best_test_acc_newmod, best_epoch_newmod = single_modality_training_loop(
-        model, train2_loader, test_loader, device,
+        model, train1_loader, test_loader, device,
         modality_bands_dict, criterion, optimizer_newmod, args.num_supervised_epochs,
         modality=newmod, phase_name=f"Stage 2 {newmod}-only eval"
     )

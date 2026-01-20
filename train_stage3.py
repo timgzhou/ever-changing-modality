@@ -49,6 +49,8 @@ def main():
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_workers', type=int, default=4,)
     parser.add_argument('--stage3_train_method', type=str, default='distill', choices=['distill','pseudo'])
+    parser.add_argument('--rgb_teacher_checkpoint', type=str, default='checkpoints/evan_eurosat_stage0_rgb_20260118_134254.pt',
+                        help='RGB teacher checkpoint for distillation mode')
     parser.add_argument('--temperature', type=float, default=3.0)
     parser.add_argument('--stage3_lr', type=float, default=1e-3)
     parser.add_argument('--stage3_epochs', type=int, default=4)
@@ -72,7 +74,8 @@ def main():
 
     # Get newmod from config
     newmod = config['newmod']
-    bands_newmod = config['bands_newmod']
+    modality_bands_dict = get_modality_bands_dict('rgb', newmod)
+    bands_newmod = modality_bands_dict[newmod]  # derive from modality_bands_dict
 
     # Initialize wandb if enabled
     wandb.init(
@@ -80,8 +83,6 @@ def main():
         config={**config, **vars(args)},
         name=f"stage2_{config['model_type']}_{newmod}_{args.stage3_train_method}"
     )
-
-    modality_bands_dict = get_modality_bands_dict('rgb', newmod)
     bands_full = tuple(ALL_BAND_NAMES)
 
     # Create datasets
@@ -126,7 +127,9 @@ def main():
     evan = model_fn(
         tz_fusion_time=config['tz_fusion_time'],
         tz_lora_rank=config['tz_lora_rank'],
-        n_storage_tokens=4,
+        tz_modality_specific_layer_augmenter=config.get('tz_modality_specific_layer_augmenter', 'lora'),
+        tz_modality_fusion_layer_augmenter=config.get('tz_modality_fusion_layer_augmenter', 'lora'),
+        n_storage_tokens=config.get('n_storage_tokens', 4),
         device=device
     )
 
@@ -138,7 +141,7 @@ def main():
     model = EVANClassifier(evan, num_classes=config['num_classes'], classifier_strategy='mean', device=device)
     model = model.to(device)
     # Load state dict from checkpoint - this loads the MAE-trained components
-    model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     print(f"Loaded model weights from stage 2 checkpoint")
     print(f"SSL-trained components loaded: {newmod} patch embedder, {newmod} modality-specific LoRAs")
 
@@ -151,13 +154,32 @@ def main():
     #         modality_bands_dict, modalities_to_use=('rgb',)
     #     )
     # print(f"  {newmod} test acc: {new_mod_test_acc} \n  rgb test acc: {rgb_test_acc}")
-    
-    model.switch_strategy(args.classifier_strategy,"rgb")
+    if args.objective=="multimodal":
+        model.switch_strategy(args.classifier_strategy,"rgb")
     # ========================================= TRAIN =====================================
     if args.stage3_train_method=="distill":
         print(f"\n Using self distillation to train new classifier.")
-        
-        train_self_distillation(
+
+        # Load RGB teacher model from stage0 checkpoint
+        print(f"\n=== Loading RGB teacher from: {args.rgb_teacher_checkpoint} ===")
+        teacher_checkpoint = torch.load(args.rgb_teacher_checkpoint, map_location='cpu')
+        teacher_config = teacher_checkpoint['config']
+
+        teacher_model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[teacher_config['model_type']]
+        teacher_evan = teacher_model_fn(
+            tz_fusion_time=teacher_config['tz_fusion_time'],
+            tz_lora_rank=teacher_config['tz_lora_rank'],
+            tz_modality_specific_layer_augmenter=teacher_config.get('tz_modality_specific_layer_augmenter', 'lora'),
+            tz_modality_fusion_layer_augmenter=teacher_config.get('tz_modality_fusion_layer_augmenter', 'lora'),
+            n_storage_tokens=teacher_config.get('n_storage_tokens', 4),
+            device=device
+        )
+        teacher_model = EVANClassifier(teacher_evan, num_classes=teacher_config['num_classes'], classifier_strategy='mean', device=device)
+        teacher_model = teacher_model.to(device)
+        teacher_model.load_state_dict(teacher_checkpoint['model_state_dict'], strict=False)
+        print(f"Loaded RGB teacher model from stage0 checkpoint")
+
+        test_acc = train_self_distillation(
             model=model,
             train_loader=train2_loader,
             test_loader=test_loader,
@@ -166,11 +188,12 @@ def main():
             modality_bands_dict=modality_bands_dict,
             student_mod=newmod,
             teacher_mod="rgb",
+            teacher_model=teacher_model,
         )
-    
+
     if args.stage3_train_method=="pseudo":
-        print(f"\n Using self distillation to train new classifier.")
-        train_pseudo_supervised(
+        print(f"\n Using pseudo clstoken to train new classifier.")
+        test_acc = train_pseudo_supervised(
             model=model,
             unlabeled_train_loader=train2_loader,
             labeled_train_loader=train1_loader,
@@ -181,6 +204,36 @@ def main():
             student_mod=newmod,
             teacher_mod="rgb",
         )
+
+    # Log results to CSV
+    filename = "train_stage3_res.csv"
+    file_exists = os.path.isfile(filename)
+    fieldnames = [
+        "timestamp", "model_type", "new_modality", "stage3_train_method", "objective",
+        "classifier_strategy", "temperature", "stage3_lr", "stage3_epochs",
+        "test_acc", "stage2_checkpoint", "rgb_teacher_checkpoint"
+    ]
+    with open(filename, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(fieldnames)
+        writer.writerow([
+            datetime.now().strftime("%Y%m%d_%H%M%S"),
+            config['model_type'],
+            newmod,
+            args.stage3_train_method,
+            args.objective,
+            args.classifier_strategy,
+            args.temperature,
+            args.stage3_lr,
+            args.stage3_epochs,
+            f"{test_acc:.2f}",
+            args.stage2_checkpoint,
+            args.rgb_teacher_checkpoint if args.stage3_train_method == "distill" else "N/A",
+        ])
+
+    print(f"\nResults appended to {filename}")
+    wandb.finish()
 
 
 if __name__ == '__main__':
@@ -193,3 +246,7 @@ if __name__ == '__main__':
 # python -u train_stage3.py --stage2_checkpoint checkpoints/evan_eurosat_stage2_mae_20260118_080900.pt --objective monomodal --stage3_train_method pseudo
 
 # checkpoints/evan_eurosat_stage2_mae_20260119_140629.pt is the checkpoint where we use stage 1 to train everything other than classifier; learned to use mm clstoken for classification.
+# checkpoints/evan_eurosat_stage2_shot_20260120_002732.pt
+# evan_eurosat_stage0_rgb_20260118_134254.pt
+
+#  python -u train_stage3.py --stage2_checkpoint checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt --objective monomodal --stage3_train_method pseudo
