@@ -813,34 +813,37 @@ class EVAN(nn.Module):
         Forward pass with pseudo-modalities using mask tokens and projected CLS.
 
         When a modality is missing at inference time, this method creates pseudo-features
-        using learned mask tokens for patches and projected CLS tokens from RGB.
+        using learned mask tokens for patches and projected CLS tokens from available modalities.
 
         Args:
-            x: Dictionary of available modality tensors (must include 'rgb')
-            pseudo_modalities: List of modality names to hallucinate (e.g., ['infrared'])
-            cls_projectors: Trained projectors mapping rgb CLS -> other modality CLS
+            x: Dictionary of available modality tensors
+            pseudo_modalities: List of modality names to hallucinate (e.g., ['vre'])
+            cls_projectors: Trained bidirectional projectors with keys like 'rgb_to_vre', 'vre_to_rgb'
 
         Returns:
             Dictionary with normalized features per modality (same format as forward_features)
         """
         # Step 1: Get real modality features
         embedded = self.forward_modality_specific_features(x)
+        available_modalities = list(embedded.keys())
 
         # Step 2: Create pseudo-features for missing modalities
         B = next(iter(embedded.values())).shape[0]
         num_patches = (self.img_size // self.patch_size) ** 2
-        n_prefix = self.n_storage_tokens + 1
-
-        # Get RGB CLS for projection (before modality encoding, which is added in fusion)
-        rgb_cls = embedded['rgb'][:, 0:1, :]  # [B, 1, embed_dim]
 
         for mod in pseudo_modalities:
-            # Project RGB CLS to target modality CLS
-            projected_cls = cls_projectors[mod](rgb_cls)  # [B, 1, embed_dim]
+            # Project CLS from all available modalities and take mean
+            projected_cls_list = []
+            for avail_mod in available_modalities:
+                avail_cls = embedded[avail_mod][:, 0:1, :]  # [B, 1, embed_dim]
+                key = f"{avail_mod}_to_{mod}"
+                projected = cls_projectors[key](avail_cls)  # [B, 1, embed_dim]
+                projected_cls_list.append(projected)
+            projected_cls = torch.stack(projected_cls_list).mean(dim=0)  # [B, 1, embed_dim]
 
-            # Use zeros for storage tokens (no prior info), mask token for patches
+            # Use mask token for storage and patches (consistent with training)
             mask_token = self.modality_specific_mask_tokens[mod]  # [embed_dim]
-            storage_tokens = torch.zeros(B, self.n_storage_tokens, self.embed_dim, device=rgb_cls.device)
+            storage_tokens = mask_token.unsqueeze(0).unsqueeze(0).expand(B, self.n_storage_tokens, -1)
             patch_tokens = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
 
             # Combine: [CLS, storage, patches]

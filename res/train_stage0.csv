@@ -1,3 +1,13 @@
 model_type,modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,test_accuracy,best_test_accuracy(oracle),best_epoch,saved_checkpoint,global_rep
-evan_small,rgb,emb+probe,32,lora,0.0001,902026,1,92.11,92.11,1,checkpoints/evan_eurosat_stage0_rgb_20260121_003546.pt,clstoken
 evan_small,rgb,fft,32,lora,0.0001,22207498,64,98.50,98.59,39,checkpoints/evan_eurosat_stage0_rgb_20260121_012101.pt,clstoken
+evan_small,vre,emb+probe,32,fft,0.0001,902026,64,86.80,86.80,34,checkpoints/evan_eurosat_stage0_vre_20260121_022616.pt,clstoken
+evan_small,rgb,emb+probe,32,fft,0.0001,902026,64,97.15,97.20,22,checkpoints/evan_eurosat_stage0_rgb_20260121_022810.pt,clstoken
+evan_small,nir,emb+probe,32,fft,0.0001,803722,64,76.50,76.61,47,checkpoints/evan_eurosat_stage0_nir_20260121_023445.pt,clstoken
+evan_small,swir,emb+probe,32,fft,0.0001,803722,64,84.30,84.50,44,checkpoints/evan_eurosat_stage0_swir_20260121_024035.pt,clstoken
+evan_small,rgb,probe,32,fft,0.0001,606730,32,96.80,97.02,20,checkpoints/evan_eurosat_stage0_rgb_20260121_025010.pt,clstoken
+evan_small,rgb,fft,32,fft,0.0001,22207498,64,98.52,98.59,39,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,clstoken
+evan_small,vre,fft,32,fft,0.0001,22207498,64,90.00,90.15,39,checkpoints/evan_eurosat_stage0_vre_20260121_030018.pt,clstoken
+evan_small,vre,probe,32,fft,0.0001,606730,32,71.20,71.57,30,checkpoints/evan_eurosat_stage0_vre_20260121_030405.pt,clstoken
+evan_small,swir,fft,32,fft,0.0001,22109194,64,86.37,86.50,27,checkpoints/evan_eurosat_stage0_swir_20260121_030447.pt,clstoken
+evan_small,nir,fft,32,fft,0.0001,22109194,64,79.06,79.15,38,checkpoints/evan_eurosat_stage0_nir_20260121_030617.pt,clstoken
+evan_small,nir,probe,32,fft,0.0001,606730,32,50.72,50.93,31,checkpoints/evan_eurosat_stage0_nir_20260121_031758.pt,clstoken

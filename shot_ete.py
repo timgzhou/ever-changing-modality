@@ -46,6 +46,8 @@ def main():
                         help='Learning rate for fusion MAE training (default: 1e-4)')
     parser.add_argument('--mae_mask_ratio', type=float, default=0.75,
                         help='Mask ratio for MAE training (default: 0.75)')
+    parser.add_argument('--modality_dropout', type=float, default=0.2,
+                        help='Probability of fully masking a modality (default: 0.2)')
     parser.add_argument('--wandb_project', type=str, default='shot-end-to-end')
     parser.add_argument('--num_supervised_epochs', type=int, default=2)
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
@@ -128,23 +130,11 @@ def main():
         print(f"  Creating {newmod} modality components...")
         evan.create_modality_components(newmod,num_newmod_channels)
         model = model.to(device)  # Move newly created components to device
-        
-    _, new_mod_test_acc = evaluate(
-            model, test_loader, nn.CrossEntropyLoss(), device,
-            modality_bands_dict, modalities_to_use=(newmod,)
-        )
-    _, rgb_test_acc = evaluate(
-            model, test_loader, nn.CrossEntropyLoss(), device,
-            modality_bands_dict, modalities_to_use=('rgb',)
-        )
     
-    print(f"  {newmod} test acc: {new_mod_test_acc} \n  rgb test acc: {rgb_test_acc}")
-    
-
-    # ========================================== SHOT ===========================================
+    # ========================================== TRAIN SHOT ===========================================
     if args.train_method=="shot":
-        print(f"\n Using SHOT (a mix of MAE, Distillation, Contrastive) training method for fusion blocks")
-        _,_,_,cls_projectors=train_shot(
+        print(f"\n Using SHOT (MAE + Latent Distillation + CLS Projection) training method for fusion blocks")
+        _,_,_,cls_projectors,trainable_total=train_shot(
             model=model,
             train_loader=train2_loader,
             test_loader=test_loader,
@@ -230,7 +220,7 @@ def main():
         train_acc_newmod, test_acc_newmod, best_test_acc_newmod, best_epoch_newmod = single_modality_training_loop(
             model, train1_loader, test_loader, device,
             modality_bands_dict, criterion, optimizer_newmod, args.num_supervised_epochs,
-            modality=newmod, phase_name=f"SHOT newmod-o eval"
+            modality=newmod, phase_name=f"SHOT {newmod}-only eval", hallucinate_modality=True, pseudo_modalities=[starting_modality],cls_projectors=cls_projectors
         )
         print(f"{newmod}-only Result: {train_acc_newmod=:.2f} {test_acc_newmod=:.2f} {best_test_acc_newmod=:.2f} at epoch {best_epoch_newmod}")
 
@@ -238,8 +228,8 @@ def main():
     filename = "res/shot_e2e_res.csv"
     file_exists = os.path.isfile(filename)
     fieldnames = [
-        "model_type", "new_modality", "ssl_mode", "ssl_lr", "fusion_epochs",
-        "mask_ratio", "supervised_epochs",
+        "starting_modality","new_modality", "ssl_mode", "ssl_lr", "fusion_epochs",
+        "mask_ratio", "modality_dropout", "supervised_epochs","trainable_params",
         "test_acc_multi", "multimodal_gain",
         "test_acc_rgb_single", "best_test_acc_rgb",
         "test_acc_newmod_single", "best_test_acc_newmod",
@@ -250,13 +240,15 @@ def main():
         if not file_exists:
             writer.writerow(fieldnames)
         writer.writerow([
-            config['model_type'],
+            starting_modality,
             newmod,
             args.train_method,
             args.ssl_lr,
             args.epochs,
             args.mae_mask_ratio,
+            args.modality_dropout,
             args.num_supervised_epochs,
+            trainable_total,
             f"{test_acc_multi:.2f}",
             f"{test_acc_multi - test_acc_rgb_single:+.2f}",
             f"{test_acc_rgb_single:.2f}",
@@ -278,3 +270,4 @@ if __name__ == '__main__':
 
 # checkpoints/evan_eurosat_stage0_rgb_20260121_012101.pt
 # python -u shot_ete.py --stage0_checkpoint checkpoints/evan_eurosat_stage0_rgb_20260121_012101.pt --monomodal_eval --multimodal_eval
+# python -u shot_ete.py --stage0_checkpoint checkpoints/evan_eurosat_stage0_rgb_20260121_012101.pt --monomodal_eval --multimodal_eval --epochs 1 --num_supervised_epochs 1
