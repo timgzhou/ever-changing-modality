@@ -42,7 +42,7 @@ def main():
                         help='n modality-independent layers before fusion')
     parser.add_argument('--tz_lora_rank', type=int, default=32,
                         help='rank of lora adaptors')
-    parser.add_argument('--tz_modality_specific_layer_augmenter',type=str, default='lora', choices=['lora', 'fft'])
+    parser.add_argument('--tz_modality_specific_layer_augmenter',type=str, default='fft', choices=['lora', 'fft'])
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help='Directory to save checkpoints')
     parser.add_argument('--wandb_project', type=str, default='evan-eurosat-stage0(supervised)',
@@ -174,51 +174,25 @@ def main():
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     checkpoint_path = os.path.join(args.checkpoint_dir, f'evan_eurosat_stage0_{args.modality}_{timestamp}.pt')
-
-    checkpoint = {
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'epoch': num_epochs,
-        'train_acc': train_acc,
-        'test_acc': test_acc,
-        'modality': args.modality,
-        'config': {
-            'model_type': args.model,
-            'num_classes': 10,
-            'train_split': 'train1',
-            'tz_fusion_time': args.tz_fusion_time,
-            'tz_lora_rank': args.tz_lora_rank,
-            'tz_modality_specific_layer_augmenter': args.tz_modality_specific_layer_augmenter,
-            'global_rep': args.global_rep,
-            'train_mode': args.train_mode,
-            'modality': args.modality,
-            'bands': bands_mod,
-            'bands_full': bands_full,
-            'num_epochs': num_epochs,
-            'batch_size': args.batch_size,
-            'learning_rate': args.lr,
-        }
-    }
-
-    torch.save(checkpoint, checkpoint_path)
+    
+    model.save_checkpoint(checkpoint_path)
     print(f"\n=== Stage 0 checkpoint saved to: {checkpoint_path} ===")
     print(f"Stage 0 Final metrics ({args.modality.upper()}):")
     print(f"  Train accuracy: {train_acc:.2f}%")
     print(f"  Test accuracy: {test_acc:.2f}%")
     
-    filename="train_stage0_res.csv"
-    file_exists=os.path.isfile("train_stage0_res.csv")
-    fieldnames=["model_type","modality","train_mode","tz_lora_rank","tz_modality_specific_layer_augmenter","learning_rate","test_accuracy","epoch","best_test_accuracy(oracle)","best_epoch","saved_checkpoint","global_rep"]
+    filename="res/train_stage0.csv"
+    file_exists=os.path.isfile(filename)
+    fieldnames=["model_type","modality","train_mode","tz_lora_rank","tz_modality_specific_layer_augmenter","learning_rate","trainable_params","epoch","test_accuracy","best_test_accuracy(oracle)","best_epoch","saved_checkpoint","global_rep"]
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
         if not file_exists:
             writer.writerow(fieldnames)
-        writer.writerow([args.model,args.modality,args.train_mode,args.tz_lora_rank,args.tz_modality_specific_layer_augmenter,args.lr,f"{test_acc:.2f}",num_epochs,f"{best_test_acc:.2f}",best_epoch,checkpoint_path])
+        writer.writerow([args.model,args.modality,args.train_mode,args.tz_lora_rank,args.tz_modality_specific_layer_augmenter,args.lr,trainable_params,num_epochs,f"{test_acc:.2f}",f"{best_test_acc:.2f}",best_epoch,checkpoint_path,args.global_rep])
     
     # Finish wandb run
     if args.wandb_project:
         wandb.finish()
-
     return checkpoint_path
 
 
@@ -227,4 +201,4 @@ if __name__ == '__main__':
 
 # Example usage:
 # python train_stage0.py --model evan_base --epochs 5 --modality rgb # to train rgb-only evan (equiv to dino).
-# python train_stage0.py --model evan_base --epochs 5 --modality vre
+# python train_stage0.py --model evan_small --epochs 1 --modality rgb

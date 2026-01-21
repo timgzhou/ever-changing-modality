@@ -12,7 +12,7 @@ import csv
 from datetime import datetime
 import wandb
 
-from evan_main import evan_small, evan_base, evan_large, EVANClassifier
+from evan_main import EVANClassifier
 from eurosat_data_utils import (
     DictTransform,
     ALL_BAND_NAMES,
@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 
 
 def main():
-    parser = argparse.ArgumentParser(description='stage 2: Train fusion LoRAs and classifier (after stage 1 MAE)')
+    parser = argparse.ArgumentParser(description='End to end training for SHOT model.')
     parser.add_argument('--stage0_checkpoint', type=str, required=True,
                         help='Path to stage 0 checkpoint (required)')
     parser.add_argument('--batch_size', type=int, default=32,
@@ -56,13 +56,16 @@ def main():
     # Load stage 1 checkpoint
     print(f"\n=== Loading Stage 0 checkpoint from: {args.stage0_checkpoint} ===")
     checkpoint = torch.load(args.stage0_checkpoint, map_location='cpu')
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model=EVANClassifier.from_checkpoint(args.stage0_checkpoint,device)
     config = checkpoint['config']
+    evan_config = config['evan_config']
+    starting_modality=evan_config['starting_modality']
 
     print(f"Stage 0 config:")
     for k, v in config.items():
         print(f"  {k}: {v}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\nUsing device: {device}")
 
     newmod = args.new_mod_group
@@ -73,7 +76,7 @@ def main():
     wandb.init(
         project=args.wandb_project,
         config={**config, **vars(args)},
-        name=f"{config['model_type']}_{newmod}_{args.train_method}"
+        name=f"{starting_modality}=+{newmod}--{args.mae_mask_ratio}mask"
     )
 
     # Create datasets
@@ -111,33 +114,20 @@ def main():
     train1_loader = DataLoader(train1_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     train2_loader = DataLoader(train2_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     test_loader = DataLoader(test_dataset_full, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-
-    # Recreate EVAN model with same config
-    print("\n=== Recreating EVAN model ===")
-    model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[config['model_type']]
-    evan = model_fn(
-        tz_fusion_time=config['tz_fusion_time'],
-        tz_lora_rank=config['tz_lora_rank'],
-        tz_modality_specific_layer_augmenter=config.get('tz_modality_specific_layer_augmenter', 'lora'),
-        tz_modality_fusion_layer_augmenter=config.get('tz_modality_fusion_layer_augmenter', 'lora'),
-        n_storage_tokens=config.get('n_storage_tokens', 4),
-        device=device
-    )
-
-    # Create classifier
-        
-    model = EVANClassifier(evan, num_classes=config['num_classes'], classifier_strategy='mean', device=device)
+    evan = model.evan
+    # model = EVANClassifier(evan, num_classes=config['num_classes'], classifier_strategy='mean', device=device)
     model = model.to(device)
     
     # Load state dict from checkpoint - this loads the MAE-trained components
     model.load_state_dict(checkpoint['model_state_dict'], strict=True)
-    print(f"Loaded model weights from stage 1 checkpoint")
+    print(f"Loaded model weights from checkpoint {args.stage0_checkpoint}")
     print(f"SSL-trained components loaded: {newmod} patch embedder, {newmod} modality-specific LoRAs")
 
     num_newmod_channels = len(bands_newmod)
     if newmod not in evan.patch_embedders:
         print(f"  Creating {newmod} modality components...")
         evan.create_modality_components(newmod,num_newmod_channels)
+        model = model.to(device)  # Move newly created components to device
         
     _, new_mod_test_acc = evaluate(
             model, test_loader, nn.CrossEntropyLoss(), device,
@@ -168,22 +158,7 @@ def main():
     # ========================================= CHECKPOINT =====================================
     timestamp_shot = datetime.now().strftime('%Y%m%d_%H%M%S')
     checkpoint_shotete = os.path.join(args.checkpoint_dir, f'evan_eurosat_{args.train_method}_{timestamp_shot}.pt')
-
-    checkpoint_shot = {
-        'model_state_dict': model.state_dict(),
-        'stage1_checkpoint': args.stage0_checkpoint,
-        'config': {
-            **config,
-            'train_split': 'train2',
-            'train_method': args.train_method,
-            'ssl_lr': args.ssl_lr,
-            'epochs': args.epochs,
-            'mae_mask_ratio': args.mae_mask_ratio,
-            'newmod': newmod
-        }
-    }
-    torch.save(checkpoint_shot, checkpoint_shotete)
-    print(f"\n=== Stage 2 checkpoint saved to: {checkpoint_shotete} ===")
+    model.save_checkpoint(checkpoint_shotete)
 
     # ================================================ EVALUATION =============================================
     eval_lr=1e-3
@@ -210,7 +185,7 @@ def main():
             num_epochs=args.num_supervised_epochs,
             train_modalities=('rgb', newmod),
             newmod=newmod,
-            phase_name="Stage 2 supervised evaluation",
+            phase_name="SHOT supervised eval",
             use_wandb=True,
             wandb_prefix="shot_eval",
             eval_single_modalities=False,  # Skip redundant single-modality evals during multimodal training
@@ -225,7 +200,8 @@ def main():
     train_acc_rgb, test_acc_rgb_single, best_test_acc_rgb, best_epoch_rgb=-1,-1,-1,-1
     train_acc_newmod, test_acc_newmod, best_test_acc_newmod, best_epoch_newmod=-1,-1,-1,-1
     if args.monomodal_eval:
-        model.load_state_dict(checkpoint_shot['model_state_dict'], strict=True)
+        saved_checkpoint = torch.load(checkpoint_shotete, map_location=device)
+        model.load_state_dict(saved_checkpoint['model_state_dict'], strict=True)
 
         # RGB-only evaluation
         print("\n" + "-"*50)
@@ -242,7 +218,7 @@ def main():
         print(f"RGB-only Result: {train_acc_rgb=:.2f} {test_acc_rgb_single=:.2f} {best_test_acc_rgb=:.2f} at epoch {best_epoch_rgb}")
 
         # Reload checkpoint to reset classifier before newmod evaluation
-        model.load_state_dict(checkpoint_shot['model_state_dict'], strict=True)
+        model.load_state_dict(saved_checkpoint['model_state_dict'], strict=True)
 
         # Newmod-only evaluation
         print("\n" + "-"*50)
@@ -259,7 +235,7 @@ def main():
         print(f"{newmod}-only Result: {train_acc_newmod=:.2f} {test_acc_newmod=:.2f} {best_test_acc_newmod=:.2f} at epoch {best_epoch_newmod}")
 
     # Log results to CSV
-    filename = "shot_e2e_res.csv"
+    filename = "res/shot_e2e_res.csv"
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "model_type", "new_modality", "ssl_mode", "ssl_lr", "fusion_epochs",
@@ -298,4 +274,7 @@ def main():
 if __name__ == '__main__':
     main()
 
-# python -u shot_ete.py --stage0_checkpoint checkpoints/evan_eurosat_stage0_rgb_20260117_034834.pt --monomodal_eval
+# python -u shot_ete.py --stage0_checkpoint checkpoints/evan_eurosat_stage0_rgb_20260117_034834.pt --monomodal_eval --multimodal_eval
+
+# checkpoints/evan_eurosat_stage0_rgb_20260121_012101.pt
+# python -u shot_ete.py --stage0_checkpoint checkpoints/evan_eurosat_stage0_rgb_20260121_012101.pt --monomodal_eval --multimodal_eval

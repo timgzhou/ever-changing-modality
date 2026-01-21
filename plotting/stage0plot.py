@@ -3,8 +3,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 
-stage0_res = pd.read_csv("train_stage0_res.csv")
+stage0_res = pd.read_csv("res/legacy/train_stage0_res.csv")
 stage0_res = stage0_res[22:]
+# Filter out lora with rank != 32
+stage0_res = stage0_res[~((stage0_res["modality_specific_layer_augmenter"] == "lora") & (stage0_res["tz_lora_rank"] != 32))]
+stage0_res = stage0_res[(stage0_res["modality"] != "aw")]
+# Filter out fft+lora (adaptor mode with fft augmenter)
+stage0_res = stage0_res[~((stage0_res["train_mode"] == "adaptor") & (stage0_res["modality_specific_layer_augmenter"] == "fft"))]
+
 stage0_res["capacity"] = 'placeholder'
 
 # FFT mode
@@ -59,7 +65,7 @@ modalities = stage0_res["modality"].unique()
 n_modalities = len(modalities)
 
 # Create subplots - one per modality, arranged horizontally (narrower)
-fig, axes = plt.subplots(1, n_modalities, figsize=(1.5 * n_modalities, 3), sharey=False)
+fig, axes = plt.subplots(1, n_modalities, figsize=(1.5 * n_modalities, 2), sharey=False)
 if n_modalities == 1:
     axes = [axes]
 
@@ -97,9 +103,15 @@ for ax, modality in zip(axes, modalities):
     ax.set_xlim(-0.5, 0.5)
     ax.set_xticks([])  # Hide x-axis ticks since it's just a single vertical line
 
+    # Set y-limits with 10% padding, upper bounded by 100
+    data_min = modality_data["test_accuracy"].min()
+    data_max = modality_data["test_accuracy"].max()
+    data_range = data_max - data_min
+    ymin = data_min - 0.1 * data_range
+    ymax = min(data_max + 0.1 * data_range, 100)
+    ax.set_ylim(ymin, ymax)
+
     # Set y-tick spacing: use 0.5 minimum, but allow coarser if data range is large
-    ymin, ymax = ax.get_ylim()
-    data_range = ymax - ymin
     if data_range < 3:  # Only apply finer ticks for small ranges
         ax.yaxis.set_major_locator(MultipleLocator(0.5))
 
@@ -107,8 +119,10 @@ for ax, modality in zip(axes, modalities):
 plt.subplots_adjust(wspace=0.6)  # increase for more horizontal space
 
 # Add legend at bottom, one row
-fig.legend(legend_handles.values(), legend_handles.keys(), loc='lower center', bbox_to_anchor=(0.5, -0.02), ncol=len(legend_handles))
+fig.legend(legend_handles.values(), legend_handles.keys(), loc='lower center', bbox_to_anchor=(0.5, -0.1), ncol=len(legend_handles))
 
-fig.suptitle("Modality-Specific Capacity vs Test Accuracy by Modality",y=1.05)
+fig.suptitle("Modality-Specific Capacity vs Test Accuracy by Modality",y=1.15)
 
 plt.savefig("artifacts/stage0.png", bbox_inches='tight')
+
+# python plotting/stage0plot

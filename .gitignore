@@ -215,3 +215,4 @@ references
 *.sh
 ignore
 wandb
+res/legacy

@@ -1,9 +1,0 @@
-timestamp,model_type,new_modality,stage3_train_method,objective,classifier_strategy,temperature,stage3_lr,stage3_epochs,test_acc,stage2_checkpoint,rgb_teacher_checkpoint
-20260120_052558,evan_small,vre,pseudo,multimodal,ensemble,3.0,0.001,1,95.74,checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt,N/A
-20260120_053008,evan_small,vre,pseudo,multimodal,ensemble,3.0,0.001,4,96.35,checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt,N/A
-20260120_053646,evan_small,vre,pseudo,multimodal,mean,3.0,0.001,6,96.28,checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt,N/A
-20260120_061705,evan_small,vre,distill,monomodal,ensemble,3.0,0.001,64,84.24,checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt,checkpoints/evan_eurosat_stage0_rgb_20260118_134254.pt
-20260120_064320,evan_small,vre,pseudo,multimodal,mean,3.0,0.001,64,97.31,checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt,N/A
-20260120_071100,evan_small,vre,distill,multimodal,mean,3.0,0.001,64,97.30,checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt,checkpoints/evan_eurosat_stage0_rgb_20260118_134254.pt
-20260120_073711,evan_small,vre,pseudo,multimodal,ensemble,3.0,0.001,64,97.67,checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt,N/A
-20260120_080411,evan_small,vre,distill,multimodal,ensemble,3.0,0.001,64,97.07,checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt,checkpoints/evan_eurosat_stage0_rgb_20260118_134254.pt

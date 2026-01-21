@@ -628,6 +628,7 @@ def supervised_finetune_phase(model, evan, train_loader, test_loader_full, devic
         num_newmod_channels = len(bands_newmod)
         print(f"  Creating {newmod} modality components (embedder, LoRAs, encoders)...")
         evan.create_modality_components(newmod, num_newmod_channels)
+        model.to(device)  # Move newly created components to device
 
     # Freeze everything first
     for param in model.parameters():

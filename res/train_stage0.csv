@@ -1,0 +1,3 @@
+model_type,modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,test_accuracy,best_test_accuracy(oracle),best_epoch,saved_checkpoint,global_rep
+evan_small,rgb,emb+probe,32,lora,0.0001,902026,1,92.11,92.11,1,checkpoints/evan_eurosat_stage0_rgb_20260121_003546.pt,clstoken
+evan_small,rgb,fft,32,lora,0.0001,22207498,64,98.50,98.59,39,checkpoints/evan_eurosat_stage0_rgb_20260121_012101.pt,clstoken
