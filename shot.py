@@ -156,12 +156,12 @@ def create_int_cls_projectors(hidden_dim, all_modalities, device, factor=4):
 
 def create_fuse_cls_projectors(hidden_dim, mae_modalities, latent_reconstruct_modalities, device,factor=4):
     """
-    These are the supervision provided from mae_modalities to latent_reconstruction_modalities.
+    These are the supervision provided from latent_reconstruction_modalities to mae_modalities.
     Note we do this to ensure the features extracted from mae_modalities are semantically meaningful.
     """
     fused_cls_projector=nn.ModuleDict()
-    for src_mod in latent_reconstruct_modalities:
-        for tgt_mod in mae_modalities:
+    for src_mod in mae_modalities:
+        for tgt_mod in latent_reconstruct_modalities:
             if src_mod != tgt_mod:
                 key = f"{src_mod}_to_{tgt_mod}"
                 fused_cls_projector[key] = nn.Sequential(
@@ -171,12 +171,61 @@ def create_fuse_cls_projectors(hidden_dim, mae_modalities, latent_reconstruct_mo
                 ).to(device)
                 print(f"  Initialized CLS Projector: {src_mod} -> {tgt_mod}")
     return fused_cls_projector
-    
+def mask_input(mask_tokens,pre_fusion_cls_projectors,batch_size,n_storage_tokens,num_patches,mae_mask_ratio,all_modalities,prefusion_features,modality_dropout,device):
+    len_keep = int(num_patches * (1 - mae_mask_ratio))
+    modality_masks = {}  # {mod: [B, num_patches] bool tensor, True=masked}
+    modality_dropped = {}
+    drop_candidates = [mod for mod in all_modalities if np.random.rand() < modality_dropout]
+    if len(drop_candidates) == len(all_modalities):
+        # Don't drop all - randomly keep one
+        drop_candidates.pop(np.random.randint(len(drop_candidates)))
+    available_modalities = [mod for mod in all_modalities if mod not in drop_candidates]
+    for mod in all_modalities:
+        noise = torch.rand(batch_size, num_patches, device=device)
+        ids_shuffle = torch.argsort(noise, dim=1)
+        mask = torch.ones(batch_size, num_patches, device=device, dtype=torch.bool)
+        is_dropped = mod in drop_candidates
+        modality_dropped[mod] = is_dropped
+        len_keep_moddrop = 0 if is_dropped else len_keep
+        mask.scatter_(1, ids_shuffle[:, :len_keep_moddrop], False)
+        modality_masks[mod] = mask
+    masked_mod_features = {}
+    for mod, features in prefusion_features.items():
+        # features: [B, 1+n_storage+num_patches, embed_dim]
+        n_prefix = n_storage_tokens + 1
+        cls_token = features[:, 0:1, :]  # [B, 1, embed_dim]
+        storage = features[:, 1:n_prefix, :]  # [B, n_storage, embed_dim]
+        patches = features[:, n_prefix:, :]  # [B, num_patches, embed_dim]
+
+        # Replace masked positions with mask_token (using this modality's mask in mask_tokens)
+        mask_expanded = modality_masks[mod].unsqueeze(-1)  # [B, num_patches, 1]
+        mask_token_expanded = mask_tokens[mod].expand(batch_size, num_patches, -1)
+        masked_patches = torch.where(mask_expanded, mask_token_expanded, patches)
+
+        # If modality is fully dropped, use projected CLS from available modalities
+        # and mask storage tokens
+        if modality_dropped[mod]:
+            # Compute mean of projected CLS from all available modalities
+            projected_cls_list = []
+            for avail_mod in available_modalities:
+                avail_cls = prefusion_features[avail_mod][:, 0, :].detach()  # [B, embed_dim]
+                key = f"{avail_mod}_to_{mod}"
+                projected = pre_fusion_cls_projectors[key](avail_cls)  # [B, embed_dim]
+                projected_cls_list.append(projected)
+            # Mean of projections, detached so gradients don't flow back through projector during MAE/latent loss
+            cls_token = torch.stack(projected_cls_list).mean(dim=0).unsqueeze(1).detach()  # [B, 1, embed_dim]
+            storage = mask_tokens[mod].unsqueeze(0).unsqueeze(0).expand(batch_size, n_storage_tokens, -1)
+
+        # Reconstruct full sequence with masked patches
+        masked_mod_features[mod] = torch.cat([cls_token, storage, masked_patches], dim=1)
+    return modality_masks, masked_mod_features
+            
 def train_shot(
     model, train_loader, device, args,
     mae_modalities: list[str],
     latent_reconstruct_modalities: list[str] = ["rgb"],
-    modality_bands_dict: dict = None
+    modality_bands_dict: dict = None,
+    max_norm=4
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -267,7 +316,7 @@ def train_shot(
             )
             full_multimodal_input = {k: v.to(device) for k, v in full_multimodal_input.items()}
             batch_size = next(iter(full_multimodal_input.values())).shape[0]
-            mod_specific = evan.forward_modality_specific_features(full_multimodal_input) # pre_fusion features (independent processing for all)
+            prefusion_features = evan.forward_modality_specific_features(full_multimodal_input) # pre_fusion features (independent processing for all)
             # mod_specific looks like {mod: [B, 1+n_storage+num_patches, embed_dim] for mod in all_modalities}
 
             # Step 1: Get teacher targets (unmasked, frozen)
@@ -279,80 +328,28 @@ def train_shot(
             # Step 2: Compute pre-fusion CLS projection loss # TODO: try removing detach here
             # Train bidirectional projectors: src_cls -> tgt_cls for all pairs
             # Both src and tgt are detached - we only train the projector, not the pre-fusion weights 
-            batch_cls_loss = 0.0
+            batch_pre_fusion_cls_loss = 0.0
             prefusion_cls_loss = torch.tensor(0.0, device=device)
             pre_fusion_loss_count = 0
             for src_mod in all_modalities:
-                src_cls = mod_specific[src_mod][:, 0, :].detach()  # [B, embed_dim]
+                src_cls = prefusion_features[src_mod][:, 0, :].detach()  # [B, embed_dim]
                 for tgt_mod in all_modalities:
                     if src_mod != tgt_mod:
-                        tgt_cls = mod_specific[tgt_mod][:, 0, :].detach()  # [B, embed_dim]
+                        tgt_cls = prefusion_features[tgt_mod][:, 0, :].detach()  # [B, embed_dim]
                         key = f"{src_mod}_to_{tgt_mod}"
                         projected_cls = pre_fusion_cls_projectors[key](src_cls)  # [B, embed_dim]
                         prefusion_cls_loss = prefusion_cls_loss + mse_fn(projected_cls, tgt_cls)
                         pre_fusion_loss_count += 1
             prefusion_cls_loss = prefusion_cls_loss / pre_fusion_loss_count if pre_fusion_loss_count > 0 else prefusion_cls_loss
-            batch_cls_loss = prefusion_cls_loss.item()
-
-            # Step 3: Random Token / Modality Masking
-            len_keep = int(num_patches * (1 - args.mae_mask_ratio))
-            modality_masks = {}  # {mod: [B, num_patches] bool tensor, True=masked}
-            modality_dropped = {}  # {mod: bool} whether this modality is fully dropped
-
-            # Determine which modalities to drop, ensuring at least one remains
-            drop_candidates = [mod for mod in all_modalities if np.random.rand() < args.modality_dropout]
-            if len(drop_candidates) == len(all_modalities):
-                # Don't drop all - randomly keep one
-                drop_candidates.pop(np.random.randint(len(drop_candidates)))
-            available_modalities = [mod for mod in all_modalities if mod not in drop_candidates]
-
-            for mod in all_modalities:
-                noise = torch.rand(batch_size, num_patches, device=device)
-                ids_shuffle = torch.argsort(noise, dim=1)
-                mask = torch.ones(batch_size, num_patches, device=device, dtype=torch.bool)
-                is_dropped = mod in drop_candidates
-                modality_dropped[mod] = is_dropped
-                len_keep_moddrop = 0 if is_dropped else len_keep
-                mask.scatter_(1, ids_shuffle[:, :len_keep_moddrop], False)
-                modality_masks[mod] = mask
-
-            # Step 6: Apply per-modality mask to patch tokens (replace masked with mask_token)
-            # When modality is fully dropped, use projected CLS from available modalities
-            masked_mod_features = {}
-            for mod, features in mod_specific.items():
-                # features: [B, 1+n_storage+num_patches, embed_dim]
-                n_prefix = evan.n_storage_tokens + 1
-                cls_token = features[:, 0:1, :]  # [B, 1, embed_dim]
-                storage = features[:, 1:n_prefix, :]  # [B, n_storage, embed_dim]
-                patches = features[:, n_prefix:, :]  # [B, num_patches, embed_dim]
-
-                # Replace masked positions with mask_token (using this modality's mask in mask_tokens)
-                mask_expanded = modality_masks[mod].unsqueeze(-1)  # [B, num_patches, 1]
-                mask_token_expanded = mask_tokens[mod].expand(batch_size, num_patches, -1)
-                masked_patches = torch.where(mask_expanded, mask_token_expanded, patches)
-
-                # If modality is fully dropped, use projected CLS from available modalities
-                # and mask storage tokens
-                if modality_dropped[mod]:
-                    # Compute mean of projected CLS from all available modalities
-                    projected_cls_list = []
-                    for avail_mod in available_modalities:
-                        avail_cls = mod_specific[avail_mod][:, 0, :].detach()  # [B, embed_dim]
-                        key = f"{avail_mod}_to_{mod}"
-                        projected = pre_fusion_cls_projectors[key](avail_cls)  # [B, embed_dim]
-                        projected_cls_list.append(projected)
-                    # Mean of projections, detached so gradients don't flow back through projector during MAE/latent loss
-                    cls_token = torch.stack(projected_cls_list).mean(dim=0).unsqueeze(1).detach()  # [B, 1, embed_dim]
-                    storage = mask_tokens[mod].unsqueeze(0).unsqueeze(0).expand(batch_size, evan.n_storage_tokens, -1)
-
-                # Reconstruct full sequence with masked patches
-                masked_mod_features[mod] = torch.cat([cls_token, storage, masked_patches], dim=1)
-
-            # Step 7: Forward through fusion blocks
+            batch_pre_fusion_cls_loss = prefusion_cls_loss.item()
+            
+            modality_masks, masked_mod_features = mask_input(mask_tokens,pre_fusion_cls_projectors,batch_size,evan.n_storage_tokens,num_patches,args.mae_mask_ratio,all_modalities,prefusion_features,args.modality_dropout,device)
+            
+            # Step 3: Forward through fusion blocks
             student_fused = evan.forward_fusion_from_modality_features(masked_mod_features)
             # {mod: {'x_norm_patchtokens': [B, num_patches, embed_dim], ...}}
 
-            # Step 8: Compute losses
+            # Step 4: Compute losses
             total_loss = prefusion_cls_loss  # Start with CLS projection loss computed earlier
             batch_mae_loss = 0.0
             batch_latent_loss = 0.0
@@ -362,10 +359,8 @@ def train_shot(
             for mod in mae_modalities:
                 student_patches = student_fused[mod]['x_norm_patchtokens']  # [B, num_patches, embed_dim]
                 pred_pixels = mae_decoders[mod](student_patches)  # [B, num_patches, patch_size^2 * C]
-
                 target_img = full_multimodal_input[mod]  # [B, C, H, W]
                 target_patches = patchify(target_img, patch_size)  # [B, num_patches, patch_size^2 * C]
-
                 mask_float = modality_masks[mod].float()
                 mae_loss = mae_reconstruction_loss(pred_pixels, target_patches, mask_float)
                 total_loss = total_loss + mae_loss
@@ -377,7 +372,8 @@ def train_shot(
                 teacher_patches = teacher_out[mod]['x_norm_patchtokens'].detach()  # [B, num_patches, embed_dim]
                 student_cls = student_fused[mod]['x_norm_clstoken']  # [B, embed_dim]
                 teacher_cls = teacher_out[mod]['x_norm_clstoken'].detach()  # [B, embed_dim]
-
+                # TODO: here the cls token and the patch token are being projected equivalently. 
+                # This is not right, clstoken should have its own projection.
                 # Concatenate CLS with patches: treat CLS as an extra "patch" for projection
                 student_all = torch.cat([student_cls.unsqueeze(1), student_patches], dim=1)  # [B, 1+num_patches, embed_dim]
                 teacher_all = torch.cat([teacher_cls.unsqueeze(1), teacher_patches], dim=1)  # [B, 1+num_patches, embed_dim]
@@ -390,23 +386,23 @@ def train_shot(
             # Fused CLStoken loss: clstoken from mae_modalities should be mlp predictable by clstokens from latent_reconstruction_modalities
             for mod_mae in mae_modalities:
                 for mod_lat in latent_reconstruct_modalities:
-                    mod_lat_cls=student_fused[mod_lat]['x_norm_clstoken'].detach()
-                    predicted_mod_mae_cls=post_fusion_cls_projector[f"{mod_lat}_to_{mod_mae}"](mod_lat_cls)
-                    target_mod_mae_cls=student_fused[mod_mae]['x_norm_clstoken']
-                    fused_cls_loss=mse_fn(predicted_mod_mae_cls, target_mod_mae_cls)
+                    mod_mae_cls=student_fused[mod_mae]['x_norm_clstoken']
+                    predicted_lat_cls=post_fusion_cls_projector[f"{mod_mae}_to_{mod_lat}"](mod_mae_cls)
+                    target_lat_cls=student_fused[mod_lat]['x_norm_clstoken'].detach()
+                    fused_cls_loss=mse_fn(predicted_lat_cls, target_lat_cls)
                     total_loss = total_loss + fused_cls_loss
                     batch_fused_cls_loss += fused_cls_loss.item()
             
             # Step 9: Backward pass
             optimizer.zero_grad()
             total_loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=float('inf'))
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=max_norm)
             optimizer.step()
 
             train_loss += total_loss.item()
             train_mae_loss += batch_mae_loss
             train_latent_loss += batch_latent_loss
-            train_pre_fusion_cls_loss += batch_cls_loss
+            train_pre_fusion_cls_loss += batch_pre_fusion_cls_loss
             train_post_fusion_cls_loss += batch_fused_cls_loss
             train_count += 1
             global_step += 1
@@ -415,21 +411,21 @@ def train_shot(
                 'loss': f'{total_loss.item():.4f}',
                 'mae': f'{batch_mae_loss:.4f}',
                 'latent': f'{batch_latent_loss:.4f}',
-                'cls': f'{batch_cls_loss:.4f}',
-                'fused_cls': f'{batch_fused_cls_loss:.4f}',
+                'pre_fusion_cls': f'{batch_pre_fusion_cls_loss:.4f}',
+                'post_fusion_cls': f'{batch_fused_cls_loss:.4f}',
                 'grad': f'{grad_norm:.4f}'
             })
 
             # Log to wandb every step
             wandb.log({
-                'phase2_fusion/train_loss': total_loss.item(),
-                'phase2_fusion/mae_loss': batch_mae_loss,
-                'phase2_fusion/latent_loss': batch_latent_loss,
-                'phase2_fusion/cls_loss': batch_cls_loss,
-                'phase2_fusion/grad_norm': grad_norm.item(),
-                'phase2_fusion/epoch': epoch + 1,
-                'phase2_fusion/step': global_step,
-                'phase2_fusion/lr': optimizer.param_groups[0]['lr'],
+                'train_loss': total_loss.item(),
+                'mae_loss': batch_mae_loss,
+                'latent_loss': batch_latent_loss,
+                'pre_fusion_cls': batch_pre_fusion_cls_loss,
+                'post_fusion_cls': batch_fused_cls_loss,
+                'grad_norm': grad_norm.item(),
+                'epoch': epoch + 1,
+                'lr': optimizer.param_groups[0]['lr'],
             })
 
         # Epoch summary
@@ -437,6 +433,7 @@ def train_shot(
         train_mae_loss /= train_count
         train_latent_loss /= train_count
         train_pre_fusion_cls_loss /= train_count
+        train_post_fusion_cls_loss /= train_count
 
         scheduler.step(train_loss)
         print(f"\nFusion MAE Epoch {epoch+1}/{args.epochs}:")

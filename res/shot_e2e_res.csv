@@ -10,3 +10,4 @@ rgb,vre,shot,0.0001,64,0.75,0.2,16,adaptor,3552384,85.52,+8.69,76.83,77.26,81.67
 rgb,vre,shot,0.0001,16,0.75,0.2,2,full,35359872,-1.00,+0.00,-1.00,-1.00,-1.00,-1.00,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,checkpoints/evan_eurosat_shot_20260121_134400.pt
 rgb,vre,shot,0.0001,64,0.75,0.4,16,full,35359872,97.96,+0.13,97.83,97.94,85.00,85.85,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,checkpoints/evan_eurosat_shot_20260121_142854.pt
 rgb,vre,shot,0.0001,64,0.75,0.4,16,full,35359872,97.43,+0.19,97.24,97.69,87.54,88.15,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,checkpoints/presetA.pt
+rgb,vre,shot,0.0001,1,0.75,0.2,1,full,38313216,61.87,+16.15,45.72,45.72,37.33,37.33,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,checkpoints/evan_eurosat_shot_20260122_014508.pt
