@@ -37,8 +37,10 @@ from train_utils import (
     supervised_training_loop,
     train_mae_fusion_phase,
     train_pseudo_supervised,
-    train_self_distillation
+    train_self_distillation,
+    hallucination_supervised,
 )
+from shot import create_int_cls_projectors
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
@@ -48,7 +50,7 @@ def main():
     parser.add_argument('--stage2_checkpoint', type=str, required=True)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_workers', type=int, default=4,)
-    parser.add_argument('--stage3_train_method', type=str, default='distill', choices=['distill','pseudo'])
+    parser.add_argument('--stage3_train_method', type=str, default='distill', choices=['distill','pseudo','hallucination'])
     parser.add_argument('--rgb_teacher_checkpoint', type=str, default='checkpoints/evan_eurosat_stage0_rgb_20260118_134254.pt',
                         help='RGB teacher checkpoint for distillation mode')
     parser.add_argument('--temperature', type=float, default=3.0)
@@ -60,12 +62,15 @@ def main():
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     args = parser.parse_args()
 
-    # Load stage 2 checkpoint
-    print(f"\n=== Loading stage 2 checkpoint from: {args.stage2_checkpoint} ===")
+    print(f"\n=== Loading checkpoint from: {args.stage2_checkpoint} ===")
     checkpoint = torch.load(args.stage2_checkpoint, map_location='cpu')
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model=EVANClassifier.from_checkpoint(args.stage2_checkpoint,device)
     config = checkpoint['config']
+    evan_config = config['evan_config']
+    starting_modality=evan_config['starting_modality']
 
-    print(f"stage 2 config:")
+    print(f"config:")
     for k, v in config.items():
         print(f"  {k}: {v}")
 
@@ -73,7 +78,7 @@ def main():
     print(f"\nUsing device: {device}")
 
     # Get newmod from config
-    newmod = config['newmod']
+    newmod = "vre"
     modality_bands_dict = get_modality_bands_dict('rgb', newmod)
     bands_newmod = modality_bands_dict[newmod]  # derive from modality_bands_dict
 
@@ -81,7 +86,7 @@ def main():
     wandb.init(
         project=args.wandb_project,
         config={**config, **vars(args)},
-        name=f"stage2_{config['model_type']}_{newmod}_{args.stage3_train_method}"
+        name=f"{newmod}_{args.stage3_train_method}_{args.classifier_strategy}"
     )
     bands_full = tuple(ALL_BAND_NAMES)
 
@@ -121,24 +126,6 @@ def main():
     train2_loader = DataLoader(train2_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     test_loader = DataLoader(test_dataset_full, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    # Recreate EVAN model with same config
-    print("\n=== Recreating EVAN model ===")
-    model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[config['model_type']]
-    evan = model_fn(
-        tz_fusion_time=config['tz_fusion_time'],
-        tz_lora_rank=config['tz_lora_rank'],
-        tz_modality_specific_layer_augmenter=config.get('tz_modality_specific_layer_augmenter', 'lora'),
-        tz_modality_fusion_layer_augmenter=config.get('tz_modality_fusion_layer_augmenter', 'lora'),
-        n_storage_tokens=config.get('n_storage_tokens', 4),
-        device=device
-    )
-
-    # Create classifier
-    num_newmod_channels = len(bands_newmod)
-    if newmod not in evan.patch_embedders:
-        print(f"  Creating {newmod} modality components...")
-        evan.create_modality_components(newmod,num_newmod_channels)
-    model = EVANClassifier(evan, num_classes=config['num_classes'], classifier_strategy='mean', device=device)
     model = model.to(device)
     # Load state dict from checkpoint - this loads the MAE-trained components
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
@@ -205,11 +192,45 @@ def main():
             teacher_mod="rgb",
         )
 
+    if args.stage3_train_method=="hallucination":
+        print(f"\n Using hallucination supervised training with SHOT cls_projectors.")
+
+        # Load intermediate_cls_projectors from SHOT checkpoint
+        if 'cls_projectors_state_dict' not in checkpoint or checkpoint['cls_projectors_state_dict'] is None:
+            raise ValueError(
+                f"Checkpoint {args.stage2_checkpoint} does not contain cls_projectors_state_dict. "
+                "This checkpoint was likely not created by shot_ete.py. "
+                "Please use a SHOT checkpoint that includes the trained cls_projectors."
+            )
+
+        # Recreate the cls_projectors structure and load state dict
+        all_modalities = [starting_modality, newmod]
+        intermediate_cls_projectors = create_int_cls_projectors(
+            hidden_dim=model.evan.embed_dim,
+            all_modalities=all_modalities,
+            device=device
+        )
+        intermediate_cls_projectors.load_state_dict(checkpoint['cls_projectors_state_dict'])
+        print(f"Loaded SHOT-trained intermediate_cls_projectors: {list(intermediate_cls_projectors.keys())}")
+
+        test_acc = hallucination_supervised(
+            model=model,
+            unlabeled_train_loader=train2_loader,
+            labeled_train_loader=train1_loader,
+            test_loader=test_loader,
+            device=device,
+            args=args,
+            modality_bands_dict=modality_bands_dict,
+            student_mod=newmod,
+            teacher_mod="rgb",
+            intermediate_cls_projectors=intermediate_cls_projectors,
+        )
+
     # Log results to CSV
-    filename = "train_stage3_res.csv"
+    filename = "res/train_stage3_res.csv"
     file_exists = os.path.isfile(filename)
     fieldnames = [
-        "timestamp", "model_type", "new_modality", "stage3_train_method", "objective",
+        "timestamp", "new_modality", "stage3_train_method", "objective",
         "classifier_strategy", "temperature", "stage3_lr", "stage3_epochs",
         "test_acc", "stage2_checkpoint", "rgb_teacher_checkpoint"
     ]
@@ -219,7 +240,6 @@ def main():
             writer.writerow(fieldnames)
         writer.writerow([
             datetime.now().strftime("%Y%m%d_%H%M%S"),
-            config['model_type'],
             newmod,
             args.stage3_train_method,
             args.objective,
@@ -249,4 +269,4 @@ if __name__ == '__main__':
 # checkpoints/evan_eurosat_stage2_shot_20260120_002732.pt
 # evan_eurosat_stage0_rgb_20260118_134254.pt
 
-#  python -u train_stage3.py --stage2_checkpoint checkpoints/evan_eurosat_stage2_shot_20260120_022042.pt --objective monomodal --stage3_train_method pseudo
+#  python -u train_stage3.py --stage2_checkpoint checkpoints/evan_eurosat_shot_20260121_035727.pt --objective monomodal --stage3_train_method pseudo

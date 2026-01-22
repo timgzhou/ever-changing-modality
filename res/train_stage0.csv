@@ -11,3 +11,4 @@ evan_small,vre,probe,32,fft,0.0001,606730,32,71.20,71.57,30,checkpoints/evan_eur
 evan_small,swir,fft,32,fft,0.0001,22109194,64,86.37,86.50,27,checkpoints/evan_eurosat_stage0_swir_20260121_030447.pt,clstoken
 evan_small,nir,fft,32,fft,0.0001,22109194,64,79.06,79.15,38,checkpoints/evan_eurosat_stage0_nir_20260121_030617.pt,clstoken
 evan_small,nir,probe,32,fft,0.0001,606730,32,50.72,50.93,31,checkpoints/evan_eurosat_stage0_nir_20260121_031758.pt,clstoken
+evan_small,swir,probe,32,fft,0.0001,606730,32,69.28,69.28,32,checkpoints/evan_eurosat_stage0_swir_20260121_033206.pt,clstoken

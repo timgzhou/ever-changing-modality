@@ -427,6 +427,7 @@ class EVAN(nn.Module):
         self.add_new_cls_token(modality_key, init_modality=self.starting_modality)
         self.add_new_storage_tokens(modality_key)
         self.add_modality_encoder(modality_key)
+        self.add_new_mask_token(modality_key)
         params_after = sum(p.numel() for p in self.parameters())
         new_params = params_after - params_before
         self.supported_modalities.append(modality_key)
@@ -1354,7 +1355,7 @@ class EVANClassifier(nn.Module):
                 if mod not in model.modality_classifiers:
                     model.instantiate_modality_classifier(mod)
 
-        model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         print(f"EVANClassifier loaded from checkpoint: {path}")
         return model
 

@@ -53,6 +53,8 @@ def main():
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--multimodal_eval', action='store_true')
     parser.add_argument('--monomodal_eval', action='store_true')
+    parser.add_argument('--train_components', type=str, default='full', choices=['full','adaptor'])
+    parser.add_argument('--checkpoint_name', type=str, default=None)
     args = parser.parse_args()
 
     # Load stage 1 checkpoint
@@ -137,7 +139,6 @@ def main():
         _,_,_,cls_projectors,trainable_total=train_shot(
             model=model,
             train_loader=train2_loader,
-            test_loader=test_loader,
             device=device,
             args=args,
             mae_modalities=[newmod],  # new modality reconstructs pixels
@@ -148,7 +149,16 @@ def main():
     # ========================================= CHECKPOINT =====================================
     timestamp_shot = datetime.now().strftime('%Y%m%d_%H%M%S')
     checkpoint_shotete = os.path.join(args.checkpoint_dir, f'evan_eurosat_{args.train_method}_{timestamp_shot}.pt')
-    model.save_checkpoint(checkpoint_shotete)
+    if args.checkpoint_name:
+        checkpoint_shotete = os.path.join(args.checkpoint_dir, f'{args.checkpoint_name}.pt')
+    # Save model checkpoint with cls_projectors included
+    checkpoint_data = {
+        'model_state_dict': model.state_dict(),
+        'config': model.get_config(),
+        'cls_projectors_state_dict': cls_projectors.state_dict() if cls_projectors is not None else None,
+    }
+    torch.save(checkpoint_data, checkpoint_shotete)
+    print(f"SHOT checkpoint saved to: {checkpoint_shotete} (includes cls_projectors)")
 
     # ================================================ EVALUATION =============================================
     eval_lr=1e-3
@@ -181,7 +191,7 @@ def main():
             eval_single_modalities=False,  # Skip redundant single-modality evals during multimodal training
         )
 
-        print(f"\nMultimodal Eval Result:")
+        print(f"\n(supervised) Multimodal Eval Result:")
         print(f"  Train acc (RGB+{newmod}): {train_acc:.2f}%")
         print(f"  Test acc (RGB+{newmod}): {test_acc_multi:.2f}%")
 
@@ -195,7 +205,7 @@ def main():
 
         # RGB-only evaluation
         print("\n" + "-"*50)
-        print(f"=== Single-modality evaluation: RGB ===")
+        print(f"=== (Supervised) Single-modality evaluation: RGB ===")
         model.freeze_all()
         model.set_requires_grad('all', classifier=True)
         optimizer_rgb = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=eval_lr)
@@ -229,7 +239,7 @@ def main():
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "starting_modality","new_modality", "ssl_mode", "ssl_lr", "fusion_epochs",
-        "mask_ratio", "modality_dropout", "supervised_epochs","trainable_params",
+        "mask_ratio", "modality_dropout", "supervised_epochs","train_components","trainable_params",
         "test_acc_multi", "multimodal_gain",
         "test_acc_rgb_single", "best_test_acc_rgb",
         "test_acc_newmod_single", "best_test_acc_newmod",
@@ -248,6 +258,7 @@ def main():
             args.mae_mask_ratio,
             args.modality_dropout,
             args.num_supervised_epochs,
+            args.train_components,
             trainable_total,
             f"{test_acc_multi:.2f}",
             f"{test_acc_multi - test_acc_rgb_single:+.2f}",

@@ -848,7 +848,11 @@ def train_mae_phase(model, train_loader, test_loader_full, device, args, bands_t
     print("\n=== Phase 2a (MAE SSL) complete ===")
     return mae_decoder  # Return for potential analysis
 
-def train_pseudo_supervised(model,unlabeled_train_loader,labeled_train_loader,test_loader,device,args,modality_bands_dict,student_mod,teacher_mod="rgb"):
+# TODO: this method needs to be fixed, right now it is projecting from multimodal's monomodal cls -> multimodal cls, we want either:
+# 1. pass in a monomodal teacher (from the checkpoint 0 used to initialize shot checkpoint), and the teacher will project to multimodal clstoken.
+# 2. or, pass in a multimodal shot model, and learn to project from its monomodal representation with hallucinated input using mask token and cls projector
+def train_pseudo_supervised(model,unlabeled_train_loader,labeled_train_loader,test_loader,
+                            device,args,modality_bands_dict,student_mod,teacher_mod="rgb"):
     """
     Train classifiers using pseudo-supervision from hallucinated CLS tokens.
 
@@ -1004,7 +1008,7 @@ def train_pseudo_supervised(model,unlabeled_train_loader,labeled_train_loader,te
             )
             teacher_mod_input = {k: v.to(device) for k, v in teacher_mod_input.items()}
 
-            # Get monomodal rgb CLS token
+            # NOTE TODO Get monomodal rgb CLS token (single modality input fed to multimodal model)
             rgb_cls_mono = evan.forward_features(teacher_mod_input)[teacher_mod]["x_norm_clstoken"]
 
             if is_multimodal:
@@ -1062,6 +1066,319 @@ def train_pseudo_supervised(model,unlabeled_train_loader,labeled_train_loader,te
         model.modality_classifiers[student_mod] = classifier_student
 
     return test_acc
+
+
+def hallucination_supervised(
+    model, unlabeled_train_loader, labeled_train_loader, test_loader,
+    device, args, modality_bands_dict, student_mod, teacher_mod="rgb",
+    intermediate_cls_projectors=None
+):
+    """
+    Train classifiers using hallucinated multimodal features from SHOT-trained projectors.
+
+    This function ensures consistency between how SHOT learns to handle missing modalities
+    and how classifiers are trained. It uses:
+    - intermediate_cls_projectors: Trained during SHOT to map intermediate CLS tokens between modalities
+    - modality_specific_mask_tokens: Learned during SHOT to fill in missing patch/storage tokens
+
+    Workflow:
+    1. On unlabeled multimodal data: Learn fused_cls_projectors that map
+       hallucinated_fused_cls -> real_fused_cls
+    2. On labeled monomodal data: Use intermediate projectors + mask tokens to hallucinate,
+       then use fused_cls_projectors to predict real fused CLS, train classifier
+    3. Evaluate on real multimodal test data
+
+    Args:
+        intermediate_cls_projectors: nn.ModuleDict with keys like 'rgb_to_vre' from SHOT training.
+    """
+    if intermediate_cls_projectors is None:
+        raise ValueError("intermediate_cls_projectors must be provided from SHOT training")
+
+    model.freeze_all()
+    model.eval()
+    evan = model.evan
+    is_multimodal = args.objective == "multimodal"
+
+    print(f"\n=== Hallucination Supervised Training ===")
+    print(f"  Teacher modality: {teacher_mod}")
+    print(f"  Student modality: {student_mod}")
+    print(f"  Available intermediate projectors: {list(intermediate_cls_projectors.keys())}")
+
+    # Freeze intermediate projectors (already trained in SHOT)
+    intermediate_cls_projectors.eval()
+    for p in intermediate_cls_projectors.parameters():
+        p.requires_grad = False
+
+    # ==================== Stage 1: Learn fused_cls_projectors on unlabeled multimodal data ====================
+    # These projectors map hallucinated_fused_cls -> real_fused_cls
+    print(f"\n--- Stage 1: Learning fused_cls_projectors on unlabeled multimodal data ---")
+
+    def make_fused_projector():
+        return nn.Sequential(
+            nn.Linear(evan.embed_dim, evan.embed_dim),
+            nn.GELU(),
+            nn.Linear(evan.embed_dim, evan.embed_dim)
+        ).to(device)
+
+    # Create projectors for each modality's fused CLS token
+    fused_cls_projectors = nn.ModuleDict({
+        teacher_mod: make_fused_projector(),
+        student_mod: make_fused_projector()
+    })
+    fused_projector_params = list(fused_cls_projectors.parameters())
+
+    optimizer_fused = torch.optim.AdamW(fused_projector_params, lr=args.stage3_lr)
+    scheduler_fused = ReduceLROnPlateau(optimizer_fused, factor=0.5, patience=1, min_lr=1e-6)
+    mse_criteria = nn.MSELoss()
+
+    num_patches = (evan.img_size // evan.patch_size) ** 2
+
+    for epoch in range(args.stage3_epochs):
+        fused_cls_projectors.train()
+        train_loss = 0.0
+        pbar = tqdm(unlabeled_train_loader, desc=f"Fused Projector Epoch {epoch+1}/{args.stage3_epochs}")
+
+        for batch in pbar:
+            # Get real multimodal input
+            multimodal_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=(teacher_mod, student_mod)
+            )
+            multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
+            B = multimodal_input[teacher_mod].shape[0]
+
+            # Get real intermediate features for both modalities
+            with torch.no_grad():
+                real_intermediate = evan.forward_modality_specific_features(multimodal_input)
+                # real_intermediate: {mod: [B, 1+n_storage+num_patches, embed_dim]}
+
+            # Get real fused features (target)
+            with torch.no_grad():
+                real_fused = evan.forward_fusion_from_modality_features(copy.deepcopy(real_intermediate))
+                # real_fused: {mod: {'x_norm_clstoken': [B, embed_dim], ...}}
+                real_teacher_cls = real_fused[teacher_mod]['x_norm_clstoken']
+                real_student_cls = real_fused[student_mod]['x_norm_clstoken']
+
+            # Create hallucinated intermediate features (only teacher_mod is "available")
+            # Simulate what happens when student_mod is missing
+            teacher_only_input = {teacher_mod: multimodal_input[teacher_mod]}
+            with torch.no_grad():
+                teacher_intermediate = evan.forward_modality_specific_features(teacher_only_input)
+
+            # Hallucinate student_mod intermediate features using SHOT mechanism
+            teacher_cls = teacher_intermediate[teacher_mod][:, 0:1, :]  # [B, 1, embed_dim]
+            proj_key = f"{teacher_mod}_to_{student_mod}"
+            hallucinated_student_cls = intermediate_cls_projectors[proj_key](teacher_cls)  # [B, 1, embed_dim]
+
+            # Use mask token for storage and patches
+            mask_token = evan.modality_specific_mask_tokens[student_mod]  # [embed_dim]
+            hallucinated_storage = mask_token.unsqueeze(0).unsqueeze(0).expand(B, evan.n_storage_tokens, -1)
+            hallucinated_patches = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
+
+            # Construct hallucinated student intermediate: [CLS, storage, patches]
+            hallucinated_student_intermediate = torch.cat(
+                [hallucinated_student_cls, hallucinated_storage, hallucinated_patches], dim=1
+            )
+
+            # Combine real teacher intermediate with hallucinated student intermediate
+            hallucinated_intermediate = {
+                teacher_mod: teacher_intermediate[teacher_mod],
+                student_mod: hallucinated_student_intermediate
+            }
+
+            # Get hallucinated fused features
+            hallucinated_fused = evan.forward_fusion_from_modality_features(hallucinated_intermediate)
+            hallucinated_teacher_cls = hallucinated_fused[teacher_mod]['x_norm_clstoken']
+            hallucinated_student_cls_fused = hallucinated_fused[student_mod]['x_norm_clstoken']
+
+            # Project hallucinated fused CLS to predict real fused CLS
+            predicted_teacher_cls = fused_cls_projectors[teacher_mod](hallucinated_teacher_cls)
+            predicted_student_cls = fused_cls_projectors[student_mod](hallucinated_student_cls_fused)
+
+            # Loss: predicted should match real
+            loss = mse_criteria(predicted_teacher_cls, real_teacher_cls) + \
+                   mse_criteria(predicted_student_cls, real_student_cls)
+
+            optimizer_fused.zero_grad()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(fused_projector_params, max_norm=5)
+            optimizer_fused.step()
+
+            train_loss += loss.item()
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'})
+
+        avg_loss = train_loss / len(unlabeled_train_loader)
+        scheduler_fused.step(avg_loss)
+        print(f"  Fused Projector Epoch {epoch+1}: avg loss = {avg_loss:.4f}")
+
+    # Freeze fused_cls_projectors
+    fused_cls_projectors.eval()
+    for p in fused_cls_projectors.parameters():
+        p.requires_grad = False
+
+    # ==================== Stage 2: Train classifier on labeled monomodal data ====================
+    print(f"\n--- Stage 2: Training classifier on labeled monomodal data with hallucinated features ---")
+
+    ce_criteria = nn.CrossEntropyLoss()
+    use_ensemble = args.classifier_strategy == "ensemble"
+
+    if is_multimodal:
+        if use_ensemble:
+            classifier_teacher = copy.deepcopy(model.modality_classifiers[teacher_mod]).to(device)
+            classifier_student = copy.deepcopy(model.modality_classifiers[student_mod]).to(device)
+            classifiers = nn.ModuleDict({teacher_mod: classifier_teacher, student_mod: classifier_student})
+
+            model_eval = copy.deepcopy(model)
+            model_eval.modality_classifiers[teacher_mod] = classifier_teacher
+            model_eval.modality_classifiers[student_mod] = classifier_student
+            model_eval.eval()
+            model_eval.freeze_all()
+
+            for clf in classifiers.values():
+                clf.train()
+                for p in clf.parameters():
+                    p.requires_grad = True
+
+            classifier_params = list(classifiers.parameters())
+        else:
+            classifier_shared = copy.deepcopy(model.classifier).to(device)
+
+            model_eval = copy.deepcopy(model)
+            model_eval.classifier = classifier_shared
+            model_eval.eval()
+            model_eval.freeze_all()
+
+            classifier_shared.train()
+            for p in classifier_shared.parameters():
+                p.requires_grad = True
+
+            classifier_params = list(classifier_shared.parameters())
+    else:
+        # Monomodal: train student classifier
+        classifier_student = copy.deepcopy(model.modality_classifiers.get(student_mod, model.modality_classifiers['rgb'])).to(device)
+        model_eval = copy.deepcopy(model)
+        model_eval.modality_classifiers[student_mod] = classifier_student
+        model_eval.eval()
+        model_eval.freeze_all()
+
+        classifier_student.train()
+        for p in classifier_student.parameters():
+            p.requires_grad = True
+        classifier_params = list(classifier_student.parameters())
+
+    optimizer_clf = torch.optim.AdamW(classifier_params, lr=args.stage3_lr)
+    scheduler_clf = ReduceLROnPlateau(optimizer_clf, factor=0.5, patience=1, min_lr=1e-6)
+
+    for epoch in range(args.stage3_epochs):
+        if is_multimodal and use_ensemble:
+            for clf in classifiers.values():
+                clf.train()
+        elif is_multimodal:
+            classifier_shared.train()
+        else:
+            classifier_student.train()
+
+        train_loss = 0.0
+        pbar = tqdm(labeled_train_loader, desc=f"Classifier Epoch {epoch+1}/{args.stage3_epochs}")
+
+        for batch in pbar:
+            labels = batch["label"].to(device)
+
+            # Only have teacher_mod in labeled data
+            teacher_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=(teacher_mod,)
+            )
+            teacher_input = {k: v.to(device) for k, v in teacher_input.items()}
+            B = teacher_input[teacher_mod].shape[0]
+
+            # Get teacher intermediate features
+            with torch.no_grad():
+                teacher_intermediate = evan.forward_modality_specific_features(teacher_input)
+
+            # Hallucinate student intermediate features
+            teacher_cls = teacher_intermediate[teacher_mod][:, 0:1, :]
+            proj_key = f"{teacher_mod}_to_{student_mod}"
+            hallucinated_student_cls = intermediate_cls_projectors[proj_key](teacher_cls)
+
+            mask_token = evan.modality_specific_mask_tokens[student_mod]
+            hallucinated_storage = mask_token.unsqueeze(0).unsqueeze(0).expand(B, evan.n_storage_tokens, -1)
+            hallucinated_patches = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
+
+            hallucinated_student_intermediate = torch.cat(
+                [hallucinated_student_cls, hallucinated_storage, hallucinated_patches], dim=1
+            )
+
+            hallucinated_intermediate = {
+                teacher_mod: teacher_intermediate[teacher_mod],
+                student_mod: hallucinated_student_intermediate
+            }
+
+            # Get hallucinated fused features
+            with torch.no_grad():
+                hallucinated_fused = evan.forward_fusion_from_modality_features(hallucinated_intermediate)
+
+            # Project hallucinated fused CLS to predict real fused CLS
+            hallucinated_teacher_cls_fused = hallucinated_fused[teacher_mod]['x_norm_clstoken']
+            hallucinated_student_cls_fused = hallucinated_fused[student_mod]['x_norm_clstoken']
+
+            with torch.no_grad():
+                predicted_teacher_cls = fused_cls_projectors[teacher_mod](hallucinated_teacher_cls_fused)
+                predicted_student_cls = fused_cls_projectors[student_mod](hallucinated_student_cls_fused)
+
+            if is_multimodal:
+                if use_ensemble:
+                    pred_teacher = classifiers[teacher_mod](predicted_teacher_cls)
+                    pred_student = classifiers[student_mod](predicted_student_cls)
+                    loss = ce_criteria(pred_teacher, labels) + ce_criteria(pred_student, labels)
+                else:
+                    mean_cls = (predicted_teacher_cls + predicted_student_cls) / 2
+                    pred = classifier_shared(mean_cls)
+                    loss = ce_criteria(pred, labels)
+            else:
+                pred_student = classifier_student(predicted_student_cls)
+                loss = ce_criteria(pred_student, labels)
+
+            optimizer_clf.zero_grad()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(classifier_params, max_norm=5)
+            optimizer_clf.step()
+
+            train_loss += loss.item()
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'})
+
+        avg_loss = train_loss / len(labeled_train_loader)
+        scheduler_clf.step(avg_loss)
+
+        # Evaluate on test set with real multimodal data
+        if is_multimodal:
+            _, test_acc = evaluate(
+                model_eval, test_loader, ce_criteria, device,
+                modality_bands_dict, modalities_to_use=(teacher_mod, student_mod)
+            )
+            print(f"  Classifier Epoch {epoch+1}: Test Acc (real multimodal): {test_acc:.2f}%")
+        else:
+            _, test_acc = evaluate(
+                model_eval, test_loader, ce_criteria, device,
+                modality_bands_dict, modalities_to_use=(student_mod,)
+            )
+            print(f"  Classifier Epoch {epoch+1}: Test Acc ({student_mod}): {test_acc:.2f}%")
+
+    # Update model with trained classifiers
+    if is_multimodal:
+        if use_ensemble:
+            model.modality_classifiers[teacher_mod] = classifier_teacher
+            model.modality_classifiers[student_mod] = classifier_student
+        else:
+            model.classifier = classifier_shared
+    else:
+        model.modality_classifiers[student_mod] = classifier_student
+
+    print(f"\n=== Hallucination Supervised Training Complete ===")
+    print(f"  Final test accuracy: {test_acc:.2f}%")
+
+    return test_acc
+
 
 def train_self_distillation(model,train_loader,test_loader,device,args,modality_bands_dict,student_mod,teacher_mod="rgb",teacher_model=None):
     # Use provided teacher model or create from student
