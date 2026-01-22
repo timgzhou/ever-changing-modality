@@ -1,17 +1,3 @@
-"""stage 2: Train fusion LoRAs and classifier on train2 split.
-
-It trains:
-- New modality fusion LoRAs
-- New modality encoding
-- Classifier(s)
-
-While keeping frozen:
-- New modality patch embedder (trained in stage 2 MAE)
-- New modality modality-specific LoRAs (trained in stage 2 MAE)
-- RGB components
-- Shared DINO backbone
-"""
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
@@ -50,12 +36,12 @@ def main():
     parser.add_argument('--stage2_checkpoint', type=str, required=True)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_workers', type=int, default=4,)
-    parser.add_argument('--stage3_train_method', type=str, default='distill', choices=['distill','pseudo','hallucination'])
+    parser.add_argument('--stage3_train_method', type=str, default='hallucination', choices=['distill','pseudo','hallucination'])
     parser.add_argument('--rgb_teacher_checkpoint', type=str, default='checkpoints/evan_eurosat_stage0_rgb_20260118_134254.pt',
                         help='RGB teacher checkpoint for distillation mode')
     parser.add_argument('--temperature', type=float, default=3.0)
     parser.add_argument('--stage3_lr', type=float, default=1e-3)
-    parser.add_argument('--stage3_epochs', type=int, default=4)
+    parser.add_argument('--stage3_epochs', type=int, default=1)
     parser.add_argument('--classifier_strategy', type=str, default="ensemble", choices=["ensemble","mean"])
     parser.add_argument('--objective', type=str, default="multimodal", choices=["monomodal","multimodal"])
     parser.add_argument('--wandb_project', type=str, default='evan-eurosat-stage3(predictor)',help='Wandb project name')
@@ -131,16 +117,17 @@ def main():
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     print(f"Loaded model weights from stage 2 checkpoint")
     print(f"SSL-trained components loaded: {newmod} patch embedder, {newmod} modality-specific LoRAs")
-
-    # _, new_mod_test_acc = evaluate(
-    #         model, test_loader, nn.CrossEntropyLoss(), device,
-    #         modality_bands_dict, modalities_to_use=(newmod,)
-    #     )
-    # _, rgb_test_acc = evaluate(
-    #         model, test_loader, nn.CrossEntropyLoss(), device,
-    #         modality_bands_dict, modalities_to_use=('rgb',)
-    #     )
-    # print(f"  {newmod} test acc: {new_mod_test_acc} \n  rgb test acc: {rgb_test_acc}")
+    
+    print(f"Untrained starting modal accuracy (this should be different from pretraining)")
+    _, new_mod_test_acc = evaluate(
+            model, test_loader, nn.CrossEntropyLoss(), device,
+            modality_bands_dict, modalities_to_use=(newmod,)
+        )
+    _, rgb_test_acc = evaluate(
+            model, test_loader, nn.CrossEntropyLoss(), device,
+            modality_bands_dict, modalities_to_use=('rgb',)
+        )
+    print(f"  {newmod} test acc: {new_mod_test_acc} \n  rgb test acc: {rgb_test_acc}")
     if args.objective=="multimodal":
         model.switch_strategy(args.classifier_strategy,"rgb")
     # ========================================= TRAIN =====================================
@@ -193,6 +180,10 @@ def main():
         )
 
     if args.stage3_train_method=="hallucination":
+        print("Warning! hallucination mode should only work with ensemble strategy, switching you over.")
+        model.switch_strategy("ensemble","rgb")
+        model.freeze_all()
+        model.set_requires_grad("all",classifier=True)
         print(f"\n Using hallucination supervised training with SHOT cls_projectors.")
 
         # Load intermediate_cls_projectors from SHOT checkpoint
@@ -259,14 +250,4 @@ def main():
 if __name__ == '__main__':
     main()
 
-
-# python -u train_stage3.py --stage2_checkpoint checkpoints/evan_eurosat_stage2_mae_20260118_104035.pt --objective monomodal --stage3_train_method pseudo
-
-
-# python -u train_stage3.py --stage2_checkpoint checkpoints/evan_eurosat_stage2_mae_20260118_080900.pt --objective monomodal --stage3_train_method pseudo
-
-# checkpoints/evan_eurosat_stage2_mae_20260119_140629.pt is the checkpoint where we use stage 1 to train everything other than classifier; learned to use mm clstoken for classification.
-# checkpoints/evan_eurosat_stage2_shot_20260120_002732.pt
-# evan_eurosat_stage0_rgb_20260118_134254.pt
-
-#  python -u train_stage3.py --stage2_checkpoint checkpoints/evan_eurosat_shot_20260121_035727.pt --objective monomodal --stage3_train_method pseudo
+#  python -u train_stage3.py --stage2_checkpoint checkpoints/evan_eurosat_shot_20260121_035727.pt --objective monomodal --stage3_train_method hallucination

@@ -216,3 +216,4 @@ references
 ignore
 wandb
 res/legacy
+sh

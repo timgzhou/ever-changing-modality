@@ -173,7 +173,8 @@ def main():
     if args.multimodal_eval:
         optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=eval_lr)
         print(f"\n=== Training for {args.num_supervised_epochs} epochs ===")
-        print(f"Strategy: Train and evaluate on RGB+{newmod} (multimodal, train2 split)")
+        print(f"Train and evaluate on {starting_modality}+{newmod} (multimodal, train1 split)")
+        model.switch_strategy("ensemble",starting_modality)
         train_acc, _, _, test_acc_multi = supervised_training_loop(
             model=model,
             train_loader=train1_loader,
@@ -183,7 +184,7 @@ def main():
             criterion=criterion,
             optimizer=optimizer,
             num_epochs=args.num_supervised_epochs,
-            train_modalities=('rgb', newmod),
+            train_modalities=(starting_modality, newmod),
             newmod=newmod,
             phase_name="SHOT supervised eval",
             use_wandb=True,
@@ -195,7 +196,7 @@ def main():
         print(f"  Train acc (RGB+{newmod}): {train_acc:.2f}%")
         print(f"  Test acc (RGB+{newmod}): {test_acc_multi:.2f}%")
 
-    # ========== Single-modality evaluations (like stage 1) ==========
+    # ========== Single-modality evaluations under supervision ==========
     # Reload checkpoint to reset classifier before single-modality evaluation
     train_acc_rgb, test_acc_rgb_single, best_test_acc_rgb, best_epoch_rgb=-1,-1,-1,-1
     train_acc_newmod, test_acc_newmod, best_test_acc_newmod, best_epoch_newmod=-1,-1,-1,-1
@@ -213,7 +214,7 @@ def main():
         train_acc_rgb, test_acc_rgb_single, best_test_acc_rgb, best_epoch_rgb = single_modality_training_loop(
             model, train1_loader, test_loader, device,
             modality_bands_dict, criterion, optimizer_rgb, args.num_supervised_epochs,
-            modality='rgb', phase_name="SHOT RGB-only eval", hallucinate_modality=True, pseudo_modalities=[newmod],cls_projectors=cls_projectors
+            modality='rgb', phase_name="SHOT RGB-only eval w/ hallucination", hallucinate_modality=True, pseudo_modalities=[newmod],cls_projectors=cls_projectors
         )
         print(f"RGB-only Result: {train_acc_rgb=:.2f} {test_acc_rgb_single=:.2f} {best_test_acc_rgb=:.2f} at epoch {best_epoch_rgb}")
 
@@ -230,7 +231,39 @@ def main():
         train_acc_newmod, test_acc_newmod, best_test_acc_newmod, best_epoch_newmod = single_modality_training_loop(
             model, train1_loader, test_loader, device,
             modality_bands_dict, criterion, optimizer_newmod, args.num_supervised_epochs,
-            modality=newmod, phase_name=f"SHOT {newmod}-only eval", hallucinate_modality=True, pseudo_modalities=[starting_modality],cls_projectors=cls_projectors
+            modality=newmod, phase_name=f"SHOT {newmod}-only eval w/ hallucination", hallucinate_modality=True, pseudo_modalities=[starting_modality],cls_projectors=cls_projectors
+        )
+        print(f"(With Hallucination) {newmod}-only Result: {train_acc_newmod=:.2f} {test_acc_newmod=:.2f} {best_test_acc_newmod=:.2f} at epoch {best_epoch_newmod}")
+
+        model.load_state_dict(saved_checkpoint['model_state_dict'], strict=True)
+        # RGB-only evaluation
+        print("\n" + "-"*50)
+        print(f"=== (Supervised) Single-modality evaluation: RGB ===")
+        model.freeze_all()
+        model.set_requires_grad('all', classifier=True)
+        optimizer_rgb = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=eval_lr)
+
+        train_acc_rgb, test_acc_rgb_single, best_test_acc_rgb, best_epoch_rgb = single_modality_training_loop(
+            model, train1_loader, test_loader, device,
+            modality_bands_dict, criterion, optimizer_rgb, args.num_supervised_epochs,
+            modality='rgb', phase_name="SHOT RGB-only eval"
+        )
+        print(f"RGB-only Result: {train_acc_rgb=:.2f} {test_acc_rgb_single=:.2f} {best_test_acc_rgb=:.2f} at epoch {best_epoch_rgb}")
+
+        # Reload checkpoint to reset classifier before newmod evaluation
+        model.load_state_dict(saved_checkpoint['model_state_dict'], strict=True)
+
+        # Newmod-only evaluation
+        print("\n" + "-"*50)
+        print(f"=== Single-modality evaluation: {newmod} ===")
+        model.freeze_all()
+        model.set_requires_grad('all', classifier=True)
+        optimizer_newmod = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=eval_lr)
+
+        train_acc_newmod, test_acc_newmod, best_test_acc_newmod, best_epoch_newmod = single_modality_training_loop(
+            model, train1_loader, test_loader, device,
+            modality_bands_dict, criterion, optimizer_newmod, args.num_supervised_epochs,
+            modality=newmod, phase_name=f"SHOT {newmod}-only eval"
         )
         print(f"{newmod}-only Result: {train_acc_newmod=:.2f} {test_acc_newmod=:.2f} {best_test_acc_newmod=:.2f} at epoch {best_epoch_newmod}")
 

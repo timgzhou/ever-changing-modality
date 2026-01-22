@@ -1255,7 +1255,7 @@ def hallucination_supervised(
             classifier_params = list(classifier_shared.parameters())
     else:
         # Monomodal: train student classifier
-        classifier_student = copy.deepcopy(model.modality_classifiers.get(student_mod, model.modality_classifiers['rgb'])).to(device)
+        classifier_student = copy.deepcopy(model.modality_classifiers[student_mod]).to(device)
         model_eval = copy.deepcopy(model)
         model_eval.modality_classifiers[student_mod] = classifier_student
         model_eval.eval()

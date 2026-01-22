@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -1200,19 +1201,20 @@ class EVANClassifier(nn.Module):
         elif target_strategy=="mean":
             self.ensemble_to_mean(key)
         elif target_strategy=="ensemble":
-            self.mean_to_ensemble(key)
+            self.mean_to_ensemble()
             for mod in self.evan.patch_embedders.keys():
                 self.instantiate_modality_classifier(mod)
         return
             
-    def mean_to_ensemble(self, new_key:str='rgb'):
+    def mean_to_ensemble(self):
         """Convert from 'mean' to 'ensemble' strategy, the existing classifier becomes new_key classifier"""
         if self.classifier_strategy == 'ensemble':
             print("!!!!  mean_to_ensemble was called on classifier but it already is ensemble. No changes made.")
             return()
         assert self.classifier_strategy == 'mean'
         self.modality_classifiers = nn.ModuleDict()
-        self.modality_classifiers[new_key]=self.classifier
+        for mod in self.evan.supported_modalities:
+            self.modality_classifiers[mod]=copy.deepcopy(self.classifier)
         self.classifier=None
         self.classifier_strategy='ensemble'
         print("!! Evan Classifier has switched strategy from mean to ensemble")
@@ -1284,6 +1286,8 @@ class EVANClassifier(nn.Module):
                 elif modality in self.modality_classifiers:
                     for param in self.modality_classifiers[modality].parameters():
                         param.requires_grad = True
+                else:
+                    raise RuntimeError(f"{modality} not in modality_classifiers")
 
     def freeze_all(self):
         """Freeze all parameters in the model (EVAN + classifier)."""

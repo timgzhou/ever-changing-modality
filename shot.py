@@ -437,7 +437,7 @@ def train_shot(
 
         scheduler.step(train_loss)
         print(f"\nFusion MAE Epoch {epoch+1}/{args.epochs}:")
-        print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}, CLS: {train_pre_fusion_cls_loss:.4f}")
+        print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}, CLS: {train_pre_fusion_cls_loss:.4f}, lr: {optimizer.param_groups[0]['lr']:.6f}")
 
     print("\n=== Phase 2 (Fusion MAE Training) complete ===")
     return mae_decoders, latent_projectors, mask_tokens, pre_fusion_cls_projectors, trainable_total
