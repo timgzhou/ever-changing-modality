@@ -241,7 +241,9 @@ def train_shot(
     all_modalities = list(set(mae_modalities + latent_reconstruct_modalities))
 
     model.freeze_all()
-    model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=True, msla=True, patch_embedders=True) # blocks are true, no need for mfla and msla
+    # TODO NOTE here we should disable patch_embedders for rgb
+    # NOTE mfla is now disabled for ablation.
+    model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=False, msla=True, patch_embedders=True) # blocks are true, no need for mfla and msla
     if args.train_components=="full":
         model.set_requires_grad("backbone", mask_token=False, blocks=True, norm=True) #use new mask tokens instead, see below
     
@@ -288,7 +290,7 @@ def train_shot(
     assert num_params==trainable_total, f"{num_params=} != {trainable_total=}"
 
     optimizer = torch.optim.AdamW(params, lr=args.ssl_lr)
-    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=4, min_lr=1e-6)
 
     # Loss functions
     mse_fn = nn.MSELoss()
@@ -325,7 +327,8 @@ def train_shot(
                 teacher_out = teacher_evan.forward_features(teacher_input)
                 # looks like {"rgb": {'x_norm_patchtokens': [B, num_patches, embed_dim], ...}}
 
-            # Step 2: Compute pre-fusion CLS projection loss # TODO: try removing detach here
+            # Step 2: Compute pre-fusion CLS projection loss
+            # NOTE: currently preset 4 jan 22 tried to remove detach from tgt_cls, and it helped!
             # Train bidirectional projectors: src_cls -> tgt_cls for all pairs
             # Both src and tgt are detached - we only train the projector, not the pre-fusion weights 
             batch_pre_fusion_cls_loss = 0.0
@@ -335,7 +338,7 @@ def train_shot(
                 src_cls = prefusion_features[src_mod][:, 0, :].detach()  # [B, embed_dim]
                 for tgt_mod in all_modalities:
                     if src_mod != tgt_mod:
-                        tgt_cls = prefusion_features[tgt_mod][:, 0, :].detach()  # [B, embed_dim]
+                        tgt_cls = prefusion_features[tgt_mod][:, 0, :]#.detach()  # [B, embed_dim]
                         key = f"{src_mod}_to_{tgt_mod}"
                         projected_cls = pre_fusion_cls_projectors[key](src_cls)  # [B, embed_dim]
                         prefusion_cls_loss = prefusion_cls_loss + mse_fn(projected_cls, tgt_cls)
@@ -406,6 +409,7 @@ def train_shot(
             train_post_fusion_cls_loss += batch_fused_cls_loss
             train_count += 1
             global_step += 1
+            scheduler_loss = train_loss-batch_pre_fusion_cls_loss
 
             pbar.set_postfix({
                 'loss': f'{total_loss.item():.4f}',
@@ -427,6 +431,9 @@ def train_shot(
                 'epoch': epoch + 1,
                 'lr': optimizer.param_groups[0]['lr'],
             })
+        scheduler_loss = train_loss - train_pre_fusion_cls_loss  # both are sums
+        scheduler_loss /= train_count  # average it
+        scheduler.step(scheduler_loss)
 
         # Epoch summary
         train_loss /= train_count
@@ -435,9 +442,8 @@ def train_shot(
         train_pre_fusion_cls_loss /= train_count
         train_post_fusion_cls_loss /= train_count
 
-        scheduler.step(train_loss)
         print(f"\nFusion MAE Epoch {epoch+1}/{args.epochs}:")
-        print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}, CLS: {train_pre_fusion_cls_loss:.4f}, lr: {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}, Pre-fusion CLS: {train_pre_fusion_cls_loss:.4f}, Post-fusion cls: {train_post_fusion_cls_loss:.4f}, lr: {optimizer.param_groups[0]['lr']:.6f}")
 
     print("\n=== Phase 2 (Fusion MAE Training) complete ===")
     return mae_decoders, latent_projectors, mask_tokens, pre_fusion_cls_projectors, trainable_total

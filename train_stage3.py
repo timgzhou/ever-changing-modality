@@ -213,7 +213,7 @@ def main():
             args=args,
             modality_bands_dict=modality_bands_dict,
             student_mod=newmod,
-            teacher_mod="rgb",
+            starting_modality="rgb",
             intermediate_cls_projectors=intermediate_cls_projectors,
         )
 

@@ -19,6 +19,42 @@ import os
 import wandb
 
 
+def hallucinate_intermediate_features(
+    source_intermediate: dict,
+    source_modalities: tuple,
+    target_modalities: tuple,
+    intermediate_cls_projectors: nn.ModuleDict,
+    mask_tokens: nn.ParameterDict,
+    B: int,
+    n_storage_tokens: int,
+    num_patches: int,
+) -> dict:
+    """Hallucinate intermediate features for target modalities from source modalities."""
+    hallucinated = {}
+    for tar_mod in target_modalities:
+        tar_int_cls = []
+        for src_mod in source_modalities:
+            if src_mod == tar_mod:
+                continue
+            proj_key = f"{src_mod}_to_{tar_mod}"
+            tar_int_cls.append(intermediate_cls_projectors[proj_key](source_intermediate[src_mod][:, 0, :]))
+        predicted_cls = torch.stack(tar_int_cls).mean(dim=0)
+        hallucinated_cls_token = predicted_cls.unsqueeze(1)  # [B, 1, embed_dim]
+        mask_token = mask_tokens[tar_mod]
+        hallucinated_storage = mask_token.unsqueeze(0).unsqueeze(0).expand(B, n_storage_tokens, -1)
+        hallucinated_patches = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
+        hallucinated[tar_mod] = torch.cat([hallucinated_cls_token, hallucinated_storage, hallucinated_patches], dim=1)
+    return hallucinated
+
+
+def merge_intermediate_features(real_features, hallucinated_features, real_modalities, hallucinated_modalities):
+    """Merge real and hallucinated intermediate features into a single dict."""
+    return {
+        **{m: real_features[m] for m in real_modalities},
+        **{m: hallucinated_features[m] for m in hallucinated_modalities}
+    }
+
+
 def load_split_indices(split_file, dataset):
     """
     Load sample names from split file and return indices in the full dataset.
@@ -416,10 +452,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
 
 def supervised_training_loop(model, train_loader, test_loader_full, device,
                              modality_bands_dict, criterion, optimizer, num_epochs,
-                             train_modalities, newmod=None, phase_name="Training",
-                             modality_masking=None,
-                             use_wandb=False, wandb_prefix=None, freeze_rgb=False,
-                             eval_single_modalities=False):
+                             train_modalities, phase_name="Training"):
     """
     General supervised training loop for EVAN with multi-modal support.
 
@@ -435,8 +468,6 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
         train_modalities: Tuple of modality names to use for training (e.g., ('rgb',) or ('rgb', 'vre'))
         newmod: Name of the new modality (for logging)
         phase_name: Name of this training phase for logging
-        modality_masking: Optional dict mapping modality name to masking probability (e.g., {'rgb': 0.3, 'vre': 0.2})
-                         During training, one modality is randomly masked out per batch based on these probabilities.
         eval_single_modalities: If True, evaluate on RGB-only, newmod-only, and RGB+newmod separately.
                                If False (default), only evaluate on train_modalities.
 
@@ -447,14 +478,6 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
 
     # Determine training modality string for logging
     train_mod_str = "+".join(m.upper() for m in train_modalities)
-
-    # Setup modality masking if specified
-    if modality_masking:
-        import random
-        masking_info = " (with modality masking: " + ", ".join(f"{k}={v:.1%}" for k, v in modality_masking.items()) + ")"
-        print(f"Modality masking enabled{masking_info}")
-    else:
-        modality_masking = {}
 
     # Training loop
     global_step = 0
@@ -475,20 +498,6 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
             )
             modal_input = {k: v.to(device) for k, v in modal_input.items()}
 
-            # Apply modality masking (mask one modality at a time per batch)
-            # Note: we never mask so aggressively that no modalities remain
-            # Also: if freeze_rgb=True, never mask the newmod (would leave only frozen RGB)
-            if modality_masking and len(modal_input) > 1:
-                import random
-                for modality_name, mask_prob in modality_masking.items():
-                    # Skip masking newmod if RGB is frozen (would leave no trainable params)
-                    if freeze_rgb and modality_name == newmod:
-                        continue
-                    if modality_name in modal_input and len(modal_input) > 1 and random.random() < mask_prob:
-                        # Mask this modality by removing it from the input
-                        del modal_input[modality_name]
-                        break  # Only mask one modality at a time
-
             optimizer.zero_grad()
             outputs = model(modal_input)
             loss = criterion(outputs, labels)
@@ -496,7 +505,7 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
 
             # Compute gradient norm
             trainable_params = [p for p in model.parameters() if p.requires_grad]
-            grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=float('inf'))
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=4)
 
             optimizer.step()
 
@@ -512,85 +521,18 @@ def supervised_training_loop(model, train_loader, test_loader_full, device,
                 'grad_norm': f'{grad_norm:.4f}'
             })
 
-            # Log to wandb every step
-            if use_wandb and wandb_prefix:
-                wandb.log({
-                    f'{wandb_prefix}/train_loss': loss.item(),
-                    f'{wandb_prefix}/grad_norm': grad_norm.item(),
-                    f'{wandb_prefix}/step': global_step,
-                })
-
         train_loss /= len(train_loader)
         train_acc = 100. * train_correct / train_total
         scheduler.step(train_loss)
 
         # Evaluation on training modalities
-        test_loss_train, test_acc_train = evaluate(
+        _, test_acc = evaluate(
             model, test_loader_full, criterion, device,
             modality_bands_dict, modalities_to_use=train_modalities
         )
+        print(f"epoch {epoch+1} / {num_epochs}: {test_acc=}")
 
-        # Initialize optional metrics
-        test_acc_rgb = None
-        test_acc_newmod = None
-        test_acc_multi = None
-        test_loss_rgb = None
-        test_loss_newmod = None
-        test_loss_multi = None
-
-        if eval_single_modalities:
-            # Evaluation on RGB-only
-            test_loss_rgb, test_acc_rgb = evaluate(
-                model, test_loader_full, criterion, device,
-                modality_bands_dict, modalities_to_use=('rgb',)
-            )
-
-            if newmod:
-                test_loss_newmod, test_acc_newmod = evaluate(
-                    model, test_loader_full, criterion, device,
-                    modality_bands_dict, modalities_to_use=(newmod,)
-                )
-
-            # Evaluation on RGB+newmod
-            if newmod:
-                test_loss_multi, test_acc_multi = evaluate(
-                    model, test_loader_full, criterion, device,
-                    modality_bands_dict, modalities_to_use=('rgb', newmod)
-                )
-
-        # Print epoch results
-        print(f"\n{phase_name} Epoch {epoch+1}/{num_epochs}:")
-        print(f"  Train ({train_mod_str}):      Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
-        print(f"  Test ({train_mod_str}):       Loss: {test_loss_train:.4f}, Acc: {test_acc_train:.2f}%")
-        if eval_single_modalities:
-            print(f"  Test (RGB only):       Loss: {test_loss_rgb:.4f}, Acc: {test_acc_rgb:.2f}%")
-            if newmod:
-                print(f"  Test ({newmod.upper()} only):        Loss: {test_loss_newmod:.4f}, Acc: {test_acc_newmod:.2f}%")
-            if newmod:
-                print(f"  Test (RGB+{newmod.upper()}):         Loss: {test_loss_multi:.4f}, Acc: {test_acc_multi:.2f}%")
-                print(f"  Multi-modal gain:      {test_acc_multi - test_acc_rgb:+.2f}%")
-        print()
-
-        # Log epoch-level metrics to wandb
-        if use_wandb and wandb_prefix:
-            log_dict = {
-                f'{wandb_prefix}/train_loss_epoch': train_loss,
-                f'{wandb_prefix}/train_acc': train_acc,
-                f'{wandb_prefix}/eval_loss_train': test_loss_train,
-                f'{wandb_prefix}/eval_acc_train': test_acc_train,
-                f'{wandb_prefix}/epoch': epoch + 1,
-                f'{wandb_prefix}/lr': optimizer.param_groups[0]['lr'],
-            }
-            if eval_single_modalities:
-                log_dict[f'{wandb_prefix}/eval_acc_rgb'] = test_acc_rgb
-                if newmod:
-                    log_dict[f'{wandb_prefix}/eval_loss_newmod'] = test_loss_newmod
-                    log_dict[f'{wandb_prefix}/eval_acc_newmod'] = test_acc_newmod
-                    log_dict[f'{wandb_prefix}/eval_loss_multi'] = test_loss_multi
-                    log_dict[f'{wandb_prefix}/eval_acc_multi'] = test_acc_multi
-            wandb.log(log_dict)
-
-    return train_acc, test_acc_rgb, test_acc_newmod, test_acc_train
+    return train_acc, test_acc
 
 
 def supervised_finetune_phase(model, evan, train_loader, test_loader_full, device, args,
@@ -2130,3 +2072,290 @@ def train_distillrgb_phase(model, train_loader, test_loader_full, device, args, 
     print("\n=== Phase 1a (RGB Distillation) complete ===")
     return projector  # Return for potential analysis
 
+
+
+def _delulu_stage1_train_fused_projectors(
+    evan, unlabeled_train_loader, device, modality_bands_dict,
+    unlabeled_modalities, labeled_modalities, all_modalities,
+    intermediate_cls_projectors, lr, epochs
+):
+    """Stage 1: Learn fused_cls_projectors on unlabeled multimodal data."""
+    print(f"\n--- Stage 1: Learning fused_cls_projectors on unlabeled multimodal data ---")
+
+    def make_fused_cls_projector(factor=4):
+        return nn.Sequential(
+            nn.Linear(evan.embed_dim, evan.embed_dim * factor),
+            nn.GELU(),
+            nn.Linear(evan.embed_dim * factor, evan.embed_dim)
+        ).to(device)
+
+    fused_cls_projectors = nn.ModuleDict({mod: make_fused_cls_projector() for mod in all_modalities})
+    fused_projector_params = list(fused_cls_projectors.parameters())
+    optimizer = torch.optim.AdamW(fused_projector_params, lr=lr)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
+    mse_criteria = nn.MSELoss()
+    num_patches = (evan.img_size // evan.patch_size) ** 2
+
+    for epoch in range(epochs):
+        fused_cls_projectors.train()
+        train_loss = 0.0
+        pbar = tqdm(unlabeled_train_loader, desc=f"Fused Projector Epoch {epoch+1}/{epochs}")
+
+        for batch in pbar:
+            multimodal_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=(*labeled_modalities, *unlabeled_modalities)
+            )
+            multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
+            B = multimodal_input[labeled_modalities[0]].shape[0]
+
+            with torch.no_grad():
+                real_intermediate = evan.forward_modality_specific_features(multimodal_input)
+
+            # Predict intermediate CLS for each modality from all other modalities
+            predicted_intermediate_cls = {}
+            for tar_mod in all_modalities:
+                tar_int_cls = []
+                for src_mod in all_modalities:
+                    if src_mod == tar_mod:
+                        continue
+                    proj_key = f"{src_mod}_to_{tar_mod}"
+                    tar_int_cls.append(intermediate_cls_projectors[proj_key](real_intermediate[src_mod][:, 0, :]))
+                predicted_intermediate_cls[tar_mod] = torch.stack(tar_int_cls).mean(dim=0)
+
+            # Construct hallucinated intermediate features
+            hallucinated_intermediate = {}
+            for mod in all_modalities:
+                hallucinated_cls_token = predicted_intermediate_cls[mod].unsqueeze(1)
+                mask_token = evan.modality_specific_mask_tokens[mod]
+                hallucinated_storage = mask_token.unsqueeze(0).unsqueeze(0).expand(B, evan.n_storage_tokens, -1)
+                hallucinated_patches = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
+                hallucinated_intermediate[mod] = torch.cat([hallucinated_cls_token, hallucinated_storage, hallucinated_patches], dim=1)
+
+            real_lab_hal_unlab = merge_intermediate_features(real_intermediate, hallucinated_intermediate, labeled_modalities, unlabeled_modalities)
+            real_unlab_hal_lab = merge_intermediate_features(real_intermediate, hallucinated_intermediate, unlabeled_modalities, labeled_modalities)
+
+            real_lab_hal_unlab_fusion = evan.forward_fusion_from_modality_features(real_lab_hal_unlab)
+            real_unlab_hal_lab_fusion = evan.forward_fusion_from_modality_features(real_unlab_hal_lab)
+
+            loss = 0.0
+            for mod in all_modalities:
+                target = real_unlab_hal_lab_fusion[mod]['x_norm_clstoken']
+                source = real_lab_hal_unlab_fusion[mod]['x_norm_clstoken']
+                predicted = fused_cls_projectors[mod](source)
+                loss += mse_criteria(target, predicted)
+
+            optimizer.zero_grad()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(fused_projector_params, max_norm=5)
+            optimizer.step()
+
+            train_loss += loss.item()
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'})
+
+        avg_loss = train_loss / len(unlabeled_train_loader)
+        scheduler.step(avg_loss)
+        print(f"  Fused Projector Epoch {epoch+1}: avg loss = {avg_loss:.4f}")
+
+    fused_cls_projectors.eval()
+    for p in fused_cls_projectors.parameters():
+        p.requires_grad = False
+
+    return fused_cls_projectors, num_patches
+
+
+def _delulu_stage2_train_classifier(
+    model, evan, labeled_train_loader, device, modality_bands_dict,
+    unlabeled_modalities, labeled_modalities, all_modalities,
+    intermediate_cls_projectors, fused_cls_projectors, num_patches, lr, epochs,
+    test_loader=None, eval_every_n_epochs=4
+):
+    """Stage 2: Train classifier on labeled monomodal data with hallucinated features.
+
+    If test_loader is provided, runs evaluation every eval_every_n_epochs epochs.
+    """
+    print(f"\n--- Stage 2: Training classifier on labeled monomodal data with hallucinated features ---")
+
+    ce_criteria = nn.CrossEntropyLoss()
+    model.freeze_all()
+    model.set_requires_grad("all", classifier=True)
+
+    classifier_params = list(model.modality_classifiers.parameters())
+    optimizer = torch.optim.AdamW(classifier_params, lr=lr)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
+
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        pbar = tqdm(labeled_train_loader, desc=f"Classifier Epoch {epoch+1}/{epochs}")
+
+        for batch in pbar:
+            labels = batch["label"].to(device)
+            labmod_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=(*labeled_modalities,)
+            )
+            labmod_input = {k: v.to(device) for k, v in labmod_input.items()}
+            B = labmod_input[labeled_modalities[0]].shape[0]
+
+            with torch.no_grad():
+                labmod_intermediate = evan.forward_modality_specific_features(labmod_input)
+
+            hallucinated_intermediate = hallucinate_intermediate_features(
+                labmod_intermediate, labeled_modalities, unlabeled_modalities,
+                intermediate_cls_projectors, evan.modality_specific_mask_tokens,
+                B, evan.n_storage_tokens, num_patches
+            )
+
+            real_lab_hal_unlab = merge_intermediate_features(
+                labmod_intermediate, hallucinated_intermediate,
+                labeled_modalities, unlabeled_modalities
+            )
+
+            with torch.no_grad():
+                hallucinated_fused = evan.forward_fusion_from_modality_features(real_lab_hal_unlab)
+
+            all_logits = []
+            for mod in all_modalities:
+                predicted_fused_cls = fused_cls_projectors[mod](hallucinated_fused[mod]['x_norm_clstoken'])
+                prediction = model.modality_classifiers[mod](predicted_fused_cls)
+                all_logits.append(prediction)
+
+            prediction = torch.stack(all_logits).mean(dim=0)
+            loss = ce_criteria(prediction, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(classifier_params, max_norm=5)
+            optimizer.step()
+
+            train_loss += loss.item()
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'})
+
+        avg_loss = train_loss / len(labeled_train_loader)
+        scheduler.step(avg_loss)
+
+        # Run evaluation every n epochs
+        if test_loader is not None and (epoch + 1) % eval_every_n_epochs == 0:
+            _delulu_stage3_test(
+                model, evan, test_loader, device, modality_bands_dict,
+                unlabeled_modalities, labeled_modalities, all_modalities,
+                intermediate_cls_projectors, num_patches
+            )
+
+
+def _delulu_stage3_test(
+    model, evan, test_loader, device, modality_bands_dict,
+    unlabeled_modalities, labeled_modalities, all_modalities,
+    intermediate_cls_projectors, num_patches
+):
+    """Stage 3: Test on unlabeled modalities only."""
+    print(f"\n--- Stage 3: Testing on unlabeled modalities only ---")
+
+    model.eval()
+    softvote_correct = 0
+    total = 0
+    per_mod_correct = {mod: 0 for mod in all_modalities}
+
+    with torch.no_grad():
+        pbar = tqdm(test_loader, desc="Testing")
+
+        for batch in pbar:
+            labels = batch["label"].to(device)
+            unlabmod_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=(*unlabeled_modalities,)
+            )
+            unlabmod_input = {k: v.to(device) for k, v in unlabmod_input.items()}
+            B = unlabmod_input[unlabeled_modalities[0]].shape[0]
+
+            unlabmod_intermediate = evan.forward_modality_specific_features(unlabmod_input)
+
+            hallucinated_intermediate = hallucinate_intermediate_features(
+                unlabmod_intermediate, unlabeled_modalities, labeled_modalities,
+                intermediate_cls_projectors, evan.modality_specific_mask_tokens,
+                B, evan.n_storage_tokens, num_patches
+            )
+
+            real_unlab_hal_lab = merge_intermediate_features(
+                unlabmod_intermediate, hallucinated_intermediate,
+                unlabeled_modalities, labeled_modalities
+            )
+
+            fused_output = evan.forward_fusion_from_modality_features(real_unlab_hal_lab)
+
+            total += labels.size(0)
+            all_logits = []
+            for mod in all_modalities:
+                fused_cls = fused_output[mod]['x_norm_clstoken']
+                prediction = model.modality_classifiers[mod](fused_cls)
+                all_logits.append(prediction)
+
+            for i, mod in enumerate(all_modalities):
+                _, predicted_mod = torch.max(all_logits[i], 1)
+                per_mod_correct[mod] += (predicted_mod == labels).sum().item()
+
+            softvote_logits = torch.stack(all_logits).mean(dim=0)
+            _, softvote_predicted = torch.max(softvote_logits, 1)
+            softvote_correct += (softvote_predicted == labels).sum().item()
+            pbar.set_postfix({'acc': f'{100 * softvote_correct / total:.2f}%'})
+
+    softvote_test_acc = 100 * softvote_correct / total
+    print(f"  Test Accuracy using only {unlabeled_modalities} with hallucinated softvote: {softvote_test_acc:.2f}%")
+    for mod in all_modalities:
+        mod_test_acc = 100 * per_mod_correct[mod] / total
+        print(f"      Test Accuracy from {mod} classifier: {mod_test_acc:.2f}%")
+
+    return softvote_test_acc
+
+
+def delulu_supervision(
+    model, unlabeled_train_loader, labeled_train_loader, test_loader,
+    device, modality_bands_dict, unlabeled_modalities, labeled_modalities,
+    intermediate_cls_projectors, lr, epochs, eval_every_n_epochs=4
+):
+    """
+    Modality transfer - learning a predictor for the unlabeled_modalities alone.
+
+    Stage 1: Learn fused_cls_projectors on unlabeled multimodal data
+    Stage 2: Train classifier on labeled monomodal data with hallucinated features
+             (runs evaluation every eval_every_n_epochs epochs)
+    Stage 3: Final test on unlabeled modalities only
+    """
+    model.freeze_all()
+    model.eval()
+    evan = model.evan
+    all_modalities = set(labeled_modalities + unlabeled_modalities)
+
+    print(f"\n=== Hallucination Supervised Training ===")
+    print(f"  Labeled modality: {labeled_modalities}")
+    print(f"  Unlabeled modality: {unlabeled_modalities}")
+    print(f"  Available intermediate projectors: {list(intermediate_cls_projectors.keys())}")
+
+    intermediate_cls_projectors.eval()
+    for p in intermediate_cls_projectors.parameters():
+        p.requires_grad = False
+
+    # Stage 1
+    fused_cls_projectors, num_patches = _delulu_stage1_train_fused_projectors(
+        evan, unlabeled_train_loader, device, modality_bands_dict,
+        unlabeled_modalities, labeled_modalities, all_modalities,
+        intermediate_cls_projectors, lr, epochs
+    )
+
+    # Stage 2 (with periodic evaluation)
+    _delulu_stage2_train_classifier(
+        model, evan, labeled_train_loader, device, modality_bands_dict,
+        unlabeled_modalities, labeled_modalities, all_modalities,
+        intermediate_cls_projectors, fused_cls_projectors, num_patches, lr, epochs,
+        test_loader=test_loader, eval_every_n_epochs=eval_every_n_epochs
+    )
+
+    # Stage 3
+    softvote_test_acc = _delulu_stage3_test(
+        model, evan, test_loader, device, modality_bands_dict,
+        unlabeled_modalities, labeled_modalities, all_modalities,
+        intermediate_cls_projectors, num_patches
+    )
+
+    return fused_cls_projectors, model, softvote_test_acc

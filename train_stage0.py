@@ -113,14 +113,10 @@ def main():
         tz_lora_rank=args.tz_lora_rank,
         tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
         n_storage_tokens=4,
+        starting_modality=args.modality,
+        starting_n_chans=len(bands_mod),
         device=device
     )
-
-    # Pre-create modality components if not RGB (must happen before optimizer creation)
-    # Otherwise, components created during forward pass won't be in optimizer
-    if args.modality != 'rgb':
-        in_chans = len(bands_mod)
-        evan.create_modality_components(args.modality, in_chans)
 
     # Create classifier
     model = EVANClassifier(evan, num_classes=10, classifier_strategy="mean", global_rep=args.global_rep, device=device)
@@ -198,7 +194,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-# Example usage:
-# python train_stage0.py --model evan_base --epochs 5 --modality rgb # to train rgb-only evan (equiv to dino).
-# python train_stage0.py --model evan_small --epochs 1 --modality rgb

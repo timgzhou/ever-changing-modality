@@ -8,3 +8,6 @@ timestamp,new_modality,stage3_train_method,objective,classifier_strategy,tempera
 20260122_032224,vre,hallucination,monomodal,ensemble,3.0,0.001,4,65.56,checkpoints/evan_eurosat_shot_20260122_020758.pt,N/A
 20260122_032914,vre,hallucination,multimodal,ensemble,3.0,0.001,4,97.87,checkpoints/evan_eurosat_shot_20260122_020758.pt,N/A
 20260122_053034,vre,hallucination,multimodal,ensemble,3.0,0.001,32,97.87,checkpoints/presetB.pt,N/A
+20260122_203431,vre,hallucination,multimodal,ensemble,3.0,0.001,32,97.52,checkpoints/presetC.pt,N/A
+20260122_210732,vre,hallucination,multimodal,ensemble,3.0,0.001,32,97.46,checkpoints/presetC.pt,N/A
+20260122_230626,vre,hallucination,multimodal,ensemble,3.0,0.001,32,97.28,checkpoints/presetC.pt,N/A

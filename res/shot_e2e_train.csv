@@ -1,0 +1,10 @@
+starting_modality,new_modality,ssl_mode,ssl_lr,fusion_epochs,mask_ratio,modality_dropout,train_components,trainable_params,stage0_checkpoint,shote2e_checkpoint
+rgb,vre,shot,0.0001,128,0.75,0.4,full,37870848,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,checkpoints/presetC.pt
+rgb,vre,shot,0.0001,128,0.75,0.4,full,37870848,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,checkpoints/presetC.pt
+rgb,vre,shot,0.0001,32,0.75,0.4,full,37870848,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,checkpoints/presetD.pt
+rgb,vre,shot,0.0001,128,0.85,0.5,full,37870848,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,checkpoints/presetE.pt
+rgb,swir,shot,0.0001,64,0.85,0.5,full,37673984,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,checkpoints/rgb2swir.pt
+rgb,nir,shot,0.0001,64,0.85,0.5,full,37673984,checkpoints/evan_eurosat_stage0_rgb_20260121_025639.pt,checkpoints/rgb2nir.pt
+rgb,nir,shot,0.0001,64,0.85,0.5,full,43297280,checkpoints/evan_eurosat_stage0_vre_20260121_030018.pt,checkpoints/vre2swir.pt
+rgb,swir,shot,0.0001,64,0.85,0.5,full,43297280,checkpoints/evan_eurosat_stage0_vre_20260121_030018.pt,checkpoints/vre2swir.pt
+rgb,vre,shot,0.0001,64,0.85,0.5,full,43395840,checkpoints/evan_eurosat_stage0_swir_20260121_030447.pt,checkpoints/swir2vre.pt

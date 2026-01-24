@@ -1195,7 +1195,7 @@ class EVANClassifier(nn.Module):
             features_dict = self.evan.forward_features(x)
         return self.classify_from_features(features_dict)
     
-    def switch_strategy(self,target_strategy,key):
+    def switch_strategy(self,target_strategy,key=None):
         if self.classifier_strategy == 'strategy': 
             print(f"Already using {target_strategy} head")
         elif target_strategy=="mean":
