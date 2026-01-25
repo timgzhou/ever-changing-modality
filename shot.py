@@ -54,29 +54,20 @@ class FullSequenceMAEDecoder(nn.Module):
 
 
 class SequenceProjector(nn.Module):
-    """
-    Projects a full sequence from one modality to another using a single transformer layer.
-    Used for intermediate cross-modal projection of CLS + storage + patch tokens.
-    """
-
-    def __init__(self, embed_dim, num_heads=8, ffn_factor=4):
+    def __init__(self, embed_dim, num_heads=8, ffn_factor=4, num_layers=1):
         super().__init__()
-        self.layer = nn.TransformerEncoderLayer(
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
             dim_feedforward=embed_dim * ffn_factor,
             batch_first=True,
             norm_first=True
         )
+        self.layers = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
     def forward(self, x):
-        """
-        Args:
-            x: [B, seq_len, embed_dim] - Full sequence (CLS + storage + patches)
-        Returns:
-            projected: [B, seq_len, embed_dim]
-        """
-        return self.layer(x)
+        return self.layers(x)
+
 
 
 def evaluate(model, dataloader, criterion, device, modality_bands_dict,
@@ -172,7 +163,8 @@ def create_intermediate_projectors(hidden_dim, all_modalities, device, num_heads
                 projectors[key] = SequenceProjector(
                     embed_dim=hidden_dim,
                     num_heads=num_heads,
-                    ffn_factor=ffn_factor
+                    ffn_factor=ffn_factor,
+                    num_layers=2
                 ).to(device)
                 print(f"  Initialized Sequence Projector: {src_mod} -> {tgt_mod}")
     return projectors
@@ -383,7 +375,7 @@ def train_shot(
                 src_seq = prefusion_features[src_mod].detach()  # [B, 1+n_storage+num_patches, embed_dim]
                 for tgt_mod in all_modalities:
                     if src_mod != tgt_mod:
-                        tgt_seq = prefusion_features[tgt_mod]  # [B, 1+n_storage+num_patches, embed_dim]
+                        tgt_seq = prefusion_features[tgt_mod].detach()  # [B, 1+n_storage+num_patches, embed_dim]
                         key = f"{src_mod}_to_{tgt_mod}"
                         projected_seq = intermediate_projectors[key](src_seq)  # [B, seq_len, embed_dim]
                         prefusion_loss = prefusion_loss + mse_fn(projected_seq, tgt_seq)

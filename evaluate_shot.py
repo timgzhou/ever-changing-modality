@@ -22,6 +22,7 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 parser = argparse.ArgumentParser()
 parser.add_argument('--checkpoint', type=str, default='checkpoints/presetE.pt', help='Path to checkpoint file')
 parser.add_argument('--num_supervised_epochs', type=int, default=1, help='Path to checkpoint file')
+parser.add_argument('--csv_suffix', type=str, default=None, help='suffix to save experiment results to.')
 args = parser.parse_args()
 
 train1_loader, train2_loader, test_loader = get_loaders(32,4)
@@ -43,7 +44,7 @@ device = 'cuda' if torch.cuda.is_available() else "cpu"
 
 # CSV logging setup
 csv_results = []
-csv_path = "res/modality-transfer_jan24.csv"
+csv_path = f"res/modality-transfer_{args.csv_suffix}.csv"
 
 def load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device):
     model=EVANClassifier.from_checkpoint(checkpoint_path,device)

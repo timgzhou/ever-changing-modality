@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # Load data
-date="jan22"
+date="jan25"
 df = pd.read_csv(f"res/modality-transfer_{date}.csv")
 
 # Filter to 32 epochs for consistency (exclude the 2-epoch entries)
