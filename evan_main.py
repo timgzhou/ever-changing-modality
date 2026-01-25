@@ -815,18 +815,18 @@ class EVAN(nn.Module):
         self,
         x: Dict[str, Tensor],
         pseudo_modalities: List[str],
-        cls_projectors: nn.ModuleDict,
+        intermediate_projectors: nn.ModuleDict,
     ) -> Dict[str, Dict[str, Tensor]]:
         """
-        Forward pass with pseudo-modalities using mask tokens and projected CLS.
+        Forward pass with pseudo-modalities using full sequence projection.
 
         When a modality is missing at inference time, this method creates pseudo-features
-        using learned mask tokens for patches and projected CLS tokens from available modalities.
+        by projecting the full sequence (CLS + storage + patches) from available modalities.
 
         Args:
             x: Dictionary of available modality tensors
             pseudo_modalities: List of modality names to hallucinate (e.g., ['vre'])
-            cls_projectors: Trained bidirectional projectors with keys like 'rgb_to_vre', 'vre_to_rgb'
+            intermediate_projectors: Trained sequence projectors with keys like 'rgb_to_vre', 'vre_to_rgb'
 
         Returns:
             Dictionary with normalized features per modality (same format as forward_features)
@@ -835,27 +835,17 @@ class EVAN(nn.Module):
         embedded = self.forward_modality_specific_features(x)
         available_modalities = list(embedded.keys())
 
-        # Step 2: Create pseudo-features for missing modalities
-        B = next(iter(embedded.values())).shape[0]
-        num_patches = (self.img_size // self.patch_size) ** 2
-
+        # Step 2: Create pseudo-features for missing modalities using full sequence projection
         for mod in pseudo_modalities:
-            # Project CLS from all available modalities and take mean
-            projected_cls_list = []
+            # Project full sequence from all available modalities and take mean
+            projected_seqs = []
             for avail_mod in available_modalities:
-                avail_cls = embedded[avail_mod][:, 0:1, :]  # [B, 1, embed_dim]
+                avail_seq = embedded[avail_mod]  # [B, seq_len, embed_dim]
                 key = f"{avail_mod}_to_{mod}"
-                projected = cls_projectors[key](avail_cls)  # [B, 1, embed_dim]
-                projected_cls_list.append(projected)
-            projected_cls = torch.stack(projected_cls_list).mean(dim=0)  # [B, 1, embed_dim]
-
-            # Use mask token for storage and patches (consistent with training)
-            mask_token = self.modality_specific_mask_tokens[mod]  # [embed_dim]
-            storage_tokens = mask_token.unsqueeze(0).unsqueeze(0).expand(B, self.n_storage_tokens, -1)
-            patch_tokens = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
-
-            # Combine: [CLS, storage, patches]
-            embedded[mod] = torch.cat([projected_cls, storage_tokens, patch_tokens], dim=1)
+                projected = intermediate_projectors[key](avail_seq)  # [B, seq_len, embed_dim]
+                projected_seqs.append(projected)
+            # Mean of all projected sequences
+            embedded[mod] = torch.stack(projected_seqs).mean(dim=0)
 
         # Step 3: Forward through fusion (modality encoding added here)
         return self.forward_fusion_from_modality_features(embedded)
@@ -1188,19 +1178,19 @@ class EVANClassifier(nn.Module):
         else:
             raise ValueError(f"Unknown classifier strategy: {self.classifier_strategy}")
 
-    def forward(self, x, pseudo_modalities=None, cls_projectors=None):
+    def forward(self, x, pseudo_modalities=None, intermediate_projectors=None):
         """
         Forward pass supporting both single tensor and dict inputs.
         Args:
             x: Either a tensor [B, C, H, W] or dict {modality: tensor}
-            pseudo_modalities: Optional list of modalities to hallucinate using mask tokens
-            cls_projectors: Required if pseudo_modalities is provided; trained CLS projectors
+            pseudo_modalities: Optional list of modalities to hallucinate using sequence projection
+            intermediate_projectors: Required if pseudo_modalities is provided; trained sequence projectors
         Returns:
             logits: [B, num_classes]
         """
         if pseudo_modalities is not None:
             features_dict = self.evan.forward_features_with_pseudo_modality(
-                x, pseudo_modalities, cls_projectors
+                x, pseudo_modalities, intermediate_projectors
             )
         else:
             features_dict = self.evan.forward_features(x)

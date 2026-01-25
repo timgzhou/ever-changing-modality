@@ -26,7 +26,7 @@ from train_utils import (
     train_self_distillation,
     hallucination_supervised,
 )
-from shot import create_int_cls_projectors
+from shot import create_intermediate_projectors
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
@@ -184,25 +184,25 @@ def main():
         model.switch_strategy("ensemble","rgb")
         model.freeze_all()
         model.set_requires_grad("all",classifier=True)
-        print(f"\n Using hallucination supervised training with SHOT cls_projectors.")
+        print(f"\n Using hallucination supervised training with SHOT intermediate_projectors.")
 
-        # Load intermediate_cls_projectors from SHOT checkpoint
-        if 'cls_projectors_state_dict' not in checkpoint or checkpoint['cls_projectors_state_dict'] is None:
+        # Load intermediate_projectors from SHOT checkpoint
+        if 'intermediate_projectors_state_dict' not in checkpoint or checkpoint['intermediate_projectors_state_dict'] is None:
             raise ValueError(
-                f"Checkpoint {args.stage2_checkpoint} does not contain cls_projectors_state_dict. "
+                f"Checkpoint {args.stage2_checkpoint} does not contain intermediate_projectors_state_dict. "
                 "This checkpoint was likely not created by shot_ete.py. "
-                "Please use a SHOT checkpoint that includes the trained cls_projectors."
+                "Please use a SHOT checkpoint that includes the trained intermediate_projectors."
             )
 
-        # Recreate the cls_projectors structure and load state dict
+        # Recreate the intermediate_projectors structure and load state dict
         all_modalities = [starting_modality, newmod]
-        intermediate_cls_projectors = create_int_cls_projectors(
+        intermediate_projectors = create_intermediate_projectors(
             hidden_dim=model.evan.embed_dim,
             all_modalities=all_modalities,
             device=device
         )
-        intermediate_cls_projectors.load_state_dict(checkpoint['cls_projectors_state_dict'])
-        print(f"Loaded SHOT-trained intermediate_cls_projectors: {list(intermediate_cls_projectors.keys())}")
+        intermediate_projectors.load_state_dict(checkpoint['intermediate_projectors_state_dict'])
+        print(f"Loaded SHOT-trained intermediate_projectors: {list(intermediate_projectors.keys())}")
 
         test_acc = hallucination_supervised(
             model=model,
@@ -214,7 +214,7 @@ def main():
             modality_bands_dict=modality_bands_dict,
             student_mod=newmod,
             starting_modality="rgb",
-            intermediate_cls_projectors=intermediate_cls_projectors,
+            intermediate_projectors=intermediate_projectors,
         )
 
     # Log results to CSV

@@ -1,11 +1,10 @@
-from shot import create_int_cls_projectors
+from shot import create_intermediate_projectors, SequenceProjector
 import argparse
 import torch
 import torch.nn as nn
 import logging
 import csv
 import os
-from datetime import datetime
 
 from evan_main import EVANClassifier
 from eurosat_data_utils import (
@@ -44,8 +43,7 @@ device = 'cuda' if torch.cuda.is_available() else "cpu"
 
 # CSV logging setup
 csv_results = []
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-csv_filename = f"eval_results_{timestamp}.csv"
+csv_path = "res/modality-transfer_jan24.csv"
 
 def load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device):
     model=EVANClassifier.from_checkpoint(checkpoint_path,device)
@@ -60,7 +58,7 @@ def load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device)
 model = load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device)
 modalities = model.evan.supported_modalities
 modality_bands_dict = get_modality_bands_dict(*modalities)
-intermediate_cls_projectors = create_int_cls_projectors(
+intermediate_projectors = create_intermediate_projectors(
     hidden_dim=model.evan.embed_dim,
     all_modalities=modalities,
     device=device
@@ -102,7 +100,9 @@ print("\n" + "="*70)
 print("=== Evaluating (hallucinated) fusion with monomodal under real supervision ===")
 print("="*70)
 model = load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device)
-intermediate_cls_projectors.load_state_dict(checkpoint['cls_projectors_state_dict'], strict=False)
+# Support both old and new checkpoint key names
+projector_state_dict = checkpoint.get('intermediate_projectors_state_dict') or checkpoint.get('cls_projectors_state_dict')
+intermediate_projectors.load_state_dict(projector_state_dict, strict=False)
 
 for evaluated_modality in modalities:
     for hallucinate_modality in modalities:
@@ -114,7 +114,7 @@ for evaluated_modality in modalities:
             model, train1_loader, test_loader, device,
             modality_bands_dict, criterion, optimizer, num_supervised_epochs,
             modality=evaluated_modality, phase_name=f"SHOT {evaluated_modality}-only eval w/ hallucination {hallucinate_modality}",
-            hallucinate_modality=True, pseudo_modalities=[hallucinate_modality],cls_projectors=intermediate_cls_projectors
+            hallucinate_modality=True, pseudo_modalities=[hallucinate_modality], intermediate_projectors=intermediate_projectors
         )
         print(f"\nREAL {evaluated_modality} + Hallucinated {hallucinate_modality} Result: {test_acc_wh=:.2f} {best_test_acc_wh=:.2f}\n\n")
         csv_results.append({
@@ -151,8 +151,10 @@ print("=== Evaluating (hallucinated) fusion with monomodal under pseudo supervis
 print("="*70)
 
 model = load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device)
-intermediate_cls_projectors.load_state_dict(checkpoint['cls_projectors_state_dict'])
-print(f"Loaded SHOT-trained intermediate_cls_projectors: {list(intermediate_cls_projectors.keys())}")
+# Support both old and new checkpoint key names
+projector_state_dict = checkpoint.get('intermediate_projectors_state_dict') or checkpoint.get('cls_projectors_state_dict')
+intermediate_projectors.load_state_dict(projector_state_dict)
+print(f"Loaded SHOT-trained intermediate_projectors: {list(intermediate_projectors.keys())}")
 starting_modality = model.evan.starting_modality
 unlabeld_modalities = list(set(model.evan.supported_modalities)-{starting_modality})
 
@@ -165,7 +167,7 @@ best_test_acc, test_acc = delulu_supervision(
     modality_bands_dict=modality_bands_dict,
     unlabeled_modalities=unlabeld_modalities,
     labeled_modalities=[starting_modality],
-    intermediate_cls_projectors=intermediate_cls_projectors,
+    intermediate_projectors=intermediate_projectors,
     lr=eval_lr,
     epochs=num_supervised_epochs,
     eval_every_n_epochs=1
@@ -178,8 +180,7 @@ csv_results.append({
     "best_test_acc": best_test_acc,
 })
 
-# Write CSV results
-csv_path = os.path.join(os.path.dirname(checkpoint_path), csv_filename)
+# Write CSV results (append to single file)
 fieldnames = [
     "checkpoint",
     "num_supervised_epochs",
@@ -191,9 +192,11 @@ fieldnames = [
     "test_acc",
     "best_test_acc",
 ]
-with open(csv_path, 'w', newline='') as f:
+file_exists = os.path.exists(csv_path)
+with open(csv_path, 'a', newline='') as f:
     writer = csv.DictWriter(f, fieldnames=fieldnames)
-    writer.writeheader()
+    if not file_exists:
+        writer.writeheader()
     for result in csv_results:
         row = {
             "checkpoint": checkpoint_path,
@@ -203,6 +206,6 @@ with open(csv_path, 'w', newline='') as f:
             **result
         }
         writer.writerow(row)
-print(f"\nResults saved to: {csv_path}")
+print(f"\nResults appended to: {csv_path}")
 
 # python -u evaluate_shot.py

@@ -23,27 +23,34 @@ def hallucinate_intermediate_features(
     source_intermediate: dict,
     source_modalities: tuple,
     target_modalities: tuple,
-    intermediate_cls_projectors: nn.ModuleDict,
-    mask_tokens: nn.ParameterDict,
-    B: int,
-    n_storage_tokens: int,
-    num_patches: int,
+    intermediate_projectors: nn.ModuleDict,
 ) -> dict:
-    """Hallucinate intermediate features for target modalities from source modalities."""
+    """
+    Hallucinate intermediate features for target modalities from source modalities.
+
+    Uses full sequence projection (CLS + storage + patches) via transformer-based projectors.
+    For each target modality, projects from all available source modalities and takes the mean.
+
+    Args:
+        source_intermediate: Dict of source modality features {mod: [B, seq_len, embed_dim]}
+        source_modalities: Tuple of source modality names
+        target_modalities: Tuple of target modality names to hallucinate
+        intermediate_projectors: Trained sequence projectors with keys like 'rgb_to_vre'
+
+    Returns:
+        Dict of hallucinated features {mod: [B, seq_len, embed_dim]}
+    """
     hallucinated = {}
     for tar_mod in target_modalities:
-        tar_int_cls = []
+        projected_seqs = []
         for src_mod in source_modalities:
             if src_mod == tar_mod:
                 continue
             proj_key = f"{src_mod}_to_{tar_mod}"
-            tar_int_cls.append(intermediate_cls_projectors[proj_key](source_intermediate[src_mod][:, 0, :]))
-        predicted_cls = torch.stack(tar_int_cls).mean(dim=0)
-        hallucinated_cls_token = predicted_cls.unsqueeze(1)  # [B, 1, embed_dim]
-        mask_token = mask_tokens[tar_mod]
-        hallucinated_storage = mask_token.unsqueeze(0).unsqueeze(0).expand(B, n_storage_tokens, -1)
-        hallucinated_patches = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
-        hallucinated[tar_mod] = torch.cat([hallucinated_cls_token, hallucinated_storage, hallucinated_patches], dim=1)
+            src_seq = source_intermediate[src_mod]  # [B, seq_len, embed_dim]
+            projected_seqs.append(intermediate_projectors[proj_key](src_seq))
+        # Mean of all projections
+        hallucinated[tar_mod] = torch.stack(projected_seqs).mean(dim=0)
     return hallucinated
 
 
@@ -178,7 +185,7 @@ class FullSequenceMAEDecoder(nn.Module):
 
 
 def evaluate(model, dataloader, criterion, device, modality_bands_dict,
-             modalities_to_use=('rgb',), pseudo_modalities=None, cls_projectors=None):
+             modalities_to_use=('rgb',), pseudo_modalities=None, intermediate_projectors=None):
     """
     Evaluate model on a dataloader.
 
@@ -190,12 +197,12 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
         modality_bands_dict: Dict mapping modality names to their band tuples
                             e.g., {'rgb': ('B04', 'B03', 'B02'), 'infrared': ('B08', 'B8A', 'B09', 'B10')}
         modalities_to_use: Tuple of modality names to use for evaluation (e.g., ('rgb',) or ('rgb', 'infrared'))
-        pseudo_modalities: Optional list of modalities to hallucinate using mask tokens
-        cls_projectors: Required if pseudo_modalities is provided; trained CLS projectors
+        pseudo_modalities: Optional list of modalities to hallucinate using sequence projection
+        intermediate_projectors: Required if pseudo_modalities is provided; trained sequence projectors
     """
     model.eval()
-    if cls_projectors is not None:
-        cls_projectors.eval()
+    if intermediate_projectors is not None:
+        intermediate_projectors.eval()
     total_loss = 0.0
     correct = 0
     total = 0
@@ -211,7 +218,7 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
             modal_input = {k: v.to(device) for k, v in modal_input.items()}
 
             if pseudo_modalities is not None:
-                outputs = model(modal_input, pseudo_modalities=pseudo_modalities, cls_projectors=cls_projectors)
+                outputs = model(modal_input, pseudo_modalities=pseudo_modalities, intermediate_projectors=intermediate_projectors)
             else:
                 outputs = model(modal_input)
 
@@ -326,7 +333,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                                    modality, phase_name="Training",
                                    use_wandb=False, wandb_prefix=None, clip_norm=10,
                                    hallucinate_modality=False, pseudo_modalities=None,
-                                   cls_projectors=None):
+                                   intermediate_projectors=None):
     """
     Simple training loop for single-modality EVAN training (Stage 0).
 
@@ -346,7 +353,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         clip_norm: Max gradient norm for clipping
         hallucinate_modality: If True, use pseudo-modality inference
         pseudo_modalities: List of modalities to hallucinate (required if hallucinate_modality=True)
-        cls_projectors: Trained CLS projectors for pseudo-modality (required if hallucinate_modality=True)
+        intermediate_projectors: Trained sequence projectors for pseudo-modality (required if hallucinate_modality=True)
 
     Returns:
         Tuple of (train_acc, test_acc, best_test_acc, best_epoch)
@@ -360,13 +367,13 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
     # Validate hallucinate_modality requirements
     if hallucinate_modality:
         assert pseudo_modalities is not None, "pseudo_modalities required when hallucinate_modality=True"
-        assert cls_projectors is not None, "cls_projectors required when hallucinate_modality=True"
+        assert intermediate_projectors is not None, "intermediate_projectors required when hallucinate_modality=True"
         print(f"  Using pseudo-modality inference: {modality} + hallucinated {pseudo_modalities}")
 
     for epoch in range(num_epochs):
         model.train()
-        if cls_projectors is not None:
-            cls_projectors.train()
+        if intermediate_projectors is not None:
+            intermediate_projectors.train()
         train_loss = 0.0
         train_correct = 0
         train_total = 0
@@ -383,7 +390,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
             optimizer.zero_grad()
 
             if hallucinate_modality:
-                outputs = model(modal_input, pseudo_modalities=pseudo_modalities, cls_projectors=cls_projectors)
+                outputs = model(modal_input, pseudo_modalities=pseudo_modalities, intermediate_projectors=intermediate_projectors)
             else:
                 outputs = model(modal_input)
 
@@ -422,7 +429,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
             test_loss, test_acc = evaluate(
                 model, test_loader, criterion, device,
                 modality_bands_dict, modalities_to_use=(modality,),
-                pseudo_modalities=pseudo_modalities, cls_projectors=cls_projectors
+                pseudo_modalities=pseudo_modalities, intermediate_projectors=intermediate_projectors
             )
         else:
             test_loss, test_acc = evaluate(
@@ -1013,28 +1020,27 @@ def train_pseudo_supervised(model,unlabeled_train_loader,labeled_train_loader,te
 def hallucination_supervised(
     model, unlabeled_train_loader, labeled_train_loader, test_loader,
     device, args, modality_bands_dict, student_mod, teacher_mod="rgb",
-    intermediate_cls_projectors=None
+    intermediate_projectors=None
 ):
     """
     Train classifiers using hallucinated multimodal features from SHOT-trained projectors.
 
     This function ensures consistency between how SHOT learns to handle missing modalities
     and how classifiers are trained. It uses:
-    - intermediate_cls_projectors: Trained during SHOT to map intermediate CLS tokens between modalities
-    - modality_specific_mask_tokens: Learned during SHOT to fill in missing patch/storage tokens
+    - intermediate_projectors: Trained during SHOT to map full sequences between modalities
 
     Workflow:
     1. On unlabeled multimodal data: Learn fused_cls_projectors that map
        hallucinated_fused_cls -> real_fused_cls
-    2. On labeled monomodal data: Use intermediate projectors + mask tokens to hallucinate,
+    2. On labeled monomodal data: Use intermediate projectors to hallucinate full sequences,
        then use fused_cls_projectors to predict real fused CLS, train classifier
     3. Evaluate on real multimodal test data
 
     Args:
-        intermediate_cls_projectors: nn.ModuleDict with keys like 'rgb_to_vre' from SHOT training.
+        intermediate_projectors: nn.ModuleDict with keys like 'rgb_to_vre' from SHOT training.
     """
-    if intermediate_cls_projectors is None:
-        raise ValueError("intermediate_cls_projectors must be provided from SHOT training")
+    if intermediate_projectors is None:
+        raise ValueError("intermediate_projectors must be provided from SHOT training")
 
     model.freeze_all()
     model.eval()
@@ -1044,11 +1050,11 @@ def hallucination_supervised(
     print(f"\n=== Hallucination Supervised Training ===")
     print(f"  Teacher modality: {teacher_mod}")
     print(f"  Student modality: {student_mod}")
-    print(f"  Available intermediate projectors: {list(intermediate_cls_projectors.keys())}")
+    print(f"  Available intermediate projectors: {list(intermediate_projectors.keys())}")
 
     # Freeze intermediate projectors (already trained in SHOT)
-    intermediate_cls_projectors.eval()
-    for p in intermediate_cls_projectors.parameters():
+    intermediate_projectors.eval()
+    for p in intermediate_projectors.parameters():
         p.requires_grad = False
 
     # ==================== Stage 1: Learn fused_cls_projectors on unlabeled multimodal data ====================
@@ -1107,20 +1113,10 @@ def hallucination_supervised(
             with torch.no_grad():
                 teacher_intermediate = evan.forward_modality_specific_features(teacher_only_input)
 
-            # Hallucinate student_mod intermediate features using SHOT mechanism
-            teacher_cls = teacher_intermediate[teacher_mod][:, 0:1, :]  # [B, 1, embed_dim]
+            # Hallucinate student_mod intermediate features using full sequence projection
             proj_key = f"{teacher_mod}_to_{student_mod}"
-            hallucinated_student_cls = intermediate_cls_projectors[proj_key](teacher_cls)  # [B, 1, embed_dim]
-
-            # Use mask token for storage and patches
-            mask_token = evan.modality_specific_mask_tokens[student_mod]  # [embed_dim]
-            hallucinated_storage = mask_token.unsqueeze(0).unsqueeze(0).expand(B, evan.n_storage_tokens, -1)
-            hallucinated_patches = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
-
-            # Construct hallucinated student intermediate: [CLS, storage, patches]
-            hallucinated_student_intermediate = torch.cat(
-                [hallucinated_student_cls, hallucinated_storage, hallucinated_patches], dim=1
-            )
+            teacher_seq = teacher_intermediate[teacher_mod]  # [B, seq_len, embed_dim]
+            hallucinated_student_intermediate = intermediate_projectors[proj_key](teacher_seq)
 
             # Combine real teacher intermediate with hallucinated student intermediate
             hallucinated_intermediate = {
@@ -1238,18 +1234,10 @@ def hallucination_supervised(
             with torch.no_grad():
                 teacher_intermediate = evan.forward_modality_specific_features(teacher_input)
 
-            # Hallucinate student intermediate features
-            teacher_cls = teacher_intermediate[teacher_mod][:, 0:1, :]
+            # Hallucinate student intermediate features using full sequence projection
             proj_key = f"{teacher_mod}_to_{student_mod}"
-            hallucinated_student_cls = intermediate_cls_projectors[proj_key](teacher_cls)
-
-            mask_token = evan.modality_specific_mask_tokens[student_mod]
-            hallucinated_storage = mask_token.unsqueeze(0).unsqueeze(0).expand(B, evan.n_storage_tokens, -1)
-            hallucinated_patches = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
-
-            hallucinated_student_intermediate = torch.cat(
-                [hallucinated_student_cls, hallucinated_storage, hallucinated_patches], dim=1
-            )
+            teacher_seq = teacher_intermediate[teacher_mod]
+            hallucinated_student_intermediate = intermediate_projectors[proj_key](teacher_seq)
 
             hallucinated_intermediate = {
                 teacher_mod: teacher_intermediate[teacher_mod],
@@ -2077,7 +2065,7 @@ def train_distillrgb_phase(model, train_loader, test_loader_full, device, args, 
 def _delulu_stage1_train_fused_projectors(
     evan, unlabeled_train_loader, device, modality_bands_dict,
     unlabeled_modalities, labeled_modalities, all_modalities,
-    intermediate_cls_projectors, lr, epochs
+    intermediate_projectors, lr, epochs
 ):
     """Stage 1: Learn fused_cls_projectors on unlabeled multimodal data."""
     print(f"\n--- Stage 1: Learning fused_cls_projectors on unlabeled multimodal data ---")
@@ -2094,7 +2082,6 @@ def _delulu_stage1_train_fused_projectors(
     optimizer = torch.optim.AdamW(fused_projector_params, lr=lr)
     scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
     mse_criteria = nn.MSELoss()
-    num_patches = (evan.img_size // evan.patch_size) ** 2
 
     for epoch in range(epochs):
         fused_cls_projectors.train()
@@ -2107,30 +2094,15 @@ def _delulu_stage1_train_fused_projectors(
                 modalities=(*labeled_modalities, *unlabeled_modalities)
             )
             multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
-            B = multimodal_input[labeled_modalities[0]].shape[0]
 
             with torch.no_grad():
                 real_intermediate = evan.forward_modality_specific_features(multimodal_input)
 
-            # Predict intermediate CLS for each modality from all other modalities
-            predicted_intermediate_cls = {}
-            for tar_mod in all_modalities:
-                tar_int_cls = []
-                for src_mod in all_modalities:
-                    if src_mod == tar_mod:
-                        continue
-                    proj_key = f"{src_mod}_to_{tar_mod}"
-                    tar_int_cls.append(intermediate_cls_projectors[proj_key](real_intermediate[src_mod][:, 0, :]))
-                predicted_intermediate_cls[tar_mod] = torch.stack(tar_int_cls).mean(dim=0)
-
-            # Construct hallucinated intermediate features
-            hallucinated_intermediate = {}
-            for mod in all_modalities:
-                hallucinated_cls_token = predicted_intermediate_cls[mod].unsqueeze(1)
-                mask_token = evan.modality_specific_mask_tokens[mod]
-                hallucinated_storage = mask_token.unsqueeze(0).unsqueeze(0).expand(B, evan.n_storage_tokens, -1)
-                hallucinated_patches = mask_token.unsqueeze(0).unsqueeze(0).expand(B, num_patches, -1)
-                hallucinated_intermediate[mod] = torch.cat([hallucinated_cls_token, hallucinated_storage, hallucinated_patches], dim=1)
+            # Hallucinate intermediate features using full sequence projection
+            hallucinated_intermediate = hallucinate_intermediate_features(
+                real_intermediate, tuple(all_modalities), tuple(all_modalities),
+                intermediate_projectors
+            )
 
             real_lab_hal_unlab = merge_intermediate_features(real_intermediate, hallucinated_intermediate, labeled_modalities, unlabeled_modalities)
             real_unlab_hal_lab = merge_intermediate_features(real_intermediate, hallucinated_intermediate, unlabeled_modalities, labeled_modalities)
@@ -2161,13 +2133,13 @@ def _delulu_stage1_train_fused_projectors(
     for p in fused_cls_projectors.parameters():
         p.requires_grad = False
 
-    return fused_cls_projectors, num_patches
+    return fused_cls_projectors
 
 
 def _delulu_stage2_train_classifier(
     model, evan, labeled_train_loader, device, modality_bands_dict,
     unlabeled_modalities, labeled_modalities, all_modalities,
-    intermediate_cls_projectors, fused_cls_projectors, num_patches, lr, epochs,
+    intermediate_projectors, fused_cls_projectors, lr, epochs,
     test_loader=None, eval_every_n_epochs=4
 ):
     """Stage 2: Train classifier on labeled monomodal data with hallucinated features.
@@ -2196,15 +2168,13 @@ def _delulu_stage2_train_classifier(
                 modalities=(*labeled_modalities,)
             )
             labmod_input = {k: v.to(device) for k, v in labmod_input.items()}
-            B = labmod_input[labeled_modalities[0]].shape[0]
 
             with torch.no_grad():
                 labmod_intermediate = evan.forward_modality_specific_features(labmod_input)
 
             hallucinated_intermediate = hallucinate_intermediate_features(
                 labmod_intermediate, labeled_modalities, unlabeled_modalities,
-                intermediate_cls_projectors, evan.modality_specific_mask_tokens,
-                B, evan.n_storage_tokens, num_patches
+                intermediate_projectors
             )
 
             real_lab_hal_unlab = merge_intermediate_features(
@@ -2240,7 +2210,7 @@ def _delulu_stage2_train_classifier(
             curr_acc = _delulu_stage3_test(
                 model, evan, test_loader, device, modality_bands_dict,
                 unlabeled_modalities, labeled_modalities, all_modalities,
-                intermediate_cls_projectors, num_patches
+                intermediate_projectors
             )
             if curr_acc > best_acc:
                 best_acc=curr_acc
@@ -2250,7 +2220,7 @@ def _delulu_stage2_train_classifier(
 def _delulu_stage3_test(
     model, evan, test_loader, device, modality_bands_dict,
     unlabeled_modalities, labeled_modalities, all_modalities,
-    intermediate_cls_projectors, num_patches
+    intermediate_projectors
 ):
     """Stage 3: Test on unlabeled modalities only."""
     print(f"\n--- Stage 3: Testing on unlabeled modalities only ---")
@@ -2270,14 +2240,12 @@ def _delulu_stage3_test(
                 modalities=(*unlabeled_modalities,)
             )
             unlabmod_input = {k: v.to(device) for k, v in unlabmod_input.items()}
-            B = unlabmod_input[unlabeled_modalities[0]].shape[0]
 
             unlabmod_intermediate = evan.forward_modality_specific_features(unlabmod_input)
 
             hallucinated_intermediate = hallucinate_intermediate_features(
                 unlabmod_intermediate, unlabeled_modalities, labeled_modalities,
-                intermediate_cls_projectors, evan.modality_specific_mask_tokens,
-                B, evan.n_storage_tokens, num_patches
+                intermediate_projectors
             )
 
             real_unlab_hal_lab = merge_intermediate_features(
@@ -2315,7 +2283,7 @@ def _delulu_stage3_test(
 def delulu_supervision(
     model, unlabeled_train_loader, labeled_train_loader, test_loader,
     device, modality_bands_dict, unlabeled_modalities, labeled_modalities,
-    intermediate_cls_projectors, lr, epochs, eval_every_n_epochs=4
+    intermediate_projectors, lr, epochs, eval_every_n_epochs=4
 ):
     """
     Modality transfer - learning a predictor for the unlabeled_modalities alone.
@@ -2333,24 +2301,24 @@ def delulu_supervision(
     print(f"\n=== Hallucination Supervised Training ===")
     print(f"  Labeled modality: {labeled_modalities}")
     print(f"  Unlabeled modality: {unlabeled_modalities}")
-    print(f"  Available intermediate projectors: {list(intermediate_cls_projectors.keys())}")
+    print(f"  Available intermediate projectors: {list(intermediate_projectors.keys())}")
 
-    intermediate_cls_projectors.eval()
-    for p in intermediate_cls_projectors.parameters():
+    intermediate_projectors.eval()
+    for p in intermediate_projectors.parameters():
         p.requires_grad = False
 
     # Stage 1
-    fused_cls_projectors, num_patches = _delulu_stage1_train_fused_projectors(
+    fused_cls_projectors = _delulu_stage1_train_fused_projectors(
         evan, unlabeled_train_loader, device, modality_bands_dict,
         unlabeled_modalities, labeled_modalities, all_modalities,
-        intermediate_cls_projectors, lr, epochs
+        intermediate_projectors, lr, epochs
     )
 
     # Stage 2 (with periodic evaluation)
     best_acc = _delulu_stage2_train_classifier(
         model, evan, labeled_train_loader, device, modality_bands_dict,
         unlabeled_modalities, labeled_modalities, all_modalities,
-        intermediate_cls_projectors, fused_cls_projectors, num_patches, lr, epochs,
+        intermediate_projectors, fused_cls_projectors, lr, epochs,
         test_loader=test_loader, eval_every_n_epochs=eval_every_n_epochs
     )
 
@@ -2358,7 +2326,7 @@ def delulu_supervision(
     softvote_test_acc = _delulu_stage3_test(
         model, evan, test_loader, device, modality_bands_dict,
         unlabeled_modalities, labeled_modalities, all_modalities,
-        intermediate_cls_projectors, num_patches
+        intermediate_projectors
     )
 
     return best_acc,softvote_test_acc

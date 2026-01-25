@@ -129,8 +129,8 @@ def main():
     
     # ========================================== TRAIN SHOT ===========================================
     if args.train_method=="shot":
-        print(f"\n Using SHOT (MAE + Latent Distillation + CLS Projection) training method for fusion blocks")
-        _,_,_,cls_projectors,trainable_total=train_shot(
+        print(f"\n Using SHOT (MAE + Latent Distillation + Sequence Projection) training method for fusion blocks")
+        _,_,intermediate_projectors,trainable_total=train_shot(
             model=model,
             train_loader=train2_loader,
             device=device,
@@ -139,20 +139,20 @@ def main():
             latent_reconstruct_modalities=[starting_modality],
             modality_bands_dict=modality_bands_dict,
         )
-        
+
     # ========================================= CHECKPOINT =====================================
     timestamp_shot = datetime.now().strftime('%Y%m%d_%H%M%S')
     checkpoint_shotete = os.path.join(args.checkpoint_dir, f'evan_eurosat_{args.train_method}_{timestamp_shot}.pt')
     if args.checkpoint_name:
         checkpoint_shotete = os.path.join(args.checkpoint_dir, f'{args.checkpoint_name}.pt')
-    # Save model checkpoint with cls_projectors included
+    # Save model checkpoint with intermediate_projectors included
     checkpoint_data = {
         'model_state_dict': model.state_dict(),
         'config': model.get_config(),
-        'cls_projectors_state_dict': cls_projectors.state_dict() if cls_projectors is not None else None,
+        'intermediate_projectors_state_dict': intermediate_projectors.state_dict() if intermediate_projectors is not None else None,
     }
     torch.save(checkpoint_data, checkpoint_shotete)
-    print(f"SHOT checkpoint saved to: {checkpoint_shotete} (includes cls_projectors)")
+    print(f"SHOT checkpoint saved to: {checkpoint_shotete} (includes intermediate_projectors)")
 
     # Log results to CSV
     filename = "res/shot_e2e_train.csv"
