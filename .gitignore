@@ -217,3 +217,4 @@ ignore
 wandb
 res/legacy
 sh
+res/full/

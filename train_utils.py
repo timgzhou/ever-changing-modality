@@ -2175,7 +2175,7 @@ def _delulu_stage2_train_classifier(
     If test_loader is provided, runs evaluation every eval_every_n_epochs epochs.
     """
     print(f"\n--- Stage 2: Training classifier on labeled monomodal data with hallucinated features ---")
-
+    best_acc=0
     ce_criteria = nn.CrossEntropyLoss()
     model.freeze_all()
     model.set_requires_grad("all", classifier=True)
@@ -2237,11 +2237,14 @@ def _delulu_stage2_train_classifier(
 
         # Run evaluation every n epochs
         if test_loader is not None and (epoch + 1) % eval_every_n_epochs == 0:
-            _delulu_stage3_test(
+            curr_acc = _delulu_stage3_test(
                 model, evan, test_loader, device, modality_bands_dict,
                 unlabeled_modalities, labeled_modalities, all_modalities,
                 intermediate_cls_projectors, num_patches
             )
+            if curr_acc > best_acc:
+                best_acc=curr_acc
+    return best_acc
 
 
 def _delulu_stage3_test(
@@ -2344,7 +2347,7 @@ def delulu_supervision(
     )
 
     # Stage 2 (with periodic evaluation)
-    _delulu_stage2_train_classifier(
+    best_acc = _delulu_stage2_train_classifier(
         model, evan, labeled_train_loader, device, modality_bands_dict,
         unlabeled_modalities, labeled_modalities, all_modalities,
         intermediate_cls_projectors, fused_cls_projectors, num_patches, lr, epochs,
@@ -2358,4 +2361,4 @@ def delulu_supervision(
         intermediate_cls_projectors, num_patches
     )
 
-    return fused_cls_projectors, model, softvote_test_acc
+    return best_acc,softvote_test_acc

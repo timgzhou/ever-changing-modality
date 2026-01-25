@@ -281,9 +281,9 @@ class EVAN(nn.Module):
         checkpoint = {}
         for key, value in hf_checkpoint.items():
             new_key = key
-            new_key = new_key.replace('embeddings.cls_token', 'cls_tokens.rgb')
+            new_key = new_key.replace('embeddings.cls_token', f'cls_tokens.{self.starting_modality}')
             new_key = new_key.replace('embeddings.mask_token', 'mask_token')
-            new_key = new_key.replace('embeddings.register_tokens', 'storage_tokens.rgb')
+            new_key = new_key.replace('embeddings.register_tokens', f'storage_tokens.{self.starting_modality}')
             new_key = new_key.replace('embeddings.patch_embeddings.weight', 'patch_embed.proj.weight')
             new_key = new_key.replace('embeddings.patch_embeddings.bias', 'patch_embed.proj.bias')
             new_key = new_key.replace('layer.', 'blocks.')
@@ -302,8 +302,14 @@ class EVAN(nn.Module):
             # LayerScale mapping
             new_key = new_key.replace('.layer_scale1.lambda1', '.ls1.gamma')
             new_key = new_key.replace('.layer_scale2.lambda1', '.ls2.gamma')
-            # EVAN multi-modality compatibility: Remap patch_embed.* to patch_embedders.rgb.*
-            new_key = new_key.replace('patch_embed.', 'patch_embedders.rgb.')
+            # EVAN multi-modality compatibility: Remap patch_embed.* to patch_embedders.<starting_modality>.*
+            # Only copy patch embedder weights if starting_modality is 'rgb' (DINO was trained on RGB)
+            # For other modalities, skip patch embedder weights (random init instead)
+            if 'patch_embed.' in new_key:
+                if self.starting_modality == 'rgb':
+                    new_key = new_key.replace('patch_embed.', f'patch_embedders.{self.starting_modality}.')
+                else:
+                    continue  # Skip patch embedder weights for non-rgb starting modalities
             checkpoint[new_key] = value
         # Handle QKV weight merging (HF has separate q,k,v; DINOv3 has combined qkv)
         # Find all layer indices
@@ -361,15 +367,15 @@ class EVAN(nn.Module):
             print(f"    Copied {fft_params_copied:,} parameters for {self.starting_modality} FFT blocks")
         
         if self.tz_modality_fusion_layer_augmenter == "fft":
-            print(f"\n  FFT mode: Copying last {self.n_blocks} - {self.tz_fusion_time} DINO blocks to RGB modality-specific layers...")
+            print(f"\n  FFT mode: Copying last {self.n_blocks} - {self.tz_fusion_time} DINO blocks to {self.starting_modality} modality-fusion layers...")
             fft_params_copied = 0
             for i in range(self.tz_fusion_time,self.n_blocks,1):
-                # Copy all weights from blocks[i] to modality_fusion_lora_adaptors.rgb[i]
+                # Copy all weights from blocks[i] to modality_fusion_lora_adaptors.<starting_modality>[i]
                 for key, value in list(checkpoint.items()):
                     if key.startswith(f'blocks.{i}.'):
-                        # Create corresponding key for RGB modality-specific layer
-                        rgb_key = key.replace(f'blocks.{i}.', f'modality_fusion_lora_adaptors.rgb.{i}.')
-                        checkpoint[rgb_key] = value.clone()
+                        # Create corresponding key for starting_modality fusion layer
+                        mod_key = key.replace(f'blocks.{i}.', f'modality_fusion_lora_adaptors.{self.starting_modality}.{i - self.tz_fusion_time}.')
+                        checkpoint[mod_key] = value.clone()
                         fft_params_copied += value.numel()
             print(f"    Copied {fft_params_copied:,} parameters for {self.starting_modality} FFT blocks")
 
@@ -966,6 +972,7 @@ class EVAN(nn.Module):
             'tz_fusion_time': self.tz_fusion_time,
             'tz_lora_rank': self.tz_lora_rank,
             'starting_modality': self.starting_modality,
+            'starting_n_chans': self.supported_modalities_in_chans[0],
             'supported_modalities': self.supported_modalities.copy(),
             'supported_modalities_in_chans': self.supported_modalities_in_chans.copy(),
         }
@@ -998,6 +1005,10 @@ class EVAN(nn.Module):
         supported_modalities = config.pop('supported_modalities', None)
         supported_modalities_in_chans = config.pop('supported_modalities_in_chans', None)
         starting_modality = config.get('starting_modality', 'rgb')
+
+        # Backward compatibility: if starting_n_chans not in config, get it from supported_modalities_in_chans
+        if 'starting_n_chans' not in config and supported_modalities_in_chans:
+            config['starting_n_chans'] = supported_modalities_in_chans[0]
 
         # Create model with base config (starting modality only)
         model = cls(**config, device=device)
@@ -1333,6 +1344,10 @@ class EVANClassifier(nn.Module):
         supported_modalities = evan_config.pop('supported_modalities', None)
         supported_modalities_in_chans = evan_config.pop('supported_modalities_in_chans', None)
         starting_modality = evan_config.get('starting_modality', 'rgb')
+
+        # Backward compatibility: if starting_n_chans not in config, get it from supported_modalities_in_chans
+        if 'starting_n_chans' not in evan_config and supported_modalities_in_chans:
+            evan_config['starting_n_chans'] = supported_modalities_in_chans[0]
 
         # Create EVAN model
         evan = EVAN(**evan_config, device=device)

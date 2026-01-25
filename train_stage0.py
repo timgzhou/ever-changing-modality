@@ -50,6 +50,7 @@ def main():
     parser.add_argument('--global_rep', type=str, default='clstoken', choices=['clstoken','mean_patch'])
     parser.add_argument('--modality', type=str, default='rgb', choices=['rgb','vre','nir','swir','aw'])
     parser.add_argument('--train_mode', type=str, default='emb+probe', choices=['probe','adaptor','fft','emb+probe'])
+    parser.add_argument('--checkpoint_name', type=str, default=None)
     args = parser.parse_args()
 
     # Initialize wandb if enabled
@@ -169,7 +170,10 @@ def main():
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    checkpoint_path = os.path.join(args.checkpoint_dir, f'evan_eurosat_stage0_{args.modality}_{timestamp}.pt')
+    if args.checkpoint_name:
+        checkpoint_path = os.path.join(args.checkpoint_dir, f'{args.checkpoint_name}.pt')
+    else:
+        checkpoint_path = os.path.join(args.checkpoint_dir, f'evan_eurosat_stage0_{args.modality}_{timestamp}.pt')
     
     model.save_checkpoint(checkpoint_path)
     print(f"\n=== Stage 0 checkpoint saved to: {checkpoint_path} ===")

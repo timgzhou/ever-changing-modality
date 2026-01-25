@@ -122,6 +122,8 @@ def create_mae_decoders(hidden_dim,patch_size,modality_bands_dict,mae_modalities
         print(f"  Initialized FullSequenceMAEDecoder for {mod}, num_channels={num_channels}")
     return mae_decoders
 
+# ==================== SHOT TRAINING COMPONENT ====================
+
 def create_latent_projectors(hidden_dim,latent_reconstruct_modalities,device):
     latent_projectors = nn.ModuleDict()
     for mod in latent_reconstruct_modalities:
@@ -171,6 +173,8 @@ def create_fuse_cls_projectors(hidden_dim, mae_modalities, latent_reconstruct_mo
                 ).to(device)
                 print(f"  Initialized CLS Projector: {src_mod} -> {tgt_mod}")
     return fused_cls_projector
+
+# MASKING HELPER FUNCTION
 def mask_input(mask_tokens,pre_fusion_cls_projectors,batch_size,n_storage_tokens,num_patches,mae_mask_ratio,all_modalities,prefusion_features,modality_dropout,device):
     len_keep = int(num_patches * (1 - mae_mask_ratio))
     modality_masks = {}  # {mod: [B, num_patches] bool tensor, True=masked}
@@ -220,6 +224,7 @@ def mask_input(mask_tokens,pre_fusion_cls_projectors,batch_size,n_storage_tokens
         masked_mod_features[mod] = torch.cat([cls_token, storage, masked_patches], dim=1)
     return modality_masks, masked_mod_features
             
+# SHOT_TRAINING!
 def train_shot(
     model, train_loader, device, args,
     mae_modalities: list[str],
@@ -328,9 +333,6 @@ def train_shot(
                 # looks like {"rgb": {'x_norm_patchtokens': [B, num_patches, embed_dim], ...}}
 
             # Step 2: Compute pre-fusion CLS projection loss
-            # NOTE: currently preset 4 jan 22 tried to remove detach from tgt_cls, and it helped!
-            # Train bidirectional projectors: src_cls -> tgt_cls for all pairs
-            # Both src and tgt are detached - we only train the projector, not the pre-fusion weights 
             batch_pre_fusion_cls_loss = 0.0
             prefusion_cls_loss = torch.tensor(0.0, device=device)
             pre_fusion_loss_count = 0

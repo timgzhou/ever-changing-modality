@@ -1,9 +1,11 @@
-
 from shot import create_int_cls_projectors
 import argparse
 import torch
 import torch.nn as nn
 import logging
+import csv
+import os
+from datetime import datetime
 
 from evan_main import EVANClassifier
 from eurosat_data_utils import (
@@ -20,6 +22,7 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--checkpoint', type=str, default='checkpoints/presetE.pt', help='Path to checkpoint file')
+parser.add_argument('--num_supervised_epochs', type=int, default=1, help='Path to checkpoint file')
 args = parser.parse_args()
 
 train1_loader, train2_loader, test_loader = get_loaders(32,4)
@@ -27,7 +30,7 @@ eval_lr=1e-4
 criterion = nn.CrossEntropyLoss()
 checkpoint_path = args.checkpoint
 clssifier_strategy="ensemble"
-num_supervised_epochs=12
+num_supervised_epochs=args.num_supervised_epochs
 
 checkpoint = torch.load(checkpoint_path, map_location='cpu')
 config = checkpoint['config']
@@ -38,6 +41,11 @@ for k, v in config.items():
 
 
 device = 'cuda' if torch.cuda.is_available() else "cpu"
+
+# CSV logging setup
+csv_results = []
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+csv_filename = f"eval_results_{timestamp}.csv"
 
 def load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device):
     model=EVANClassifier.from_checkpoint(checkpoint_path,device)
@@ -81,6 +89,13 @@ train_acc, test_acc = supervised_training_loop(
     phase_name="SHOT supervised eval"
 )
 print(f"{test_acc=}")
+csv_results.append({
+    "eval_type": "real-multimodal-real-supervision",
+    "real_modality": "+".join(modalities),
+    "hallucinated_modality": None,
+    "test_acc": test_acc,
+    "best_test_acc": test_acc,
+})
 
 # ========================================= -----------hallucinated multimodal under real supervision ------------- =====================================
 print("\n" + "="*70)
@@ -98,10 +113,17 @@ for evaluated_modality in modalities:
         _, test_acc_wh, best_test_acc_wh, _ = single_modality_training_loop(
             model, train1_loader, test_loader, device,
             modality_bands_dict, criterion, optimizer, num_supervised_epochs,
-            modality=evaluated_modality, phase_name=f"SHOT {evaluated_modality}-only eval w/ hallucination {hallucinate_modality}", 
+            modality=evaluated_modality, phase_name=f"SHOT {evaluated_modality}-only eval w/ hallucination {hallucinate_modality}",
             hallucinate_modality=True, pseudo_modalities=[hallucinate_modality],cls_projectors=intermediate_cls_projectors
         )
         print(f"\nREAL {evaluated_modality} + Hallucinated {hallucinate_modality} Result: {test_acc_wh=:.2f} {best_test_acc_wh=:.2f}\n\n")
+        csv_results.append({
+            "eval_type": "hallucinated-multimodal-real-supervision",
+            "real_modality": evaluated_modality,
+            "hallucinated_modality": hallucinate_modality,
+            "test_acc": test_acc_wh,
+            "best_test_acc": best_test_acc_wh,
+        })
 
 for evaluated_modality in modalities:
     model = load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device)
@@ -109,9 +131,16 @@ for evaluated_modality in modalities:
     _, test_acc_woh, best_test_acc_woh, _ = single_modality_training_loop(
             model, train1_loader, test_loader, device,
             modality_bands_dict, criterion, optimizer, num_supervised_epochs,
-            modality=evaluated_modality, phase_name=f"SHOT {evaluated_modality}-only eval w/o hallucination.", 
+            modality=evaluated_modality, phase_name=f"SHOT {evaluated_modality}-only eval w/o hallucination.",
         )
     print(f"\n{evaluated_modality}-only Result: {test_acc_woh=:.2f} {best_test_acc_woh=:.2f}\n\n")
+    csv_results.append({
+        "eval_type": "real-monomodal-real-supervision",
+        "real_modality": evaluated_modality,
+        "hallucinated_modality": None,
+        "test_acc": test_acc_woh,
+        "best_test_acc": best_test_acc_woh,
+    })
 
 
 
@@ -127,7 +156,7 @@ print(f"Loaded SHOT-trained intermediate_cls_projectors: {list(intermediate_cls_
 starting_modality = model.evan.starting_modality
 unlabeld_modalities = list(set(model.evan.supported_modalities)-{starting_modality})
 
-test_acc = delulu_supervision(
+best_test_acc, test_acc = delulu_supervision(
     model=model,
     unlabeled_train_loader=train2_loader,
     labeled_train_loader=train1_loader,
@@ -141,5 +170,39 @@ test_acc = delulu_supervision(
     epochs=num_supervised_epochs,
     eval_every_n_epochs=1
 )
+csv_results.append({
+    "eval_type": "hallucinated-multimodal-pseudo-supervision",
+    "real_modality": "+".join(unlabeld_modalities),
+    "hallucinated_modality": starting_modality,
+    "test_acc": test_acc,
+    "best_test_acc": best_test_acc,
+})
+
+# Write CSV results
+csv_path = os.path.join(os.path.dirname(checkpoint_path), csv_filename)
+fieldnames = [
+    "checkpoint",
+    "num_supervised_epochs",
+    "starting_modality",
+    "supported_modalities",
+    "eval_type",
+    "real_modality",
+    "hallucinated_modality",
+    "test_acc",
+    "best_test_acc",
+]
+with open(csv_path, 'w', newline='') as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    for result in csv_results:
+        row = {
+            "checkpoint": checkpoint_path,
+            "num_supervised_epochs": num_supervised_epochs,
+            "starting_modality": starting_modality,
+            "supported_modalities": "+".join(modalities),
+            **result
+        }
+        writer.writerow(row)
+print(f"\nResults saved to: {csv_path}")
 
 # python -u evaluate_shot.py
