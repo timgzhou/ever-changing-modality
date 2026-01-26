@@ -58,7 +58,7 @@ checkpoints/swir_to_rgb.pt,32,swir,swir+rgb,hallucinated-multimodal-real-supervi
 checkpoints/swir_to_rgb.pt,32,swir,swir+rgb,hallucinated-multimodal-real-supervision,rgb,swir,89.79629629629629,89.79629629629629
 checkpoints/swir_to_rgb.pt,32,swir,swir+rgb,real-monomodal-real-supervision,swir,,87.29629629629629,87.33333333333333
 checkpoints/swir_to_rgb.pt,32,swir,swir+rgb,real-monomodal-real-supervision,rgb,,88.42592592592592,88.46296296296296
-checkpoints/swir_to_rgb.pt,32,swir,swir+rgb,hallucinated-multimodal-pseudo-supervision,swir,rgb,84.85185185185185,85.29629629629629
+checkpoints/swir_to_rgb.pt,32,swir,swir+rgb,hallucinated-multimodal-pseudo-supervision,rgb,swir,84.85185185185185,85.29629629629629
 checkpoints/swir_to_vre.pt,32,swir,swir+vre,real-multimodal-real-supervision,swir+vre,,87.20370370370371,87.20370370370371
 checkpoints/swir_to_vre.pt,32,swir,swir+vre,hallucinated-multimodal-real-supervision,swir,vre,81.05555555555556,81.05555555555556
 checkpoints/swir_to_vre.pt,32,swir,swir+vre,hallucinated-multimodal-real-supervision,vre,swir,80.98148148148148,80.98148148148148

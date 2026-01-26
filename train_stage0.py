@@ -2,9 +2,6 @@
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
-from torchgeo.datasets import EuroSAT
-from torchvision import transforms
 import logging
 import os
 import argparse
@@ -14,12 +11,10 @@ import csv
 
 from evan_main import evan_small, evan_base, evan_large, EVANClassifier
 from eurosat_data_utils import (
-    DictTransform,
-    ALL_BAND_NAMES,
+    get_loaders,
     get_modality_bands_dict
 )
 from train_utils import (
-    load_split_indices,
     single_modality_training_loop,
 )
 
@@ -68,43 +63,10 @@ def main():
     # Band configuration (using constants from eurosat_data_utils)
     modality_bands_dict = get_modality_bands_dict(args.modality)
     bands_mod = modality_bands_dict[args.modality]
-    bands_full = tuple(ALL_BAND_NAMES)
 
     # Create datasets
     print("\n=== Creating datasets ===")
-    # Resize transform (applied to all datasets)
-    resize_transform = DictTransform(transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True))
-
-    train_dataset_full = EuroSAT(
-        root='datasets',
-        split='train',
-        bands=bands_full,  # Load all 13 bands
-        transforms=resize_transform,
-        download=True,
-        checksum=False
-    )
-
-    # Get indices for train1 split (first half of training data)
-    train1_indices = load_split_indices('datasets/eurosat-train1.txt', train_dataset_full)
-    train_dataset = Subset(train_dataset_full, train1_indices)
-    print(f"Loaded {len(train1_indices)} samples from train1 split")
-
-    # Test with all bands (for both single-modal and multi-modal evaluation)
-    test_dataset_full = EuroSAT(
-        root='datasets',
-        split='test',
-        bands=bands_full,  # Load all 13 bands
-        transforms=resize_transform,
-        download=True,
-        checksum=False
-    )
-
-    print(f"Train samples (split=train1): {len(train_dataset)}")
-    print(f"Test samples: {len(test_dataset_full)}")
-
-    # Create dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    test_loader_full = DataLoader(test_dataset_full, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    train1_loader, train2_loader, test_loader = get_loaders(32,4)
 
     # Create EVAN model with pretrained DINO weights
     print("\n=== Creating EVAN model ===")
@@ -158,7 +120,7 @@ def main():
 
     # Run single-modality training loop
     train_acc, test_acc, best_test_acc, best_epoch = single_modality_training_loop(
-        model, train_loader, test_loader_full, device,
+        model, train1_loader, test_loader, device,
         modality_bands_dict, criterion, optimizer, num_epochs,
         modality=args.modality, phase_name="Stage 0",
         use_wandb=bool(args.wandb_project), wandb_prefix='stage0' # , clip_norm=2

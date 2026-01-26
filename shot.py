@@ -372,13 +372,15 @@ def train_shot(
             prefusion_loss = torch.tensor(0.0, device=device)
             pre_fusion_loss_count = 0
             for src_mod in all_modalities:
-                src_seq = prefusion_features[src_mod].detach()  # [B, 1+n_storage+num_patches, embed_dim]
+                src_seq = prefusion_features[src_mod].detach() if src_mod in latent_reconstruct_modalities else prefusion_features[src_mod]  # [B, 1+n_storage+num_patches, embed_dim]
                 for tgt_mod in all_modalities:
                     if src_mod != tgt_mod:
-                        tgt_seq = prefusion_features[tgt_mod].detach()  # [B, 1+n_storage+num_patches, embed_dim]
+                        tgt_seq = prefusion_features[tgt_mod].detach() if tgt_mod in latent_reconstruct_modalities else prefusion_features[tgt_mod]  # [B, 1+n_storage+num_patches, embed_dim]
                         key = f"{src_mod}_to_{tgt_mod}"
-                        projected_seq = intermediate_projectors[key](src_seq)  # [B, seq_len, embed_dim]
-                        prefusion_loss = prefusion_loss + mse_fn(projected_seq, tgt_seq)
+                        src_seq_norm = F.layer_norm(src_seq, [src_seq.shape[-1]])
+                        tgt_seq_norm = F.layer_norm(tgt_seq, [tgt_seq.shape[-1]])
+                        projected_seq = intermediate_projectors[key](src_seq_norm)  # [B, seq_len, embed_dim]
+                        prefusion_loss = prefusion_loss + mse_fn(projected_seq, tgt_seq_norm)
                         pre_fusion_loss_count += 1
             prefusion_loss = prefusion_loss / pre_fusion_loss_count if pre_fusion_loss_count > 0 else prefusion_loss
             batch_pre_fusion_loss = prefusion_loss.item()

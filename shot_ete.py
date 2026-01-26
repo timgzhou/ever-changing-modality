@@ -1,10 +1,6 @@
 
 from shot import train_shot
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
-from torchgeo.datasets import EuroSAT
-from torchvision import transforms
 import logging
 import os
 import argparse
@@ -14,18 +10,10 @@ import wandb
 
 from evan_main import EVANClassifier
 from eurosat_data_utils import (
-    DictTransform,
     ALL_BAND_NAMES,
+    get_loaders,
     get_modality_bands_dict
 )
-from train_utils import (
-    evaluate,
-    load_split_indices,
-    single_modality_training_loop,
-    supervised_training_loop,
-    train_mae_fusion_phase
-)
-
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 
@@ -85,38 +73,8 @@ def main():
     # Create datasets
     print("\n=== Creating datasets ===")
 
-    resize_transform = DictTransform(transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True))
+    _, train2_loader, _ = get_loaders(32,4)
 
-    train_dataset_full = EuroSAT(
-        root='datasets',
-        split='train',
-        bands=bands_full,
-        transforms=resize_transform,
-        download=True,
-        checksum=False
-    )
-
-    train1_indices = load_split_indices('datasets/eurosat-train1.txt', train_dataset_full)
-    train1_dataset = Subset(train_dataset_full, train1_indices)
-    train2_indices = load_split_indices('datasets/eurosat-train2.txt', train_dataset_full)
-    train2_dataset = Subset(train_dataset_full, train2_indices)
-
-    test_dataset_full = EuroSAT(
-        root='datasets',
-        split='test',
-        bands=bands_full,
-        transforms=resize_transform,
-        download=True,
-        checksum=False
-    )
-
-    print(f"Loaded {len(train1_indices)} and {len(train2_indices)} samples from train1 and train2 splits.")
-    print(f"Test samples: {len(test_dataset_full)}")
-
-    # Create dataloaders
-    train1_loader = DataLoader(train1_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    train2_loader = DataLoader(train2_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    test_loader = DataLoader(test_dataset_full, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     evan = model.evan
     model = model.to(device)
     print(f"SSL-trained components loaded: {newmod} patch embedder, {newmod} modality-specific LoRAs")

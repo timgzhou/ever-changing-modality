@@ -1,10 +1,4 @@
 checkpoint,num_supervised_epochs,starting_modality,supported_modalities,eval_type,real_modality,hallucinated_modality,test_acc,best_test_acc
-checkpoints/vre_to_swir.pt,2,vre,vre+swir,real-multimodal-real-supervision,vre+swir,,76.25925925925925,76.25925925925925
-checkpoints/vre_to_swir.pt,2,vre,vre+swir,hallucinated-multimodal-real-supervision,vre,swir,73.35185185185185,73.35185185185185
-checkpoints/vre_to_swir.pt,2,vre,vre+swir,hallucinated-multimodal-real-supervision,swir,vre,68.4074074074074,68.4074074074074
-checkpoints/vre_to_swir.pt,2,vre,vre+swir,real-monomodal-real-supervision,vre,,75.05555555555556,75.05555555555556
-checkpoints/vre_to_swir.pt,2,vre,vre+swir,real-monomodal-real-supervision,swir,,69.5,69.5
-checkpoints/vre_to_swir.pt,2,vre,vre+swir,hallucinated-multimodal-pseudo-supervision,swir,vre,65.79629629629629,65.79629629629629
 checkpoints/rgb_to_nir.pt,32,rgb,rgb+nir,real-multimodal-real-supervision,rgb+nir,,94.57407407407408,94.57407407407408
 checkpoints/rgb_to_nir.pt,32,rgb,rgb+nir,hallucinated-multimodal-real-supervision,rgb,nir,92.24074074074075,92.27777777777777
 checkpoints/rgb_to_nir.pt,32,rgb,rgb+nir,hallucinated-multimodal-real-supervision,nir,rgb,77.07407407407408,77.4074074074074
