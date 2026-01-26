@@ -1,0 +1,12 @@
+model_type,modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,test_accuracy,best_test_accuracy(oracle),best_epoch,saved_checkpoint,global_rep
+evan_small,rgb,fft,32,fft,0.0001,22207498,128,98.48,98.50,44,checkpoints/rgb_fft.pt,clstoken
+evan_small,rgb,fft,32,fft,0.0001,22207498,128,98.48,98.50,22,checkpoints/rgb_fft.pt,clstoken
+evan_small,vre,fft,32,fft,0.0001,22207498,128,89.91,90.13,76,checkpoints/vre_fft.pt,clstoken
+evan_small,rgb,fft,32,fft,0.0001,22207498,128,98.31,98.35,24,checkpoints/rgb_fft.pt,clstoken
+evan_small,vre,fft,32,fft,0.0001,22207498,128,89.41,89.74,32,checkpoints/vre_fft.pt,clstoken
+evan_small,nir,fft,32,fft,0.0001,22109194,128,77.19,77.24,116,checkpoints/nir_fft.pt,clstoken
+evan_small,nir,fft,32,fft,0.0001,22109194,128,85.93,86.22,50,checkpoints/nir_fft.pt,clstoken
+evan_small,nir,fft,32,fft,0.0001,22109194,128,79.26,79.50,32,checkpoints/nir_fft.pt,clstoken
+evan_small,swir,fft,32,fft,0.0001,22109194,128,86.43,86.87,32,checkpoints/swir_fft.pt,clstoken
+evan_small,swir,fft,32,fft,0.0001,22109194,128,85.39,85.39,120,checkpoints/swir_fft.pt,clstoken
+evan_small,swir,fft,32,fft,0.0001,22109194,128,87.65,87.72,107,checkpoints/swir_fft.pt,clstoken

@@ -3,7 +3,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # Load and combine data from all dates
-dates = ["jan22", "jan24", "jan25", "jan25b"]
+# dates = ["jan22", "jan24", "jan25", "jan25b", "jan25c", "jan25d"]
+dates = ["jan22","jan25c", "jan25d"]
 dfs = []
 for date in dates:
     df = pd.read_csv(f"res/modality-transfer_{date}.csv")
@@ -12,7 +13,7 @@ for date in dates:
 
 df = pd.concat(dfs, ignore_index=True)
 df.sort_values(by=['starting_modality', 'eval_type', 'real_modality'], inplace=True)
-df = df[df["num_supervised_epochs"] == 32]
+df = df[df["num_supervised_epochs"] >=24]
 
 g = sns.FacetGrid(df, row="starting_modality", col="eval_type", hue="date", sharex=False, sharey=False)
 g.map(sns.scatterplot, "real_modality", "test_acc", alpha=.7)

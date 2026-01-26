@@ -1,6 +1,7 @@
 import copy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
@@ -841,8 +842,9 @@ class EVAN(nn.Module):
             projected_seqs = []
             for avail_mod in available_modalities:
                 avail_seq = embedded[avail_mod]  # [B, seq_len, embed_dim]
+                avail_seq_norm = F.layer_norm(avail_seq, [avail_seq.shape[-1]])
                 key = f"{avail_mod}_to_{mod}"
-                projected = intermediate_projectors[key](avail_seq)  # [B, seq_len, embed_dim]
+                projected = intermediate_projectors[key](avail_seq_norm)  # [B, seq_len, embed_dim]
                 projected_seqs.append(projected)
             # Mean of all projected sequences
             embedded[mod] = torch.stack(projected_seqs).mean(dim=0)
