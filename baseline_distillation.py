@@ -440,6 +440,18 @@ def main():
         device=device
     )
 
+    # If student is RGB, reset patch embedder to random init (DINO pretrained weights are unfair)
+    if args.modality == 'rgb':
+        from evan.layers import PatchEmbed
+        print("  Resetting RGB patch embedder to random initialization (removing DINO pretrained weights)")
+        evan.patch_embedders['rgb'] = PatchEmbed(
+            img_size=evan.img_size,
+            patch_size=evan.patch_size,
+            in_chans=len(bands_mod),
+            embed_dim=evan.embed_dim,
+            flatten_embedding=False,
+        ).to(device)
+
     # Create classifier
     student_model = EVANClassifier(evan, num_classes=10, classifier_strategy="mean", global_rep=args.global_rep, device=device)
     student_model = student_model.to(device)
