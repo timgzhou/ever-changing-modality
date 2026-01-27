@@ -21,6 +21,128 @@ from eurosat_data_utils import (
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 
+def init_student_from_teacher(
+    teacher_checkpoint_path: str,
+    student_modality: str,
+    student_n_chans: int,
+    device: str = 'cpu',
+) -> EVANClassifier:
+    """
+    Create a monomodal student EVANClassifier initialized from a teacher checkpoint.
+
+    Copies the teacher's backbone weights (blocks, norm) and modality-specific
+    components (MSLA, MFLA, CLS token, etc.) to the student's modality.
+    The patch embedder is randomly initialized (different channel count),
+    and the classifier is copied from the teacher.
+
+    Args:
+        teacher_checkpoint_path: Path to teacher checkpoint file
+        student_modality: Modality name for the student (e.g., 'nir', 'swir')
+        student_n_chans: Number of input channels for student modality
+        device: Device to load model to
+
+    Returns:
+        EVANClassifier with student modality initialized from teacher weights
+    """
+    from evan_main import EVAN
+
+    # Load teacher checkpoint
+    checkpoint = torch.load(teacher_checkpoint_path, map_location=device)
+    config = checkpoint['config']
+    evan_config = config['evan_config'].copy()
+    teacher_state_dict = checkpoint['model_state_dict']
+
+    # Get teacher modality info
+    teacher_modality = evan_config.get('starting_modality', 'rgb')
+
+    if student_modality == teacher_modality:
+        raise ValueError(
+            f"Student modality ({student_modality}) must be different from "
+            f"teacher modality ({teacher_modality}). Use from_checkpoint() instead."
+        )
+
+    print(f"=== Initializing student '{student_modality}' from teacher '{teacher_modality}' ===")
+
+    # Update config for student modality
+    evan_config['starting_modality'] = student_modality
+    evan_config['starting_n_chans'] = student_n_chans
+    # Remove multimodal info from config (student is monomodal)
+    evan_config.pop('supported_modalities', None)
+    evan_config.pop('supported_modalities_in_chans', None)
+
+    # Create student EVAN model (monomodal, with student_modality)
+    student_evan = EVAN(**evan_config, device=device)
+
+    # === Copy backbone weights (shared across modalities) ===
+    backbone_keys = []
+    for key in teacher_state_dict.keys():
+        if key.startswith('evan.blocks.') or key.startswith('evan.norm.') or \
+           key == 'evan.mask_token' or key.startswith('evan.rope_embed'):
+            backbone_keys.append(key)
+
+    print(f"  Copying {len(backbone_keys)} backbone parameters from teacher")
+    student_state_dict = student_evan.state_dict()
+    for key in backbone_keys:
+        # Remove 'evan.' prefix for EVAN state dict
+        evan_key = key.replace('evan.', '', 1)
+        if evan_key in student_state_dict:
+            student_state_dict[evan_key] = teacher_state_dict[key]
+
+    # === Copy modality-specific weights (teacher_modality -> student_modality) ===
+    modality_components = [
+        'modality_specific_layer_adaptors',
+        'modality_fusion_lora_adaptors',
+        'cls_tokens',
+        'storage_tokens',
+        'modality_encoders',
+        'modality_specific_mask_tokens',
+    ]
+
+    copied_modality_keys = 0
+    for component_name in modality_components:
+        teacher_prefix = f'evan.{component_name}.{teacher_modality}'
+        student_prefix = f'{component_name}.{student_modality}'
+
+        for key in teacher_state_dict.keys():
+            if key.startswith(teacher_prefix):
+                suffix = key[len(teacher_prefix):]
+                student_key = f'{student_prefix}{suffix}'
+                if student_key in student_state_dict:
+                    student_state_dict[student_key] = teacher_state_dict[key]
+                    copied_modality_keys += 1
+
+    print(f"  Copying {copied_modality_keys} modality-specific parameters "
+          f"({teacher_modality} -> {student_modality})")
+    print(f"  Patch embedder for '{student_modality}' randomly initialized "
+          f"({student_n_chans} channels)")
+
+    # Load the modified state dict into student EVAN
+    student_evan.load_state_dict(student_state_dict, strict=True)
+
+    # === Create classifier and copy weights from teacher ===
+    student_model = EVANClassifier(
+        evan_model=student_evan,
+        num_classes=config['num_classes'],
+        classifier_strategy=config['classifier_strategy'],
+        factor=config['factor'],
+        global_rep=config['global_rep'],
+        device=device,
+    )
+
+    # Copy classifier weights
+    classifier_state = {}
+    for key in teacher_state_dict.keys():
+        if key.startswith('classifier.'):
+            classifier_state[key.replace('classifier.', '')] = teacher_state_dict[key]
+
+    if classifier_state:
+        student_model.classifier.load_state_dict(classifier_state)
+        print(f"  Classifier weights copied from teacher")
+
+    print(f"=== Student initialization complete ===")
+    return student_model
+
+
 def distillation_loss(student_logits, teacher_logits, temperature=2.0):
     """Compute KL divergence loss between student and teacher soft labels."""
     student_soft = F.log_softmax(student_logits / temperature, dim=-1)
@@ -382,6 +504,8 @@ def main():
     parser.add_argument('--distillation_mode', type=str, default='regular',
                         choices=['regular', 'with_guidance', 'feature'],
                         help='Distillation mode: regular (KL on logits), with_guidance (0.5 supervision + 0.5 distillation), feature (MSE on cls+patch tokens)')
+    parser.add_argument('--init_from_teacher', action='store_true',
+                        help='Initialize student backbone and adaptors from teacher weights (instead of DINO pretrained)')
     args = parser.parse_args()
 
     # Load teacher checkpoint
@@ -429,32 +553,45 @@ def main():
 
     # Create student EVAN model
     print("\n=== Creating student EVAN model ===")
-    model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
-    evan = model_fn(
-        tz_fusion_time=args.tz_fusion_time,
-        tz_lora_rank=args.tz_lora_rank,
-        tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
-        n_storage_tokens=4,
-        starting_modality=args.modality,
-        starting_n_chans=len(bands_mod),
-        device=device
-    )
 
-    # If student is RGB, reset patch embedder to random init (DINO pretrained weights are unfair)
-    if args.modality == 'rgb':
-        from evan.layers import PatchEmbed
-        print("  Resetting RGB patch embedder to random initialization (removing DINO pretrained weights)")
-        evan.patch_embedders['rgb'] = PatchEmbed(
-            img_size=evan.img_size,
-            patch_size=evan.patch_size,
-            in_chans=len(bands_mod),
-            embed_dim=evan.embed_dim,
-            flatten_embedding=False,
-        ).to(device)
+    if args.init_from_teacher:
+        # Initialize student from teacher weights (backbone + adaptors + classifier)
+        print(f"Initializing student from teacher checkpoint: {teacher_checkpoint_path}")
+        student_model = init_student_from_teacher(
+            teacher_checkpoint_path=teacher_checkpoint_path,
+            student_modality=args.modality,
+            student_n_chans=len(bands_mod),
+            device=device,
+        )
+        student_model = student_model.to(device)
+    else:
+        # Original path: Initialize from DINO pretrained weights
+        model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
+        evan = model_fn(
+            tz_fusion_time=args.tz_fusion_time,
+            tz_lora_rank=args.tz_lora_rank,
+            tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
+            n_storage_tokens=4,
+            starting_modality=args.modality,
+            starting_n_chans=len(bands_mod),
+            device=device
+        )
 
-    # Create classifier
-    student_model = EVANClassifier(evan, num_classes=10, classifier_strategy="mean", global_rep=args.global_rep, device=device)
-    student_model = student_model.to(device)
+        # If student is RGB, reset patch embedder to random init (DINO pretrained weights are unfair)
+        if args.modality == 'rgb':
+            from evan.layers import PatchEmbed
+            print("  Resetting RGB patch embedder to random initialization (removing DINO pretrained weights)")
+            evan.patch_embedders['rgb'] = PatchEmbed(
+                img_size=evan.img_size,
+                patch_size=evan.patch_size,
+                in_chans=len(bands_mod),
+                embed_dim=evan.embed_dim,
+                flatten_embedding=False,
+            ).to(device)
+
+        # Create classifier
+        student_model = EVANClassifier(evan, num_classes=10, classifier_strategy="mean", global_rep=args.global_rep, device=device)
+        student_model = student_model.to(device)
 
     # Freeze student backbone, train only specified components
     student_model.freeze_all()

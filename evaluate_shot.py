@@ -9,6 +9,7 @@ import os
 from evan_main import EVANClassifier
 from eurosat_data_utils import (
     get_loaders,
+    get_loaders_with_val,
     get_modality_bands_dict
 )
 from train_utils import (
@@ -23,9 +24,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--checkpoint', type=str, default='checkpoints/presetE.pt', help='Path to checkpoint file')
 parser.add_argument('--num_supervised_epochs', type=int, default=1, help='Path to checkpoint file')
 parser.add_argument('--csv_suffix', type=str, default=None, help='suffix to save experiment results to.')
+parser.add_argument('--val_ratio', type=float, default=0.1, help='Fraction of train2 to use for validation (default: 0.1)')
 args = parser.parse_args()
 
-train1_loader, train2_loader, test_loader = get_loaders(32,4)
+train1_loader, val1_loader, train2_loader, val2_loader, test_loader = get_loaders_with_val(32, 4, val_ratio=args.val_ratio)
 eval_lr=1e-4
 criterion = nn.CrossEntropyLoss()
 checkpoint_path = args.checkpoint
@@ -178,7 +180,9 @@ for objective in ["transfer", "addition", "peeking"]:
         lr=eval_lr,
         epochs=num_supervised_epochs,
         eval_every_n_epochs=1,
-        objective=objective
+        objective=objective,
+        val1_loader=val1_loader,
+        val2_loader=val2_loader
     )
 
     # Determine real/hallucinated modalities based on objective for logging

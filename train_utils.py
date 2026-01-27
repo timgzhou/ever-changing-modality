@@ -566,10 +566,67 @@ class CrossModalFusedProjector(nn.Module):
         return projected_cls
 
 
+def _delulu_stage1_compute_loss(
+    evan, batch, device, modality_bands_dict,
+    unlabeled_modalities, labeled_modalities, all_modalities,
+    intermediate_projectors, fused_projector, objective
+):
+    """Compute stage 1 loss for a single batch (used for both train and val)."""
+    mse_criteria = nn.MSELoss()
+
+    multimodal_input = create_multimodal_batch(
+        batch, modality_bands_dict=modality_bands_dict,
+        modalities=(*labeled_modalities, *unlabeled_modalities)
+    )
+    multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
+
+    with torch.no_grad():
+        real_intermediate = evan.forward_modality_specific_features(multimodal_input)
+
+    # Hallucinate intermediate features using full sequence projection
+    hallucinated_intermediate = hallucinate_intermediate_features(
+        real_intermediate, tuple(all_modalities), tuple(all_modalities),
+        intermediate_projectors
+    )
+
+    # Source is always real_lab + hallucinated_unlab
+    real_lab_hal_unlab = merge_intermediate_features(
+        real_intermediate, hallucinated_intermediate,
+        labeled_modalities, unlabeled_modalities
+    )
+    real_lab_hal_unlab_fusion = evan.forward_fusion_from_modality_features(real_lab_hal_unlab)
+
+    # Target depends on objective
+    if objective == "transfer":
+        # Target: real_unlab + hallucinated_lab
+        real_unlab_hal_lab = merge_intermediate_features(
+            real_intermediate, hallucinated_intermediate,
+            unlabeled_modalities, labeled_modalities
+        )
+        target_fusion = evan.forward_fusion_from_modality_features(real_unlab_hal_lab)
+    elif objective == "addition":
+        # Target: real_lab + real_unlab (both modalities real)
+        real_lab_real_unlab = {m: real_intermediate[m] for m in all_modalities}
+        target_fusion = evan.forward_fusion_from_modality_features(real_lab_real_unlab)
+
+    # Project source fusion through cross-modal transformer
+    predicted_cls = fused_projector(real_lab_hal_unlab_fusion)
+
+    # Compute MSE loss on CLS tokens only
+    loss = 0.0
+    for mod in all_modalities:
+        target = target_fusion[mod]['x_norm_clstoken']
+        predicted = predicted_cls[mod]
+        loss += mse_criteria(target, predicted)
+
+    return loss
+
+
 def _delulu_stage1_train_fused_projectors(
     evan, unlabeled_train_loader, device, modality_bands_dict,
     unlabeled_modalities, labeled_modalities, all_modalities,
-    intermediate_projectors, lr, epochs, objective="transfer"
+    intermediate_projectors, lr, epochs, objective="transfer",
+    val_loader=None
 ):
     """Stage 1: Learn fused projector on unlabeled multimodal data.
 
@@ -579,13 +636,19 @@ def _delulu_stage1_train_fused_projectors(
 
     Uses a cross-modal transformer that processes concatenated full sequences,
     allowing cross-modal attention. Loss computed on CLS tokens only.
+
+    If val_loader is provided, tracks best projector based on validation loss.
     """
+    import copy
+
     # Peeking skips stage 1 entirely - no projector needed
     if objective == "peeking":
         print(f"\n--- Stage 1: Skipped (peeking objective) ---")
         return None
 
     print(f"\n--- Stage 1: Learning cross-modal fused projector ({objective}) ---")
+    if val_loader is not None:
+        print(f"  Using validation set for model selection")
 
     fused_projector = CrossModalFusedProjector(
         embed_dim=evan.embed_dim,
@@ -597,7 +660,9 @@ def _delulu_stage1_train_fused_projectors(
 
     optimizer = torch.optim.AdamW(fused_projector.parameters(), lr=lr)
     scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
-    mse_criteria = nn.MSELoss()
+
+    best_val_loss = float('inf')
+    best_projector_state = None
 
     for epoch in range(epochs):
         fused_projector.train()
@@ -605,50 +670,11 @@ def _delulu_stage1_train_fused_projectors(
         pbar = tqdm(unlabeled_train_loader, desc=f"Fused Projector Epoch {epoch+1}/{epochs}")
 
         for batch in pbar:
-            multimodal_input = create_multimodal_batch(
-                batch, modality_bands_dict=modality_bands_dict,
-                modalities=(*labeled_modalities, *unlabeled_modalities)
+            loss = _delulu_stage1_compute_loss(
+                evan, batch, device, modality_bands_dict,
+                unlabeled_modalities, labeled_modalities, all_modalities,
+                intermediate_projectors, fused_projector, objective
             )
-            multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
-
-            with torch.no_grad():
-                real_intermediate = evan.forward_modality_specific_features(multimodal_input)
-
-            # Hallucinate intermediate features using full sequence projection
-            hallucinated_intermediate = hallucinate_intermediate_features(
-                real_intermediate, tuple(all_modalities), tuple(all_modalities),
-                intermediate_projectors
-            )
-
-            # Source is always real_lab + hallucinated_unlab
-            real_lab_hal_unlab = merge_intermediate_features(
-                real_intermediate, hallucinated_intermediate,
-                labeled_modalities, unlabeled_modalities
-            )
-            real_lab_hal_unlab_fusion = evan.forward_fusion_from_modality_features(real_lab_hal_unlab)
-
-            # Target depends on objective
-            if objective == "transfer":
-                # Target: real_unlab + hallucinated_lab
-                real_unlab_hal_lab = merge_intermediate_features(
-                    real_intermediate, hallucinated_intermediate,
-                    unlabeled_modalities, labeled_modalities
-                )
-                target_fusion = evan.forward_fusion_from_modality_features(real_unlab_hal_lab)
-            elif objective == "addition":
-                # Target: real_lab + real_unlab (both modalities real)
-                real_lab_real_unlab = {m: real_intermediate[m] for m in all_modalities}
-                target_fusion = evan.forward_fusion_from_modality_features(real_lab_real_unlab)
-
-            # Project source fusion through cross-modal transformer
-            predicted_cls = fused_projector(real_lab_hal_unlab_fusion)
-
-            # Compute MSE loss on CLS tokens only
-            loss = 0.0
-            for mod in all_modalities:
-                target = target_fusion[mod]['x_norm_clstoken']
-                predicted = predicted_cls[mod]
-                loss += mse_criteria(target, predicted)
 
             optimizer.zero_grad()
             loss.backward()
@@ -658,9 +684,36 @@ def _delulu_stage1_train_fused_projectors(
             train_loss += loss.item()
             pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'})
 
-        avg_loss = train_loss / len(unlabeled_train_loader)
-        scheduler.step(avg_loss)
-        print(f"  Fused Projector Epoch {epoch+1}: avg loss = {avg_loss:.4f}")
+        avg_train_loss = train_loss / len(unlabeled_train_loader)
+        scheduler.step(avg_train_loss)
+
+        # Validation
+        if val_loader is not None:
+            fused_projector.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    loss = _delulu_stage1_compute_loss(
+                        evan, batch, device, modality_bands_dict,
+                        unlabeled_modalities, labeled_modalities, all_modalities,
+                        intermediate_projectors, fused_projector, objective
+                    )
+                    val_loss += loss.item()
+            avg_val_loss = val_loss / len(val_loader)
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_projector_state = copy.deepcopy(fused_projector.state_dict())
+                print(f"  Epoch {epoch+1}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f} (new best)")
+            else:
+                print(f"  Epoch {epoch+1}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
+        else:
+            print(f"  Fused Projector Epoch {epoch+1}: avg loss = {avg_train_loss:.4f}")
+
+    # Load best projector if validation was used
+    if val_loader is not None and best_projector_state is not None:
+        fused_projector.load_state_dict(best_projector_state)
+        print(f"  Loaded best projector with val_loss={best_val_loss:.4f}")
 
     fused_projector.eval()
     for p in fused_projector.parameters():
@@ -669,21 +722,82 @@ def _delulu_stage1_train_fused_projectors(
     return fused_projector
 
 
+def _delulu_stage2_compute_loss(
+    model, evan, batch, device, modality_bands_dict,
+    unlabeled_modalities, labeled_modalities, all_modalities,
+    intermediate_projectors, fused_projector
+):
+    """Compute stage 2 pseudo-supervision loss for a single batch."""
+    ce_criteria = nn.CrossEntropyLoss()
+
+    labels = batch["label"].to(device)
+    labmod_input = create_multimodal_batch(
+        batch, modality_bands_dict=modality_bands_dict,
+        modalities=(*labeled_modalities,)
+    )
+    labmod_input = {k: v.to(device) for k, v in labmod_input.items()}
+
+    with torch.no_grad():
+        labmod_intermediate = evan.forward_modality_specific_features(labmod_input)
+
+    hallucinated_intermediate = hallucinate_intermediate_features(
+        labmod_intermediate, labeled_modalities, unlabeled_modalities,
+        intermediate_projectors
+    )
+
+    real_lab_hal_unlab = merge_intermediate_features(
+        labmod_intermediate, hallucinated_intermediate,
+        labeled_modalities, unlabeled_modalities
+    )
+
+    with torch.no_grad():
+        hallucinated_fused = evan.forward_fusion_from_modality_features(real_lab_hal_unlab)
+
+    # Apply cross-modal projector if available (not peeking)
+    if fused_projector is not None:
+        projected_cls = fused_projector(hallucinated_fused)
+    else:
+        projected_cls = None
+
+    all_logits = []
+    for mod in all_modalities:
+        if projected_cls is not None:
+            fused_cls = projected_cls[mod]
+        else:
+            fused_cls = hallucinated_fused[mod]['x_norm_clstoken']
+        prediction = model.modality_classifiers[mod](fused_cls)
+        all_logits.append(prediction)
+
+    prediction = torch.stack(all_logits).mean(dim=0)
+    loss = ce_criteria(prediction, labels)
+    return loss
+
+
 def _delulu_stage2_train_classifier(
     model, evan, labeled_train_loader, device, modality_bands_dict,
     unlabeled_modalities, labeled_modalities, all_modalities,
     intermediate_projectors, fused_projector, lr, epochs,
-    test_loader=None, eval_every_n_epochs=4, objective="transfer"
+    test_loader=None, eval_every_n_epochs=4, objective="transfer",
+    val_loader=None
 ):
     """Stage 2: Train classifier on labeled monomodal data with hallucinated features.
 
     For objective="transfer"/"addition": apply fused_projector before classifier
     For objective="peeking": skip projector (None), use fused CLS directly
 
-    If test_loader is provided, runs evaluation every eval_every_n_epochs epochs.
+    If val_loader is provided, tracks best classifier based on validation loss.
+    If test_loader is provided, runs evaluation every eval_every_n_epochs epochs (oracle metric).
     """
+    import copy
+
     print(f"\n--- Stage 2: Training classifier on labeled monomodal data ({objective}) ---")
+    if val_loader is not None:
+        print(f"  Using validation set for model selection")
+
     best_acc = 0
+    best_val_loss = float('inf')
+    best_classifier_state = None
+
     ce_criteria = nn.CrossEntropyLoss()
     model.freeze_all()
     model.set_requires_grad("all", classifier=True)
@@ -698,46 +812,11 @@ def _delulu_stage2_train_classifier(
         pbar = tqdm(labeled_train_loader, desc=f"Classifier Epoch {epoch+1}/{epochs}")
 
         for batch in pbar:
-            labels = batch["label"].to(device)
-            labmod_input = create_multimodal_batch(
-                batch, modality_bands_dict=modality_bands_dict,
-                modalities=(*labeled_modalities,)
+            loss = _delulu_stage2_compute_loss(
+                model, evan, batch, device, modality_bands_dict,
+                unlabeled_modalities, labeled_modalities, all_modalities,
+                intermediate_projectors, fused_projector
             )
-            labmod_input = {k: v.to(device) for k, v in labmod_input.items()}
-
-            with torch.no_grad():
-                labmod_intermediate = evan.forward_modality_specific_features(labmod_input)
-
-            hallucinated_intermediate = hallucinate_intermediate_features(
-                labmod_intermediate, labeled_modalities, unlabeled_modalities,
-                intermediate_projectors
-            )
-
-            real_lab_hal_unlab = merge_intermediate_features(
-                labmod_intermediate, hallucinated_intermediate,
-                labeled_modalities, unlabeled_modalities
-            )
-
-            with torch.no_grad():
-                hallucinated_fused = evan.forward_fusion_from_modality_features(real_lab_hal_unlab)
-
-            # Apply cross-modal projector if available (not peeking)
-            if fused_projector is not None:
-                projected_cls = fused_projector(hallucinated_fused)
-            else:
-                projected_cls = None
-
-            all_logits = []
-            for mod in all_modalities:
-                if projected_cls is not None:
-                    fused_cls = projected_cls[mod]
-                else:
-                    fused_cls = hallucinated_fused[mod]['x_norm_clstoken']
-                prediction = model.modality_classifiers[mod](fused_cls)
-                all_logits.append(prediction)
-
-            prediction = torch.stack(all_logits).mean(dim=0)
-            loss = ce_criteria(prediction, labels)
 
             optimizer.zero_grad()
             loss.backward()
@@ -747,10 +826,31 @@ def _delulu_stage2_train_classifier(
             train_loss += loss.item()
             pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'})
 
-        avg_loss = train_loss / len(labeled_train_loader)
-        scheduler.step(avg_loss)
+        avg_train_loss = train_loss / len(labeled_train_loader)
+        scheduler.step(avg_train_loss)
 
-        # Run evaluation every n epochs
+        # Validation-based model selection (pseudo-supervision loss on val set)
+        if val_loader is not None:
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    loss = _delulu_stage2_compute_loss(
+                        model, evan, batch, device, modality_bands_dict,
+                        unlabeled_modalities, labeled_modalities, all_modalities,
+                        intermediate_projectors, fused_projector
+                    )
+                    val_loss += loss.item()
+            avg_val_loss = val_loss / len(val_loader)
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_classifier_state = copy.deepcopy(model.modality_classifiers.state_dict())
+                print(f"  Epoch {epoch+1}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f} (new best)")
+            else:
+                print(f"  Epoch {epoch+1}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
+
+        # Run test evaluation every n epochs (oracle metric, not used for model selection)
         if test_loader is not None and (epoch + 1) % eval_every_n_epochs == 0:
             curr_acc = _delulu_stage3_test(
                 model, evan, test_loader, device, modality_bands_dict,
@@ -759,6 +859,12 @@ def _delulu_stage2_train_classifier(
             )
             if curr_acc > best_acc:
                 best_acc = curr_acc
+
+    # Load best classifier if validation was used
+    if val_loader is not None and best_classifier_state is not None:
+        model.modality_classifiers.load_state_dict(best_classifier_state)
+        print(f"  Loaded best classifier with val_loss={best_val_loss:.4f}")
+
     return best_acc
 
 
@@ -886,7 +992,8 @@ def _delulu_stage3_test(
 def delulu_supervision(
     model, unlabeled_train_loader, labeled_train_loader, test_loader,
     device, modality_bands_dict, unlabeled_modalities, labeled_modalities,
-    intermediate_projectors, lr, epochs, eval_every_n_epochs=4, objective="transfer"
+    intermediate_projectors, lr, epochs, eval_every_n_epochs=4, objective="transfer",
+    val1_loader=None, val2_loader=None
 ):
     """
     Hallucination-based supervision with different objectives.
@@ -921,6 +1028,8 @@ def delulu_supervision(
         epochs: Number of training epochs
         eval_every_n_epochs: Evaluation frequency in Stage 2
         objective: One of "transfer", "addition", "peeking"
+        val1_loader: Validation loader from train1 (monomodal, for stage 2)
+        val2_loader: Validation loader from train2 (multimodal, for stage 1)
 
     Returns:
         Tuple of (best_acc, softvote_test_acc)
@@ -935,24 +1044,28 @@ def delulu_supervision(
     print(f"  Labeled modality: {labeled_modalities}")
     print(f"  Unlabeled modality: {unlabeled_modalities}")
     print(f"  Available intermediate projectors: {list(intermediate_projectors.keys())}")
+    if val1_loader is not None or val2_loader is not None:
+        print(f"  Using validation sets for model selection (val1={val1_loader is not None}, val2={val2_loader is not None})")
 
     intermediate_projectors.eval()
     for p in intermediate_projectors.parameters():
         p.requires_grad = False
 
-    # Stage 1
+    # Stage 1: trains on unlabeled multimodal (train2), validated on val2
     fused_projector = _delulu_stage1_train_fused_projectors(
         evan, unlabeled_train_loader, device, modality_bands_dict,
         unlabeled_modalities, labeled_modalities, all_modalities,
-        intermediate_projectors, lr, epochs, objective=objective
+        intermediate_projectors, lr, epochs, objective=objective,
+        val_loader=val2_loader
     )
 
-    # Stage 2 (with periodic evaluation)
+    # Stage 2: trains on labeled monomodal (train1), validated on val1
     best_acc = _delulu_stage2_train_classifier(
         model, evan, labeled_train_loader, device, modality_bands_dict,
         unlabeled_modalities, labeled_modalities, all_modalities,
         intermediate_projectors, fused_projector, lr, epochs,
-        test_loader=test_loader, eval_every_n_epochs=eval_every_n_epochs, objective=objective
+        test_loader=test_loader, eval_every_n_epochs=eval_every_n_epochs, objective=objective,
+        val_loader=val1_loader
     )
 
     # Stage 3

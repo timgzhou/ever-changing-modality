@@ -371,3 +371,83 @@ def get_loaders(bs=32,nw=4):
     train2_loader = DataLoader(train2_dataset, batch_size=bs, shuffle=True, num_workers=nw)
     test_loader = DataLoader(test_dataset_full, batch_size=bs, shuffle=False, num_workers=nw)
     return train1_loader, train2_loader, test_loader
+
+
+def get_loaders_with_val(bs=32, nw=4, val_ratio=0.1, seed=42):
+    """
+    Get dataloaders with validation splits from both train1 and train2.
+
+    Stage 1 (self-supervised on multimodal): uses train2, validated on val2
+    Stage 2 (pseudo-supervised on monomodal): uses train1, validated on val1
+
+    Args:
+        bs: Batch size
+        nw: Number of workers
+        val_ratio: Fraction of each split to use for validation (default: 0.1)
+        seed: Random seed for reproducible val split
+
+    Returns:
+        train1_loader: Labeled training data (monomodal, for stage 2)
+        val1_loader: Validation from train1 (monomodal, for stage 2)
+        train2_loader: Unlabeled training data (multimodal, for stage 1)
+        val2_loader: Validation from train2 (multimodal, for stage 1)
+        test_loader: Test data
+    """
+    import random
+
+    bands_full = tuple(ALL_BAND_NAMES)
+    resize_transform = DictTransform(transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True))
+
+    train_dataset_full = EuroSAT(
+        root='datasets',
+        split='train',
+        bands=bands_full,
+        transforms=resize_transform,
+        download=True,
+        checksum=False
+    )
+
+    train1_indices = load_split_indices('datasets/eurosat-train1.txt', train_dataset_full)
+    train2_indices = load_split_indices('datasets/eurosat-train2.txt', train_dataset_full)
+
+    rng = random.Random(seed)
+
+    # Split train1 into train1 and val1
+    train1_indices_shuffled = train1_indices.copy()
+    rng.shuffle(train1_indices_shuffled)
+    val1_size = int(len(train1_indices_shuffled) * val_ratio)
+    val1_indices = train1_indices_shuffled[:val1_size]
+    train1_indices_remaining = train1_indices_shuffled[val1_size:]
+
+    # Split train2 into train2 and val2
+    train2_indices_shuffled = train2_indices.copy()
+    rng.shuffle(train2_indices_shuffled)
+    val2_size = int(len(train2_indices_shuffled) * val_ratio)
+    val2_indices = train2_indices_shuffled[:val2_size]
+    train2_indices_remaining = train2_indices_shuffled[val2_size:]
+
+    train1_dataset = Subset(train_dataset_full, train1_indices_remaining)
+    val1_dataset = Subset(train_dataset_full, val1_indices)
+    train2_dataset = Subset(train_dataset_full, train2_indices_remaining)
+    val2_dataset = Subset(train_dataset_full, val2_indices)
+
+    test_dataset_full = EuroSAT(
+        root='datasets',
+        split='test',
+        bands=bands_full,
+        transforms=resize_transform,
+        download=True,
+        checksum=False
+    )
+
+    print(f"Split train1 into {len(train1_indices_remaining)} train and {len(val1_indices)} val samples ({val_ratio*100:.0f}% val).")
+    print(f"Split train2 into {len(train2_indices_remaining)} train and {len(val2_indices)} val samples ({val_ratio*100:.0f}% val).")
+    print(f"Test samples: {len(test_dataset_full)}")
+
+    # Create dataloaders
+    train1_loader = DataLoader(train1_dataset, batch_size=bs, shuffle=True, num_workers=nw)
+    val1_loader = DataLoader(val1_dataset, batch_size=bs, shuffle=False, num_workers=nw)
+    train2_loader = DataLoader(train2_dataset, batch_size=bs, shuffle=True, num_workers=nw)
+    val2_loader = DataLoader(val2_dataset, batch_size=bs, shuffle=False, num_workers=nw)
+    test_loader = DataLoader(test_dataset_full, batch_size=bs, shuffle=False, num_workers=nw)
+    return train1_loader, val1_loader, train2_loader, val2_loader, test_loader
