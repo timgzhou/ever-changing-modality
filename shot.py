@@ -285,8 +285,6 @@ def train_shot(
     all_modalities = list(set(mae_modalities + latent_reconstruct_modalities))
 
     model.freeze_all()
-    # TODO NOTE here we should disable patch_embedders for rgb
-    # NOTE mfla is now disabled for ablation.
     model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=False, msla=True, patch_embedders=True) # blocks are true, no need for mfla and msla
     if args.train_components=="full":
         model.set_requires_grad("backbone", mask_token=False, blocks=True, norm=True) #use new mask tokens instead, see below
@@ -302,8 +300,6 @@ def train_shot(
     intermediate_projectors = create_intermediate_projectors(embed_dim, all_modalities, device)
     post_fusion_cls_projector = create_fuse_cls_projectors(embed_dim, mae_modalities, latent_reconstruct_modalities, device)
 
-    # Create frozen teacher for latent targets
-    # TODO check if teacher_evan here is still behaving right when it only takes rgb, it should be.
     teacher_evan = copy.deepcopy(evan)
     teacher_evan.freeze_all()
     teacher_evan.eval()
@@ -429,7 +425,7 @@ def train_shot(
                 latent_loss = mse_fn(projected_cls, teacher_cls) + mse_fn(projected_patches, teacher_patches)
                 total_loss = total_loss + latent_loss
                 batch_latent_loss += latent_loss.item()
-            # Fused CLStoken loss: clstoken from mae_modalities should be mlp predictable by clstokens from latent_reconstruction_modalities
+            # Fused CLStoken loss: clstoken from latent_reconstruction_modalities should be mlp predictable by clstokens from mae_modalities
             for mod_mae in mae_modalities:
                 for mod_lat in latent_reconstruct_modalities:
                     mod_mae_cls=student_fused[mod_mae]['x_norm_clstoken']
