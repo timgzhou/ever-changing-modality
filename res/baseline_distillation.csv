@@ -1,0 +1,6 @@
+model_type,teacher_modality,student_modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,temperature,alpha,test_accuracy,best_test_accuracy(oracle),best_epoch,saved_checkpoint,global_rep,teacher_checkpoint
+evan_small,rgb,vre,fft,32,fft,0.0001,22207498,8,2.0,1.0,85.98,85.98,8,checkpoints/evan_distill_rgb_to_vre_20260127_023337.pt,clstoken,checkpoints/rgb_fft.pt
+evan_small,rgb,vre,fft,32,fft,0.0001,22207498,8,2.0,1.0,feature,9.19,11.43,1,84.35,88.04,88.26,checkpoints/evan_distill_rgb_to_vre_20260127_024317.pt,clstoken,checkpoints/rgb_fft.pt
+evan_small,rgb,vre,fft,32,fft,0.0001,22207498,8,2.0,1.0,with_guidance,86.57,86.57,8,,,,checkpoints/evan_distill_rgb_to_vre_20260127_024448.pt,clstoken,checkpoints/rgb_fft.pt
+evan_small,rgb,vre,fft,32,fft,0.0001,22207498,32,2.0,1.0,regular,87.70,87.89,30,,,,checkpoints/evan_distill_rgb_to_vre_20260127_030343.pt,clstoken,checkpoints/rgb_fft.pt
+evan_small,rgb,swir,fft,32,fft,0.0001,22109194,32,2.0,1.0,regular,86.48,86.48,32,,,,checkpoints/evan_distill_rgb_to_swir_20260127_030411.pt,clstoken,checkpoints/rgb_fft.pt
