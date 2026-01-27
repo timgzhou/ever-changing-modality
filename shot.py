@@ -207,16 +207,27 @@ def mask_input(intermediate_projectors, batch_size, n_storage_tokens, num_patche
         # Don't drop all - randomly keep one
         drop_candidates.pop(np.random.randint(len(drop_candidates)))
     available_modalities = [mod for mod in all_modalities if mod not in drop_candidates]
+    has_modality_dropout = len(drop_candidates) > 0
 
     # Generate masks for each modality
+    # Token masking and modality dropout are mutually exclusive to avoid information leakage
     for mod in all_modalities:
-        noise = torch.rand(batch_size, num_patches, device=device)
-        ids_shuffle = torch.argsort(noise, dim=1)
-        mask = torch.ones(batch_size, num_patches, device=device, dtype=torch.bool)
         is_dropped = mod in drop_candidates
         modality_dropped[mod] = is_dropped
-        len_keep_moddrop = 0 if is_dropped else len_keep
-        mask.scatter_(1, ids_shuffle[:, :len_keep_moddrop], False)
+
+        if is_dropped:
+            # Fully mask dropped modalities
+            mask = torch.ones(batch_size, num_patches, device=device, dtype=torch.bool)
+        elif has_modality_dropout:
+            # No token masking when simulating missing modalities
+            mask = torch.zeros(batch_size, num_patches, device=device, dtype=torch.bool)
+        else:
+            # Normal MAE token masking when all modalities present
+            noise = torch.rand(batch_size, num_patches, device=device)
+            ids_shuffle = torch.argsort(noise, dim=1)
+            mask = torch.ones(batch_size, num_patches, device=device, dtype=torch.bool)
+            mask.scatter_(1, ids_shuffle[:, :len_keep], False)
+
         modality_masks[mod] = mask
 
     # Compute projected sequences from all available modalities to all target modalities
