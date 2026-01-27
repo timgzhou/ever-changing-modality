@@ -218,3 +218,5 @@ wandb
 res/legacy
 sh
 res/full/
+
+.DS_Store
