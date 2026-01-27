@@ -97,3 +97,15 @@ vre,swir,shot,0.0001,64,0.85,0.4,full,42703616,checkpoints/vre_fft.pt,checkpoint
 vre,rgb,shot,0.0001,64,0.85,0.4,full,42900480,checkpoints/vre_fft.pt,checkpoints/vre_to_rgb.pt
 swir,vre,shot,0.0001,64,0.85,0.4,full,42802176,checkpoints/swir_fft.pt,checkpoints/swir_to_vre.pt
 swir,nir,shot,0.0001,64,0.85,0.4,full,42605312,checkpoints/swir_fft.pt,checkpoints/swir_to_nir.pt
+rgb,nir,shot,0.0001,80,0.85,0.4,full,45661184,checkpoints/rgb_fft.pt,checkpoints/rgb_to_nir.pt
+rgb,vre,shot,0.0001,80,0.85,0.4,full,45858048,checkpoints/rgb_fft.pt,checkpoints/rgb_to_vre.pt
+rgb,swir,shot,0.0001,80,0.85,0.4,full,45661184,checkpoints/rgb_fft.pt,checkpoints/rgb_to_swir.pt
+nir,swir,shot,0.0001,80,0.85,0.4,full,45562880,checkpoints/nir_fft.pt,checkpoints/nir_to_swir.pt
+vre,swir,shot,0.0001,80,0.85,0.4,full,45661184,checkpoints/vre_fft.pt,checkpoints/vre_to_swir.pt
+nir,vre,shot,0.0001,80,0.85,0.4,full,45759744,checkpoints/nir_fft.pt,checkpoints/nir_to_vre.pt
+swir,rgb,shot,0.0001,80,0.85,0.4,full,45759744,checkpoints/swir_fft.pt,checkpoints/swir_to_rgb.pt
+vre,nir,shot,0.0001,80,0.85,0.4,full,45661184,checkpoints/vre_fft.pt,checkpoints/vre_to_nir.pt
+nir,rgb,shot,0.0001,80,0.85,0.4,full,45759744,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb.pt
+vre,rgb,shot,0.0001,80,0.85,0.4,full,45858048,checkpoints/vre_fft.pt,checkpoints/vre_to_rgb.pt
+swir,vre,shot,0.0001,80,0.85,0.4,full,45759744,checkpoints/swir_fft.pt,checkpoints/swir_to_vre.pt
+swir,nir,shot,0.0001,80,0.85,0.4,full,45562880,checkpoints/swir_fft.pt,checkpoints/swir_to_nir.pt

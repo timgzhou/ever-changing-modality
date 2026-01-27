@@ -141,23 +141,18 @@ def create_mae_decoders(hidden_dim,patch_size,modality_bands_dict,mae_modalities
 
 # ==================== SHOT TRAINING COMPONENT ====================
 
-def create_latent_projectors(hidden_dim, latent_reconstruct_modalities, device):
-    """Create separate projectors for CLS tokens and patch tokens."""
-    cls_projectors = nn.ModuleDict()
-    patch_projectors = nn.ModuleDict()
+def create_latent_projectors(hidden_dim, latent_reconstruct_modalities, device, num_heads=8, ffn_factor=4):
+    """Create transformer-based projectors for latent matching (CLS + patches jointly)."""
+    projectors = nn.ModuleDict()
     for mod in latent_reconstruct_modalities:
-        cls_projectors[mod] = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
+        projectors[mod] = SequenceProjector(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            ffn_factor=ffn_factor,
+            num_layers=2
         ).to(device)
-        patch_projectors[mod] = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        ).to(device)
-        print(f"  Initialized Latent Projectors (CLS + Patch) for {mod}")
-    return cls_projectors, patch_projectors
+        print(f"  Initialized Latent Projector (Transformer) for {mod}")
+    return projectors
 
 def create_intermediate_projectors(hidden_dim, all_modalities, device, num_heads=8, ffn_factor=4):
     """Create bidirectional projectors to map full sequences (CLS + storage + patches) between all modality pairs."""
@@ -303,7 +298,7 @@ def train_shot(
 
     # Create updatable componenets for training
     mae_decoders=create_mae_decoders(embed_dim,patch_size,modality_bands_dict,mae_modalities,device)
-    latent_cls_projectors, latent_patch_projectors = create_latent_projectors(embed_dim,latent_reconstruct_modalities,device)
+    latent_projectors = create_latent_projectors(embed_dim, latent_reconstruct_modalities, device)
     intermediate_projectors = create_intermediate_projectors(embed_dim, all_modalities, device)
     post_fusion_cls_projector = create_fuse_cls_projectors(embed_dim, mae_modalities, latent_reconstruct_modalities, device)
 
@@ -315,7 +310,7 @@ def train_shot(
     trainable_in_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
     total_in_evan = sum(p.numel() for p in evan.parameters())
     trainable_decoder = sum(p.numel() for p in mae_decoders.parameters())
-    trainable_projector = sum(p.numel() for p in latent_cls_projectors.parameters()) + sum(p.numel() for p in latent_patch_projectors.parameters())
+    trainable_projector = sum(p.numel() for p in latent_projectors.parameters())
     trainable_intermediate_proj = sum(p.numel() for p in intermediate_projectors.parameters())
     trainable_fused_cls_projector = sum(p.numel() for p in post_fusion_cls_projector.parameters())
     trainable_total = trainable_in_evan + trainable_decoder + trainable_projector + trainable_intermediate_proj + trainable_fused_cls_projector
@@ -329,8 +324,7 @@ def train_shot(
     params = (
         list(filter(lambda p: p.requires_grad, evan.parameters())) +
         list(mae_decoders.parameters()) +
-        list(latent_cls_projectors.parameters()) +
-        list(latent_patch_projectors.parameters()) +
+        list(latent_projectors.parameters()) +
         list(intermediate_projectors.parameters()) +
         list(post_fusion_cls_projector.parameters())
     )
@@ -349,8 +343,7 @@ def train_shot(
     for epoch in range(args.epochs):
         evan.train()
         mae_decoders.train()
-        latent_cls_projectors.train()
-        latent_patch_projectors.train()
+        latent_projectors.train()
         intermediate_projectors.train()
         post_fusion_cls_projector.train()
         train_loss = 0.0
@@ -418,15 +411,20 @@ def train_shot(
                 total_loss = total_loss + mae_loss
                 batch_mae_loss += mae_loss.item()
 
-            # Latent loss: project and match teacher, separate projectors for CLS and patches
+            # Latent loss: project CLS + patches jointly through transformer
             for mod in latent_reconstruct_modalities:
                 student_patches = student_fused[mod]['x_norm_patchtokens']  # [B, num_patches, embed_dim]
                 teacher_patches = teacher_out[mod]['x_norm_patchtokens'].detach()  # [B, num_patches, embed_dim]
                 student_cls = student_fused[mod]['x_norm_clstoken']  # [B, embed_dim]
                 teacher_cls = teacher_out[mod]['x_norm_clstoken'].detach()  # [B, embed_dim]
 
-                projected_cls = latent_cls_projectors[mod](student_cls)  # [B, embed_dim]
-                projected_patches = latent_patch_projectors[mod](student_patches)  # [B, num_patches, embed_dim]
+                # Concatenate CLS + patches: [B, 1+num_patches, embed_dim]
+                student_seq = torch.cat([student_cls.unsqueeze(1), student_patches], dim=1)
+                projected_seq = latent_projectors[mod](student_seq)  # [B, 1+num_patches, embed_dim]
+
+                # Split back into CLS and patches
+                projected_cls = projected_seq[:, 0, :]  # [B, embed_dim]
+                projected_patches = projected_seq[:, 1:, :]  # [B, num_patches, embed_dim]
 
                 latent_loss = mse_fn(projected_cls, teacher_cls) + mse_fn(projected_patches, teacher_patches)
                 total_loss = total_loss + latent_loss
@@ -491,4 +489,4 @@ def train_shot(
         print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}, Pre-fusion: {train_pre_fusion_loss:.4f}, Post-fusion cls: {train_post_fusion_cls_loss:.4f}, lr: {optimizer.param_groups[0]['lr']:.6f}")
 
     print("\n=== Phase 2 (Fusion MAE Training) complete ===")
-    return mae_decoders, latent_cls_projectors, latent_patch_projectors, intermediate_projectors, trainable_total
+    return mae_decoders, latent_projectors, intermediate_projectors, trainable_total

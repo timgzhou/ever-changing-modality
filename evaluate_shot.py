@@ -64,7 +64,7 @@ intermediate_projectors = create_intermediate_projectors(
     all_modalities=modalities,
     device=device
 )
-
+"""
 # ================================================ SUPERVISED TRAINING =============================================
 print("\n\nSUPERVISED EVALUATION\n")
 
@@ -100,7 +100,7 @@ csv_results.append({
 print("\n" + "="*70)
 print("=== Evaluating (hallucinated) fusion with monomodal under real supervision ===")
 print("="*70)
-model = load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device)
+# model = load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device)
 # Support both old and new checkpoint key names
 projector_state_dict = checkpoint.get('intermediate_projectors_state_dict') or checkpoint.get('cls_projectors_state_dict')
 intermediate_projectors.load_state_dict(projector_state_dict, strict=False)
@@ -142,16 +142,15 @@ for evaluated_modality in modalities:
         "test_acc": test_acc_woh,
         "best_test_acc": best_test_acc_woh,
     })
-
+"""
 
 
 # ======================!!UNSUPERVISED TRAINING!!======================
-# 1. hallucinate supervision transfer
+# Evaluate all three delulu objectives: transfer, addition, peeking
 print("\n" + "="*70)
-print("=== Evaluating (hallucinated) fusion with monomodal under pseudo supervision ===")
+print("=== Evaluating delulu supervision with all objectives ===")
 print("="*70)
 
-model = load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device)
 # Support both old and new checkpoint key names
 projector_state_dict = checkpoint.get('intermediate_projectors_state_dict') or checkpoint.get('cls_projectors_state_dict')
 intermediate_projectors.load_state_dict(projector_state_dict)
@@ -159,27 +158,50 @@ print(f"Loaded SHOT-trained intermediate_projectors: {list(intermediate_projecto
 starting_modality = model.evan.starting_modality
 unlabeld_modalities = list(set(model.evan.supported_modalities)-{starting_modality})
 
-best_test_acc, test_acc = delulu_supervision(
-    model=model,
-    unlabeled_train_loader=train2_loader,
-    labeled_train_loader=train1_loader,
-    test_loader=test_loader,
-    device=device,
-    modality_bands_dict=modality_bands_dict,
-    unlabeled_modalities=unlabeld_modalities,
-    labeled_modalities=[starting_modality],
-    intermediate_projectors=intermediate_projectors,
-    lr=eval_lr,
-    epochs=num_supervised_epochs,
-    eval_every_n_epochs=1
-)
-csv_results.append({
-    "eval_type": "hallucinated-multimodal-pseudo-supervision",
-    "real_modality": "+".join(unlabeld_modalities),
-    "hallucinated_modality": starting_modality,
-    "test_acc": test_acc,
-    "best_test_acc": best_test_acc,
-})
+for objective in ["transfer", "addition", "peeking"]:
+    print("\n" + "-"*70)
+    print(f"--- Running delulu_supervision with objective={objective} ---")
+    print("-"*70)
+
+    model = load_model_and_unfreeze_clssifier(checkpoint_path, clssifier_strategy, device)
+
+    best_test_acc, test_acc = delulu_supervision(
+        model=model,
+        unlabeled_train_loader=train2_loader,
+        labeled_train_loader=train1_loader,
+        test_loader=test_loader,
+        device=device,
+        modality_bands_dict=modality_bands_dict,
+        unlabeled_modalities=unlabeld_modalities,
+        labeled_modalities=[starting_modality],
+        intermediate_projectors=intermediate_projectors,
+        lr=eval_lr,
+        epochs=num_supervised_epochs,
+        eval_every_n_epochs=1,
+        objective=objective
+    )
+
+    # Determine real/hallucinated modalities based on objective for logging
+    if objective == "transfer":
+        # Test on unlabeled only, hallucinate labeled
+        real_mod = "+".join(unlabeld_modalities)
+        hal_mod = starting_modality
+    elif objective == "addition":
+        # Test on both modalities (all real)
+        real_mod = "+".join([starting_modality] + unlabeld_modalities)
+        hal_mod = None
+    elif objective == "peeking":
+        # Test on labeled only, hallucinate unlabeled
+        real_mod = starting_modality
+        hal_mod = "+".join(unlabeld_modalities)
+
+    csv_results.append({
+        "eval_type": f"delulu-{objective}",
+        "real_modality": real_mod,
+        "hallucinated_modality": hal_mod,
+        "test_acc": test_acc,
+        "best_test_acc": best_test_acc,
+    })
 
 # Write CSV results (append to single file)
 fieldnames = [

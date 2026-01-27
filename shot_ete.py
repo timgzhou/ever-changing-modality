@@ -88,7 +88,7 @@ def main():
     # ========================================== TRAIN SHOT ===========================================
     if args.train_method=="shot":
         print(f"\n Using SHOT (MAE + Latent Distillation + Sequence Projection) training method for fusion blocks")
-        _,_,_,intermediate_projectors,trainable_total=train_shot(
+        _,_,intermediate_projectors,trainable_total=train_shot(
             model=model,
             train_loader=train2_loader,
             device=device,
