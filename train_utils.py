@@ -992,7 +992,7 @@ def _delulu_stage3_test(
 def delulu_supervision(
     model, unlabeled_train_loader, labeled_train_loader, test_loader,
     device, modality_bands_dict, unlabeled_modalities, labeled_modalities,
-    intermediate_projectors, lr, epochs, eval_every_n_epochs=4, objective="transfer",
+    intermediate_projectors, lr, epochs, stage2epochs=8, eval_every_n_epochs=4, objective="transfer",
     val1_loader=None, val2_loader=None
 ):
     """
@@ -1063,7 +1063,7 @@ def delulu_supervision(
     best_acc = _delulu_stage2_train_classifier(
         model, evan, labeled_train_loader, device, modality_bands_dict,
         unlabeled_modalities, labeled_modalities, all_modalities,
-        intermediate_projectors, fused_projector, lr, epochs,
+        intermediate_projectors, fused_projector, lr, stage2epochs,
         test_loader=test_loader, eval_every_n_epochs=eval_every_n_epochs, objective=objective,
         val_loader=val1_loader
     )

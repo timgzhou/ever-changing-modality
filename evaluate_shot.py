@@ -99,6 +99,7 @@ for objective in ["transfer", "addition", "peeking"]:
         intermediate_projectors=intermediate_projectors,
         lr=eval_lr,
         epochs=num_supervised_epochs,
+        stage2epochs=8,
         eval_every_n_epochs=1,
         objective=objective,
         val1_loader=val1_loader,
