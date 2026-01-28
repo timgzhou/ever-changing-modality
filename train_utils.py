@@ -925,6 +925,8 @@ def _delulu_stage2_train_classifier(
         pbar = tqdm(labeled_train_loader, desc=f"Classifier Epoch {epoch+1}/{epochs}")
 
         for batch in pbar:
+            optimizer.zero_grad()
+
             # Supervised loss on labeled batch (existing)
             ce_loss = _delulu_stage2_compute_loss(
                 model, evan, batch, device, modality_bands_dict,
@@ -933,30 +935,43 @@ def _delulu_stage2_train_classifier(
             )
 
             # Distillation loss on unlabeled multimodal batch (new)
+            # Use gradient accumulation to avoid OOM (backprop separately)
             distill_loss = None
+            distill_loss_val = 0.0
             if distill_iter is not None:
+                # Backprop CE loss first (scaled), then free memory
+                scaled_ce = (1 - distillation_weight) * ce_loss
+                scaled_ce.backward()
+                ce_loss_val = ce_loss.item()
+                del ce_loss, scaled_ce
+
+                # Now compute and backprop distillation loss
                 distill_batch = next(distill_iter)
                 distill_loss = _delulu_stage2_compute_distillation_loss(
                     model, evan, teacher_model, distill_batch, device,
                     modality_bands_dict, unlabeled_modalities, labeled_modalities,
                     all_modalities, intermediate_projectors, objective, temperature
                 )
-                loss = (1 - distillation_weight) * ce_loss + distillation_weight * distill_loss
-                train_distill_loss += distill_loss.item()
+                scaled_distill = distillation_weight * distill_loss
+                scaled_distill.backward()
+                distill_loss_val = distill_loss.item()
+                total_loss_val = (1 - distillation_weight) * ce_loss_val + distillation_weight * distill_loss_val
+                train_distill_loss += distill_loss_val
+                train_ce_loss += ce_loss_val
+                train_loss += total_loss_val
             else:
-                loss = ce_loss
+                ce_loss.backward()
+                ce_loss_val = ce_loss.item()
+                train_loss += ce_loss_val
+                train_ce_loss += ce_loss_val
 
-            optimizer.zero_grad()
-            loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(classifier_params, max_norm=5)
             optimizer.step()
 
-            train_loss += loss.item()
-            train_ce_loss += ce_loss.item()
-            postfix = {'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'}
-            if distill_loss is not None:
-                postfix['ce'] = f'{ce_loss.item():.4f}'
-                postfix['distill'] = f'{distill_loss.item():.4f}'
+            postfix = {'loss': f'{total_loss_val if distill_iter else ce_loss_val:.4f}', 'grad': f'{grad_norm:.4f}'}
+            if distill_iter is not None:
+                postfix['ce'] = f'{ce_loss_val:.4f}'
+                postfix['distill'] = f'{distill_loss_val:.4f}'
             pbar.set_postfix(postfix)
 
         avg_train_loss = train_loss / len(labeled_train_loader)

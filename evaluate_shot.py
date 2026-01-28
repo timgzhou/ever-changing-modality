@@ -95,7 +95,7 @@ if args.teacher_checkpoint:
     print(f"Loaded teacher from {args.teacher_checkpoint}")
 
 # Run with and without distillation
-for use_distillation in [False, True]:
+for use_distillation in [True, False]:
     if use_distillation and teacher_model is None:
         continue  # Skip distillation if no teacher provided
 
