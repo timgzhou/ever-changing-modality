@@ -27,8 +27,6 @@ parser.add_argument('--csv_suffix', type=str, default=None, help='suffix to save
 parser.add_argument('--val_ratio', type=float, default=0.1, help='Fraction of train2 to use for validation (default: 0.1)')
 parser.add_argument('--teacher_checkpoint', type=str, default=None,
                     help='Path to teacher checkpoint for distillation (monomodal on starting_modality)')
-parser.add_argument('--distillation_weight', type=float, default=0.5,
-                    help='Weight for distillation loss vs CE loss (default: 0.5)')
 parser.add_argument('--temperature', type=float, default=2.0,
                     help='Softmax temperature for KL divergence (default: 2.0)')
 args = parser.parse_args()
@@ -129,7 +127,6 @@ for use_distillation in [True, False]:
             val1_loader=val1_loader,
             val2_loader=val2_loader,
             teacher_model=teacher_model if use_distillation else None,
-            distillation_weight=args.distillation_weight,
             temperature=args.temperature
         )
 

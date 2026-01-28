@@ -873,7 +873,6 @@ def _delulu_stage2_train_classifier(
     val_loader=None,
     teacher_model=None,
     unlabeled_multimodal_loader=None,
-    distillation_weight=0.5,
     temperature=2.0
 ):
     """Stage 2: Train classifier on labeled monomodal data with hallucinated features.
@@ -885,25 +884,24 @@ def _delulu_stage2_train_classifier(
     If test_loader is provided, runs evaluation every eval_every_n_epochs epochs (oracle metric).
 
     Distillation (optional):
-        If teacher_model and unlabeled_multimodal_loader are provided, interleaves
-        distillation batches from train2 with supervised batches from train1.
-        Combined loss = (1 - distillation_weight) * ce_loss + distillation_weight * distill_loss
+        If teacher_model and unlabeled_multimodal_loader are provided, alternates between:
+        - Pseudo-supervision epochs (CE loss on labeled monomodal data)
+        - Distillation epochs (KL loss on unlabeled multimodal data)
+        This keeps memory usage the same as without distillation.
     """
     import copy
-    from itertools import cycle
 
     print(f"\n--- Stage 2: Training classifier on labeled monomodal data ({objective}) ---")
     if val_loader is not None:
         print(f"  Using validation set for model selection")
 
-    # Setup distillation if enabled
-    distill_iter = None
-    if teacher_model is not None and unlabeled_multimodal_loader is not None:
-        distill_iter = cycle(iter(unlabeled_multimodal_loader))
+    # Check if distillation is enabled
+    use_distillation = teacher_model is not None and unlabeled_multimodal_loader is not None
+    if use_distillation:
         teacher_model.eval()
         for p in teacher_model.parameters():
             p.requires_grad = False
-        print(f"  Distillation enabled: weight={distillation_weight}, temperature={temperature}")
+        print(f"  Distillation enabled: alternating epochs, temperature={temperature}")
 
     best_acc = 0
     best_val_loss = float('inf')
@@ -920,61 +918,53 @@ def _delulu_stage2_train_classifier(
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
-        train_ce_loss = 0.0
-        train_distill_loss = 0.0
-        pbar = tqdm(labeled_train_loader, desc=f"Classifier Epoch {epoch+1}/{epochs}")
 
-        for batch in pbar:
-            optimizer.zero_grad()
+        # Alternate between pseudo-supervision and distillation epochs
+        is_distill_epoch = use_distillation and (epoch % 2 == 1)
 
-            # Supervised loss on labeled batch (existing)
-            ce_loss = _delulu_stage2_compute_loss(
-                model, evan, batch, device, modality_bands_dict,
-                unlabeled_modalities, labeled_modalities, all_modalities,
-                intermediate_projectors, fused_projector
-            )
+        if is_distill_epoch:
+            # Distillation epoch: train on unlabeled multimodal data
+            pbar = tqdm(unlabeled_multimodal_loader, desc=f"Distill Epoch {epoch+1}/{epochs}")
+            for batch in pbar:
+                optimizer.zero_grad()
 
-            # Distillation loss on unlabeled multimodal batch (new)
-            # Use gradient accumulation to avoid OOM (backprop separately)
-            distill_loss = None
-            distill_loss_val = 0.0
-            if distill_iter is not None:
-                # Backprop CE loss first (scaled), then free memory
-                scaled_ce = (1 - distillation_weight) * ce_loss
-                scaled_ce.backward()
-                ce_loss_val = ce_loss.item()
-                del ce_loss, scaled_ce
-
-                # Now compute and backprop distillation loss
-                distill_batch = next(distill_iter)
                 distill_loss = _delulu_stage2_compute_distillation_loss(
-                    model, evan, teacher_model, distill_batch, device,
+                    model, evan, teacher_model, batch, device,
                     modality_bands_dict, unlabeled_modalities, labeled_modalities,
                     all_modalities, intermediate_projectors, objective, temperature
                 )
-                scaled_distill = distillation_weight * distill_loss
-                scaled_distill.backward()
-                distill_loss_val = distill_loss.item()
-                total_loss_val = (1 - distillation_weight) * ce_loss_val + distillation_weight * distill_loss_val
-                train_distill_loss += distill_loss_val
-                train_ce_loss += ce_loss_val
-                train_loss += total_loss_val
-            else:
+
+                distill_loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(classifier_params, max_norm=5)
+                optimizer.step()
+
+                loss_val = distill_loss.item()
+                train_loss += loss_val
+                pbar.set_postfix({'distill': f'{loss_val:.4f}', 'grad': f'{grad_norm:.4f}'})
+
+            avg_train_loss = train_loss / len(unlabeled_multimodal_loader)
+        else:
+            # Pseudo-supervision epoch: train on labeled monomodal data
+            pbar = tqdm(labeled_train_loader, desc=f"CE Epoch {epoch+1}/{epochs}")
+            for batch in pbar:
+                optimizer.zero_grad()
+
+                ce_loss = _delulu_stage2_compute_loss(
+                    model, evan, batch, device, modality_bands_dict,
+                    unlabeled_modalities, labeled_modalities, all_modalities,
+                    intermediate_projectors, fused_projector
+                )
+
                 ce_loss.backward()
-                ce_loss_val = ce_loss.item()
-                train_loss += ce_loss_val
-                train_ce_loss += ce_loss_val
+                grad_norm = torch.nn.utils.clip_grad_norm_(classifier_params, max_norm=5)
+                optimizer.step()
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(classifier_params, max_norm=5)
-            optimizer.step()
+                loss_val = ce_loss.item()
+                train_loss += loss_val
+                pbar.set_postfix({'ce': f'{loss_val:.4f}', 'grad': f'{grad_norm:.4f}'})
 
-            postfix = {'loss': f'{total_loss_val if distill_iter else ce_loss_val:.4f}', 'grad': f'{grad_norm:.4f}'}
-            if distill_iter is not None:
-                postfix['ce'] = f'{ce_loss_val:.4f}'
-                postfix['distill'] = f'{distill_loss_val:.4f}'
-            pbar.set_postfix(postfix)
+            avg_train_loss = train_loss / len(labeled_train_loader)
 
-        avg_train_loss = train_loss / len(labeled_train_loader)
         scheduler.step(avg_train_loss)
 
         # Validation-based model selection (pseudo-supervision loss on val set)
@@ -1142,7 +1132,7 @@ def delulu_supervision(
     device, modality_bands_dict, unlabeled_modalities, labeled_modalities,
     intermediate_projectors, lr, epochs, stage2epochs=8, eval_every_n_epochs=4, objective="transfer",
     val1_loader=None, val2_loader=None,
-    teacher_model=None, distillation_weight=0.5, temperature=2.0
+    teacher_model=None, temperature=2.0
 ):
     """
     Hallucination-based supervision with different objectives.
@@ -1222,7 +1212,6 @@ def delulu_supervision(
         val_loader=val1_loader,
         teacher_model=teacher_model,
         unlabeled_multimodal_loader=unlabeled_train_loader,
-        distillation_weight=distillation_weight,
         temperature=temperature
     )
 
