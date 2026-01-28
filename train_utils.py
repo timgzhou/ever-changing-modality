@@ -873,7 +873,8 @@ def _delulu_stage2_train_classifier(
     val_loader=None,
     teacher_model=None,
     unlabeled_multimodal_loader=None,
-    temperature=2.0
+    temperature=2.0,
+    distill_only=False
 ):
     """Stage 2: Train classifier on labeled monomodal data with hallucinated features.
 
@@ -883,11 +884,10 @@ def _delulu_stage2_train_classifier(
     If val_loader is provided, tracks best classifier based on validation loss.
     If test_loader is provided, runs evaluation every eval_every_n_epochs epochs (oracle metric).
 
-    Distillation (optional):
-        If teacher_model and unlabeled_multimodal_loader are provided, alternates between:
-        - Pseudo-supervision epochs (CE loss on labeled monomodal data)
-        - Distillation epochs (KL loss on unlabeled multimodal data)
-        This keeps memory usage the same as without distillation.
+    Distillation modes:
+        - teacher_model=None: pseudo-supervision only (CE loss on labeled monomodal)
+        - teacher_model + distill_only=False: alternating epochs (CE + distillation)
+        - teacher_model + distill_only=True: distillation only (KL loss on unlabeled multimodal)
     """
     import copy
 
@@ -901,7 +901,8 @@ def _delulu_stage2_train_classifier(
         teacher_model.eval()
         for p in teacher_model.parameters():
             p.requires_grad = False
-        print(f"  Distillation enabled: alternating epochs, temperature={temperature}")
+        mode = "distill_only" if distill_only else "alternating"
+        print(f"  Distillation enabled: {mode}, temperature={temperature}")
 
     best_acc = 0
     best_val_loss = float('inf')
@@ -919,8 +920,11 @@ def _delulu_stage2_train_classifier(
         model.train()
         train_loss = 0.0
 
-        # Alternate between pseudo-supervision and distillation epochs
-        is_distill_epoch = use_distillation and (epoch % 2 == 1)
+        # Determine epoch type: distill_only runs all distillation, otherwise alternate
+        if distill_only and use_distillation:
+            is_distill_epoch = True
+        else:
+            is_distill_epoch = use_distillation and (epoch % 2 == 1)
 
         if is_distill_epoch:
             # Distillation epoch: train on unlabeled multimodal data
@@ -1132,7 +1136,7 @@ def delulu_supervision(
     device, modality_bands_dict, unlabeled_modalities, labeled_modalities,
     intermediate_projectors, lr, epochs, stage2epochs=8, eval_every_n_epochs=4, objective="transfer",
     val1_loader=None, val2_loader=None,
-    teacher_model=None, temperature=2.0
+    teacher_model=None, temperature=2.0, distill_only=False
 ):
     """
     Hallucination-based supervision with different objectives.
@@ -1171,8 +1175,8 @@ def delulu_supervision(
         val1_loader: Validation loader from train1 (monomodal, for stage 2)
         val2_loader: Validation loader from train2 (multimodal, for stage 1)
         teacher_model: Optional monomodal teacher model for distillation (frozen, operates on labeled modality)
-        distillation_weight: Weight for distillation loss vs CE loss (default 0.5)
         temperature: Softmax temperature for KL divergence (default 2.0)
+        distill_only: If True and teacher_model provided, run only distillation (no pseudo-supervision)
 
     Returns:
         Tuple of (best_acc, softvote_test_acc)
@@ -1212,7 +1216,8 @@ def delulu_supervision(
         val_loader=val1_loader,
         teacher_model=teacher_model,
         unlabeled_multimodal_loader=unlabeled_train_loader,
-        temperature=temperature
+        temperature=temperature,
+        distill_only=distill_only
     )
 
     # Stage 3

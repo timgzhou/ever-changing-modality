@@ -92,19 +92,20 @@ if args.teacher_checkpoint:
     teacher_model.eval()
     print(f"Loaded teacher from {args.teacher_checkpoint}")
 
-# Run with and without distillation
-for use_distillation in [True, False]:
-    if use_distillation and teacher_model is None:
-        continue  # Skip distillation if no teacher provided
+# Run 3 modes: no_distillation, alternating, distill_only
+# distill_mode: "none" (no distillation), "alternating", "distill_only"
+distill_modes = ["none"]  # Always run without distillation
+if teacher_model is not None:
+    distill_modes.extend(["alternating", "distill_only"])
 
-    distill_label = "with_distillation" if use_distillation else "no_distillation"
+for distill_mode in distill_modes:
     print("\n" + "="*70)
-    print(f"=== Running {distill_label} ===")
+    print(f"=== Running {distill_mode} ===")
     print("="*70)
 
     for objective in ["transfer", "addition", "peeking"]:
         print("\n" + "-"*70)
-        print(f"--- Running delulu_supervision with objective={objective}, distillation={use_distillation} ---")
+        print(f"--- Running delulu_supervision with objective={objective}, distill_mode={distill_mode} ---")
         print("-"*70)
 
         model = load_model_and_unfreeze_classifier(checkpoint_path, classifier_strategy, device)
@@ -126,8 +127,9 @@ for use_distillation in [True, False]:
             objective=objective,
             val1_loader=val1_loader,
             val2_loader=val2_loader,
-            teacher_model=teacher_model if use_distillation else None,
-            temperature=args.temperature
+            teacher_model=teacher_model if distill_mode != "none" else None,
+            temperature=args.temperature,
+            distill_only=(distill_mode == "distill_only")
         )
 
         # Determine real/hallucinated modalities based on objective for logging
@@ -147,7 +149,7 @@ for use_distillation in [True, False]:
 
         csv_results.append({
             "eval_type": f"delulu-{objective}",
-            "distillation": use_distillation,
+            "distillation": distill_mode,
             "real_modality": real_mod,
             "hallucinated_modality": hal_mod,
             "test_acc": test_acc,
