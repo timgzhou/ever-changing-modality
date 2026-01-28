@@ -685,7 +685,6 @@ def _delulu_stage1_train_fused_projectors(
             pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'})
 
         avg_train_loss = train_loss / len(unlabeled_train_loader)
-        scheduler.step(avg_train_loss)
 
         # Validation
         if val_loader is not None:
@@ -700,7 +699,7 @@ def _delulu_stage1_train_fused_projectors(
                     )
                     val_loss += loss.item()
             avg_val_loss = val_loss / len(val_loader)
-
+            scheduler.step(avg_val_loss)
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 best_projector_state = copy.deepcopy(fused_projector.state_dict())
@@ -709,7 +708,8 @@ def _delulu_stage1_train_fused_projectors(
                 print(f"  Epoch {epoch+1}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
         else:
             print(f"  Fused Projector Epoch {epoch+1}: avg loss = {avg_train_loss:.4f}")
-
+            scheduler.step(avg_train_loss)
+            
     # Load best projector if validation was used
     if val_loader is not None and best_projector_state is not None:
         fused_projector.load_state_dict(best_projector_state)
@@ -909,11 +909,22 @@ def _delulu_stage2_train_classifier(
     best_classifier_state = None
 
     ce_criteria = nn.CrossEntropyLoss()
-    model.freeze_all()
-    model.set_requires_grad("all", classifier=True)
 
-    classifier_params = list(model.modality_classifiers.parameters())
-    optimizer = torch.optim.AdamW(classifier_params, lr=lr)
+    # For distill_only mode: tune all EVAN parameters (not just classifiers)
+    # For other modes: tune classifiers only
+    if distill_only and use_distillation:
+        print(f"  Distill-only mode: tuning ALL model parameters (EVAN + classifiers)")
+        model.freeze_all()
+        model.set_requires_grad('backbone', blocks=True, norm=True)
+        model.set_requires_grad('all', classifier=True)
+        trainable_params = list(model.parameters())
+        best_classifier_state = None  # Will save full model state instead
+    else:
+        model.freeze_all()
+        model.set_requires_grad("all", classifier=True)
+        trainable_params = list(model.modality_classifiers.parameters())
+
+    optimizer = torch.optim.AdamW(trainable_params, lr=lr)
     scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=1, min_lr=1e-6)
 
     for epoch in range(epochs):
@@ -939,7 +950,7 @@ def _delulu_stage2_train_classifier(
                 )
 
                 distill_loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(classifier_params, max_norm=5)
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=5)
                 optimizer.step()
 
                 loss_val = distill_loss.item()
@@ -960,7 +971,7 @@ def _delulu_stage2_train_classifier(
                 )
 
                 ce_loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(classifier_params, max_norm=5)
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=5)
                 optimizer.step()
 
                 loss_val = ce_loss.item()
@@ -987,7 +998,11 @@ def _delulu_stage2_train_classifier(
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                best_classifier_state = copy.deepcopy(model.modality_classifiers.state_dict())
+                # Save full model state for distill_only, classifiers only otherwise
+                if distill_only and use_distillation:
+                    best_classifier_state = copy.deepcopy(model.state_dict())
+                else:
+                    best_classifier_state = copy.deepcopy(model.modality_classifiers.state_dict())
                 print(f"  Epoch {epoch+1}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f} (new best)")
             else:
                 print(f"  Epoch {epoch+1}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
@@ -1002,10 +1017,14 @@ def _delulu_stage2_train_classifier(
             if curr_acc > best_acc:
                 best_acc = curr_acc
 
-    # Load best classifier if validation was used
+    # Load best model state if validation was used
     if val_loader is not None and best_classifier_state is not None:
-        model.modality_classifiers.load_state_dict(best_classifier_state)
-        print(f"  Loaded best classifier with val_loss={best_val_loss:.4f}")
+        if distill_only and use_distillation:
+            model.load_state_dict(best_classifier_state)
+            print(f"  Loaded best model (full state) with val_loss={best_val_loss:.4f}")
+        else:
+            model.modality_classifiers.load_state_dict(best_classifier_state)
+            print(f"  Loaded best classifier with val_loss={best_val_loss:.4f}")
 
     return best_acc
 
@@ -1199,12 +1218,17 @@ def delulu_supervision(
         p.requires_grad = False
 
     # Stage 1: trains on unlabeled multimodal (train2), validated on val2
-    fused_projector = _delulu_stage1_train_fused_projectors(
-        evan, unlabeled_train_loader, device, modality_bands_dict,
-        unlabeled_modalities, labeled_modalities, all_modalities,
-        intermediate_projectors, lr, epochs, objective=objective,
-        val_loader=val2_loader
-    )
+    # Skip Stage 1 for distill_only mode (works directly with real features, no projector needed)
+    if distill_only and teacher_model is not None:
+        print(f"\n--- Stage 1: Skipped (distill_only mode) ---")
+        fused_projector = None
+    else:
+        fused_projector = _delulu_stage1_train_fused_projectors(
+            evan, unlabeled_train_loader, device, modality_bands_dict,
+            unlabeled_modalities, labeled_modalities, all_modalities,
+            intermediate_projectors, lr, epochs, objective=objective,
+            val_loader=val2_loader
+        )
 
     # Stage 2: trains on labeled monomodal (train1), validated on val1
     # Optionally uses distillation from teacher on unlabeled multimodal data (train2)

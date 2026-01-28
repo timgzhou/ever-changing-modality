@@ -32,7 +32,7 @@ parser.add_argument('--temperature', type=float, default=2.0,
 args = parser.parse_args()
 
 train1_loader, val1_loader, train2_loader, val2_loader, test_loader = get_loaders_with_val(32, 4, val_ratio=args.val_ratio)
-eval_lr=1e-4
+eval_lr=1e-3 #1e-4, jan28
 criterion = nn.CrossEntropyLoss()
 checkpoint_path = args.checkpoint
 classifier_strategy="ensemble"
@@ -97,7 +97,7 @@ if args.teacher_checkpoint:
 distill_modes = ["none"]  # Always run without distillation
 if teacher_model is not None:
     distill_modes.extend(["alternating", "distill_only"])
-
+distill_modes=["distill_only"] # TODO:TEMP
 for distill_mode in distill_modes:
     print("\n" + "="*70)
     print(f"=== Running {distill_mode} ===")
@@ -122,7 +122,7 @@ for distill_mode in distill_modes:
             intermediate_projectors=intermediate_projectors,
             lr=eval_lr,
             epochs=num_supervised_epochs,
-            stage2epochs=2,
+            stage2epochs=16,
             eval_every_n_epochs=1,
             objective=objective,
             val1_loader=val1_loader,

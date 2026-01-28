@@ -171,6 +171,70 @@ def feature_distillation_loss(student_features, teacher_features):
     return (cls_loss + patch_loss) / 2
 
 
+def evaluate_ensemble(student_model, teacher_model, test_loader, device,
+                      student_modality_bands_dict, teacher_modality_bands_dict,
+                      student_modality, teacher_modality, ensemble_mode='avg'):
+    """
+    Evaluate ensemble of teacher and student models on test set.
+
+    Args:
+        student_model: Student EVAN classifier
+        teacher_model: Teacher EVAN classifier
+        test_loader: Test dataloader
+        device: torch device
+        student_modality_bands_dict: Band dict for student modality
+        teacher_modality_bands_dict: Band dict for teacher modality
+        student_modality: Student's modality name
+        teacher_modality: Teacher's modality name
+        ensemble_mode: 'avg' (average logits) or 'avg_softmax' (average probabilities)
+
+    Returns:
+        Test accuracy of ensemble predictions
+    """
+    student_model.eval()
+    teacher_model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc=f"Eval ensemble ({ensemble_mode})"):
+            labels = batch['label'].to(device)
+
+            # Get student input and predictions
+            student_input = create_multimodal_batch(
+                batch, modality_bands_dict=student_modality_bands_dict, modalities=(student_modality,)
+            )
+            student_input = {k: v.to(device) for k, v in student_input.items()}
+            student_logits = student_model(student_input)
+
+            # Get teacher input and predictions
+            teacher_input = create_multimodal_batch(
+                batch, modality_bands_dict=teacher_modality_bands_dict, modalities=(teacher_modality,)
+            )
+            teacher_input = {k: v.to(device) for k, v in teacher_input.items()}
+            teacher_logits = teacher_model(teacher_input)
+
+            # Ensemble predictions
+            if ensemble_mode == 'avg':
+                # Average logits
+                ensemble_logits = (student_logits + teacher_logits) / 2
+                _, predicted = ensemble_logits.max(1)
+            elif ensemble_mode == 'avg_softmax':
+                # Average softmax probabilities
+                student_probs = F.softmax(student_logits, dim=-1)
+                teacher_probs = F.softmax(teacher_logits, dim=-1)
+                ensemble_probs = (student_probs + teacher_probs) / 2
+                _, predicted = ensemble_probs.max(1)
+            else:
+                raise ValueError(f"Unknown ensemble_mode: {ensemble_mode}")
+
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+
+    accuracy = 100. * correct / total
+    return accuracy
+
+
 def evaluate_with_teacher_classifier(student_model, teacher_model, test_loader, device,
                                       student_modality_bands_dict, student_modality,
                                       teacher_modality, global_rep='clstoken'):
@@ -597,7 +661,7 @@ def main():
     student_model.freeze_all()
     if args.train_mode == 'fft':
         student_model.set_requires_grad('backbone', blocks=True, norm=True)
-        student_model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, classifier=True)
+        student_model.set_requires_grad(args.modality, msla=True, mfla=False, patch_embedders=True, clsreg=True, classifier=True)
         print(f"Mode=fft, Freezing lora paths, training full layers and classifier.")
     elif args.train_mode == 'adaptor':
         student_model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, classifier=True)
@@ -634,6 +698,22 @@ def main():
     )
 
     print("\n=== Distillation Training complete ===")
+
+    # Ensemble evaluation
+    print("\n=== Ensemble Evaluation (Teacher + Student) ===")
+    ensemble_acc_avg = evaluate_ensemble(
+        student_model, teacher_model, test_loader, device,
+        student_modality_bands_dict, teacher_modality_bands_dict,
+        args.modality, teacher_modality, ensemble_mode='avg'
+    )
+    print(f"  Ensemble accuracy (avg logits): {ensemble_acc_avg:.2f}%")
+
+    ensemble_acc_softmax = evaluate_ensemble(
+        student_model, teacher_model, test_loader, device,
+        student_modality_bands_dict, teacher_modality_bands_dict,
+        args.modality, teacher_modality, ensemble_mode='avg_softmax'
+    )
+    print(f"  Ensemble accuracy (avg softmax): {ensemble_acc_softmax:.2f}%")
 
     # For feature mode, run additional evaluations
     teacher_classifier_acc = None
@@ -675,6 +755,8 @@ def main():
     print(f"Distillation Final metrics ({args.modality.upper()}):")
     print(f"  Train accuracy: {train_acc:.2f}%")
     print(f"  Test accuracy: {test_acc:.2f}%")
+    print(f"  Ensemble accuracy (avg logits): {ensemble_acc_avg:.2f}%")
+    print(f"  Ensemble accuracy (avg softmax): {ensemble_acc_softmax:.2f}%")
     if args.distillation_mode == 'feature':
         print(f"  Teacher classifier accuracy: {teacher_classifier_acc:.2f}%")
         print(f"  Supervised classifier accuracy: {supervised_classifier_acc:.2f}% (best: {supervised_classifier_best_acc:.2f}%)")
@@ -684,7 +766,8 @@ def main():
     fieldnames = ["model_type", "teacher_modality", "student_modality", "train_mode", "tz_lora_rank",
                   "tz_modality_specific_layer_augmenter", "learning_rate", "trainable_params",
                   "epoch", "temperature", "alpha", "distillation_mode", "test_accuracy", "best_test_accuracy(oracle)",
-                  "best_epoch", "teacher_classifier_acc", "supervised_classifier_acc", "supervised_classifier_best_acc",
+                  "best_epoch", "ensemble_acc_avg", "ensemble_acc_softmax",
+                  "teacher_classifier_acc", "supervised_classifier_acc", "supervised_classifier_best_acc",
                   "saved_checkpoint", "global_rep", "teacher_checkpoint"]
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
@@ -694,6 +777,7 @@ def main():
                          args.tz_modality_specific_layer_augmenter, args.lr, trainable_params,
                          num_epochs, args.temperature, args.alpha, args.distillation_mode, f"{test_acc:.2f}",
                          f"{best_test_acc:.2f}", best_epoch,
+                         f"{ensemble_acc_avg:.2f}", f"{ensemble_acc_softmax:.2f}",
                          f"{teacher_classifier_acc:.2f}" if teacher_classifier_acc else "",
                          f"{supervised_classifier_acc:.2f}" if supervised_classifier_acc else "",
                          f"{supervised_classifier_best_acc:.2f}" if supervised_classifier_best_acc else "",
