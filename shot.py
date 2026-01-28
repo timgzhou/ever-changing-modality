@@ -408,12 +408,15 @@ def train_shot(
             batch_fused_cls_loss=0.0
 
             # MAE loss: decode to pixels, loss on masked patches only
+            # Skip when no tokens are masked (modality dropout case) to avoid division by zero
             for mod in mae_modalities:
+                mask_float = modality_masks[mod].float()
+                if mask_float.sum() == 0:
+                    continue  # No masked tokens during modality dropout for non-dropped modalities
                 student_patches = student_fused[mod]['x_norm_patchtokens']  # [B, num_patches, embed_dim]
                 pred_pixels = mae_decoders[mod](student_patches)  # [B, num_patches, patch_size^2 * C]
                 target_img = full_multimodal_input[mod]  # [B, C, H, W]
                 target_patches = patchify(target_img, patch_size)  # [B, num_patches, patch_size^2 * C]
-                mask_float = modality_masks[mod].float()
                 mae_loss = mae_reconstruction_loss(pred_pixels, target_patches, mask_float)
                 total_loss = total_loss + mae_loss
                 batch_mae_loss += mae_loss.item()
