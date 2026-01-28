@@ -444,8 +444,9 @@ def train_shot(
                 for mod_lat in latent_reconstruct_modalities:
                     mod_mae_cls=student_fused[mod_mae]['x_norm_clstoken']
                     predicted_lat_cls=post_fusion_cls_projector[f"{mod_mae}_to_{mod_lat}"](mod_mae_cls)
-                    target_lat_cls=student_fused[mod_lat]['x_norm_clstoken'].detach()
-                    fused_cls_loss=mse_fn(predicted_lat_cls, target_lat_cls)
+                    # target_lat_cls=student_fused[mod_lat]['x_norm_clstoken'].detach() # jan27c version
+                    teacher_cls = teacher_out[mod_lat]['x_norm_clstoken'].detach()
+                    fused_cls_loss=mse_fn(predicted_lat_cls, teacher_cls)
                     total_loss = total_loss + fused_cls_loss
                     batch_fused_cls_loss += fused_cls_loss.item()
             
