@@ -22,16 +22,22 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--checkpoint', type=str, default='checkpoints/presetE.pt', help='Path to checkpoint file')
-parser.add_argument('--num_supervised_epochs', type=int, default=1, help='Path to checkpoint file')
+parser.add_argument('--num_supervised_epochs', type=int, default=8)
 parser.add_argument('--csv_suffix', type=str, default=None, help='suffix to save experiment results to.')
 parser.add_argument('--val_ratio', type=float, default=0.1, help='Fraction of train2 to use for validation (default: 0.1)')
+parser.add_argument('--teacher_checkpoint', type=str, default=None,
+                    help='Path to teacher checkpoint for distillation (monomodal on starting_modality)')
+parser.add_argument('--distillation_weight', type=float, default=0.5,
+                    help='Weight for distillation loss vs CE loss (default: 0.5)')
+parser.add_argument('--temperature', type=float, default=2.0,
+                    help='Softmax temperature for KL divergence (default: 2.0)')
 args = parser.parse_args()
 
 train1_loader, val1_loader, train2_loader, val2_loader, test_loader = get_loaders_with_val(32, 4, val_ratio=args.val_ratio)
 eval_lr=1e-4
 criterion = nn.CrossEntropyLoss()
 checkpoint_path = args.checkpoint
-clssifier_strategy="ensemble"
+classifier_strategy="ensemble"
 num_supervised_epochs=args.num_supervised_epochs
 
 checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -48,9 +54,9 @@ device = 'cuda' if torch.cuda.is_available() else "cpu"
 csv_results = []
 csv_path = f"res/modality-transfer_{args.csv_suffix}.csv"
 
-def load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device):
+def load_model_and_unfreeze_classifier(checkpoint_path,classifier_strategy,device):
     model=EVANClassifier.from_checkpoint(checkpoint_path,device)
-    model.switch_strategy(clssifier_strategy)
+    model.switch_strategy(classifier_strategy)
     model.freeze_all()
     model.set_requires_grad('all', classifier=True)
     model = model.to(device)
@@ -58,7 +64,7 @@ def load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device)
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     return model
 
-model = load_model_and_unfreeze_clssifier(checkpoint_path,clssifier_strategy,device)
+model = load_model_and_unfreeze_classifier(checkpoint_path,classifier_strategy,device)
 modalities = model.evan.supported_modalities
 modality_bands_dict = get_modality_bands_dict(*modalities)
 intermediate_projectors = create_intermediate_projectors(
@@ -78,55 +84,78 @@ projector_state_dict = checkpoint.get('intermediate_projectors_state_dict') or c
 intermediate_projectors.load_state_dict(projector_state_dict)
 print(f"Loaded SHOT-trained intermediate_projectors: {list(intermediate_projectors.keys())}")
 starting_modality = model.evan.starting_modality
-unlabeld_modalities = list(set(model.evan.supported_modalities)-{starting_modality})
+unlabeled_modalities = list(set(model.evan.supported_modalities)-{starting_modality})
 
-for objective in ["transfer", "addition", "peeking"]:
-    print("\n" + "-"*70)
-    print(f"--- Running delulu_supervision with objective={objective} ---")
-    print("-"*70)
+# Load teacher model if provided (for distillation)
+teacher_model = None
+if args.teacher_checkpoint:
+    teacher_model = EVANClassifier.from_checkpoint(args.teacher_checkpoint, device)
+    teacher_model = teacher_model.to(device)
+    teacher_model.eval()
+    print(f"Loaded teacher from {args.teacher_checkpoint}")
 
-    model = load_model_and_unfreeze_clssifier(checkpoint_path, clssifier_strategy, device)
+# Run with and without distillation
+for use_distillation in [False, True]:
+    if use_distillation and teacher_model is None:
+        continue  # Skip distillation if no teacher provided
 
-    best_test_acc, test_acc = delulu_supervision(
-        model=model,
-        unlabeled_train_loader=train2_loader,
-        labeled_train_loader=train1_loader,
-        test_loader=test_loader,
-        device=device,
-        modality_bands_dict=modality_bands_dict,
-        unlabeled_modalities=unlabeld_modalities,
-        labeled_modalities=[starting_modality],
-        intermediate_projectors=intermediate_projectors,
-        lr=eval_lr,
-        epochs=num_supervised_epochs,
-        stage2epochs=8,
-        eval_every_n_epochs=1,
-        objective=objective,
-        val1_loader=val1_loader,
-        val2_loader=val2_loader
-    )
+    distill_label = "with_distillation" if use_distillation else "no_distillation"
+    print("\n" + "="*70)
+    print(f"=== Running {distill_label} ===")
+    print("="*70)
 
-    # Determine real/hallucinated modalities based on objective for logging
-    if objective == "transfer":
-        # Test on unlabeled only, hallucinate labeled
-        real_mod = "+".join(unlabeld_modalities)
-        hal_mod = starting_modality
-    elif objective == "addition":
-        # Test on both modalities (all real)
-        real_mod = "+".join([starting_modality] + unlabeld_modalities)
-        hal_mod = None
-    elif objective == "peeking":
-        # Test on labeled only, hallucinate unlabeled
-        real_mod = starting_modality
-        hal_mod = "+".join(unlabeld_modalities)
+    for objective in ["transfer", "addition", "peeking"]:
+        print("\n" + "-"*70)
+        print(f"--- Running delulu_supervision with objective={objective}, distillation={use_distillation} ---")
+        print("-"*70)
 
-    csv_results.append({
-        "eval_type": f"delulu-{objective}",
-        "real_modality": real_mod,
-        "hallucinated_modality": hal_mod,
-        "test_acc": test_acc,
-        "best_test_acc": best_test_acc,
-    })
+        model = load_model_and_unfreeze_classifier(checkpoint_path, classifier_strategy, device)
+
+        best_test_acc, test_acc = delulu_supervision(
+            model=model,
+            unlabeled_train_loader=train2_loader,
+            labeled_train_loader=train1_loader,
+            test_loader=test_loader,
+            device=device,
+            modality_bands_dict=modality_bands_dict,
+            unlabeled_modalities=unlabeled_modalities,
+            labeled_modalities=[starting_modality],
+            intermediate_projectors=intermediate_projectors,
+            lr=eval_lr,
+            epochs=num_supervised_epochs,
+            stage2epochs=8,
+            eval_every_n_epochs=1,
+            objective=objective,
+            val1_loader=val1_loader,
+            val2_loader=val2_loader,
+            teacher_model=teacher_model if use_distillation else None,
+            distillation_weight=args.distillation_weight,
+            temperature=args.temperature
+        )
+
+        # Determine real/hallucinated modalities based on objective for logging
+        real_mod,hal_mod = "none","none"
+        if objective == "transfer":
+            # Test on unlabeled only, hallucinate labeled
+            real_mod = "+".join(unlabeled_modalities)
+            hal_mod = starting_modality
+        elif objective == "addition":
+            # Test on both modalities (all real)
+            real_mod = "+".join([starting_modality] + unlabeled_modalities)
+            hal_mod = None
+        elif objective == "peeking":
+            # Test on labeled only, hallucinate unlabeled
+            real_mod = starting_modality
+            hal_mod = "+".join(unlabeled_modalities)
+
+        csv_results.append({
+            "eval_type": f"delulu-{objective}",
+            "distillation": use_distillation,
+            "real_modality": real_mod,
+            "hallucinated_modality": hal_mod,
+            "test_acc": test_acc,
+            "best_test_acc": best_test_acc,
+        })
 
 # Write CSV results (append to single file)
 fieldnames = [
@@ -135,6 +164,7 @@ fieldnames = [
     "starting_modality",
     "supported_modalities",
     "eval_type",
+    "distillation",
     "real_modality",
     "hallucinated_modality",
     "test_acc",

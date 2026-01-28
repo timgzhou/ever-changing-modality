@@ -773,12 +773,108 @@ def _delulu_stage2_compute_loss(
     return loss
 
 
+def _delulu_stage2_compute_distillation_loss(
+    model, evan, teacher_model, batch, device, modality_bands_dict,
+    unlabeled_modalities, labeled_modalities, all_modalities,
+    intermediate_projectors, objective, temperature=2.0
+):
+    """Compute distillation loss on unlabeled multimodal data (train2).
+
+    Student input varies by objective:
+    - transfer: real_unlabeled + hallucinated_labeled
+    - addition: real_labeled + real_unlabeled (both real)
+    - peeking: real_labeled + hallucinated_unlabeled
+
+    Teacher: always monomodal on labeled_mod (frozen)
+
+    Args:
+        model: Student model with modality_classifiers
+        evan: Student EVAN backbone
+        teacher_model: Frozen monomodal teacher on labeled modality
+        batch: Batch from train2 (has both modalities)
+        device: torch device
+        modality_bands_dict: Mapping of modality names to band indices
+        unlabeled_modalities: Tuple of unlabeled modality names
+        labeled_modalities: Tuple of labeled modality names
+        all_modalities: Set of all modality names
+        intermediate_projectors: Pre-trained sequence projectors
+        objective: One of "transfer", "addition", "peeking"
+        temperature: Softmax temperature for KL divergence
+
+    Returns:
+        Distillation loss (KL divergence scaled by temperature²)
+    """
+    # Get multimodal input (both modalities available in train2)
+    multimodal_input = create_multimodal_batch(
+        batch, modality_bands_dict=modality_bands_dict,
+        modalities=(*labeled_modalities, *unlabeled_modalities)
+    )
+    multimodal_input = {k: v.to(device) for k, v in multimodal_input.items()}
+
+    # Teacher forward (monomodal on labeled)
+    labeled_input = {m: multimodal_input[m] for m in labeled_modalities}
+    with torch.no_grad():
+        teacher_logits = teacher_model(labeled_input)
+
+    # Student forward (depends on objective)
+    with torch.no_grad():
+        real_intermediate = evan.forward_modality_specific_features(multimodal_input)
+
+    if objective == "transfer":
+        # Real unlabeled + hallucinated labeled
+        hal_intermediate = hallucinate_intermediate_features(
+            real_intermediate, unlabeled_modalities, labeled_modalities,
+            intermediate_projectors
+        )
+        fusion_input = merge_intermediate_features(
+            real_intermediate, hal_intermediate,
+            unlabeled_modalities, labeled_modalities
+        )
+    elif objective == "addition":
+        # Both real, no hallucination
+        fusion_input = real_intermediate
+    elif objective == "peeking":
+        # Real labeled + hallucinated unlabeled
+        hal_intermediate = hallucinate_intermediate_features(
+            real_intermediate, labeled_modalities, unlabeled_modalities,
+            intermediate_projectors
+        )
+        fusion_input = merge_intermediate_features(
+            real_intermediate, hal_intermediate,
+            labeled_modalities, unlabeled_modalities
+        )
+    else:
+        raise ValueError(f"Unknown objective: {objective}")
+
+    with torch.no_grad():
+        fused_output = evan.forward_fusion_from_modality_features(fusion_input)
+
+    # Classify with student heads and compute distillation loss
+    all_logits = []
+    for mod in all_modalities:
+        fused_cls = fused_output[mod]['x_norm_clstoken']
+        logits = model.modality_classifiers[mod](fused_cls)
+        all_logits.append(logits)
+    student_logits = torch.stack(all_logits).mean(dim=0)
+
+    # KL divergence loss
+    student_soft = F.log_softmax(student_logits / temperature, dim=-1)
+    teacher_soft = F.softmax(teacher_logits / temperature, dim=-1)
+    distill_loss = F.kl_div(student_soft, teacher_soft, reduction='batchmean') * (temperature ** 2)
+
+    return distill_loss
+
+
 def _delulu_stage2_train_classifier(
     model, evan, labeled_train_loader, device, modality_bands_dict,
     unlabeled_modalities, labeled_modalities, all_modalities,
     intermediate_projectors, fused_projector, lr, epochs,
     test_loader=None, eval_every_n_epochs=4, objective="transfer",
-    val_loader=None
+    val_loader=None,
+    teacher_model=None,
+    unlabeled_multimodal_loader=None,
+    distillation_weight=0.5,
+    temperature=2.0
 ):
     """Stage 2: Train classifier on labeled monomodal data with hallucinated features.
 
@@ -787,12 +883,27 @@ def _delulu_stage2_train_classifier(
 
     If val_loader is provided, tracks best classifier based on validation loss.
     If test_loader is provided, runs evaluation every eval_every_n_epochs epochs (oracle metric).
+
+    Distillation (optional):
+        If teacher_model and unlabeled_multimodal_loader are provided, interleaves
+        distillation batches from train2 with supervised batches from train1.
+        Combined loss = (1 - distillation_weight) * ce_loss + distillation_weight * distill_loss
     """
     import copy
+    from itertools import cycle
 
     print(f"\n--- Stage 2: Training classifier on labeled monomodal data ({objective}) ---")
     if val_loader is not None:
         print(f"  Using validation set for model selection")
+
+    # Setup distillation if enabled
+    distill_iter = None
+    if teacher_model is not None and unlabeled_multimodal_loader is not None:
+        distill_iter = cycle(iter(unlabeled_multimodal_loader))
+        teacher_model.eval()
+        for p in teacher_model.parameters():
+            p.requires_grad = False
+        print(f"  Distillation enabled: weight={distillation_weight}, temperature={temperature}")
 
     best_acc = 0
     best_val_loss = float('inf')
@@ -809,14 +920,31 @@ def _delulu_stage2_train_classifier(
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
+        train_ce_loss = 0.0
+        train_distill_loss = 0.0
         pbar = tqdm(labeled_train_loader, desc=f"Classifier Epoch {epoch+1}/{epochs}")
 
         for batch in pbar:
-            loss = _delulu_stage2_compute_loss(
+            # Supervised loss on labeled batch (existing)
+            ce_loss = _delulu_stage2_compute_loss(
                 model, evan, batch, device, modality_bands_dict,
                 unlabeled_modalities, labeled_modalities, all_modalities,
                 intermediate_projectors, fused_projector
             )
+
+            # Distillation loss on unlabeled multimodal batch (new)
+            distill_loss = None
+            if distill_iter is not None:
+                distill_batch = next(distill_iter)
+                distill_loss = _delulu_stage2_compute_distillation_loss(
+                    model, evan, teacher_model, distill_batch, device,
+                    modality_bands_dict, unlabeled_modalities, labeled_modalities,
+                    all_modalities, intermediate_projectors, objective, temperature
+                )
+                loss = (1 - distillation_weight) * ce_loss + distillation_weight * distill_loss
+                train_distill_loss += distill_loss.item()
+            else:
+                loss = ce_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -824,7 +952,12 @@ def _delulu_stage2_train_classifier(
             optimizer.step()
 
             train_loss += loss.item()
-            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'})
+            train_ce_loss += ce_loss.item()
+            postfix = {'loss': f'{loss.item():.4f}', 'grad': f'{grad_norm:.4f}'}
+            if distill_loss is not None:
+                postfix['ce'] = f'{ce_loss.item():.4f}'
+                postfix['distill'] = f'{distill_loss.item():.4f}'
+            pbar.set_postfix(postfix)
 
         avg_train_loss = train_loss / len(labeled_train_loader)
         scheduler.step(avg_train_loss)
@@ -993,7 +1126,8 @@ def delulu_supervision(
     model, unlabeled_train_loader, labeled_train_loader, test_loader,
     device, modality_bands_dict, unlabeled_modalities, labeled_modalities,
     intermediate_projectors, lr, epochs, stage2epochs=8, eval_every_n_epochs=4, objective="transfer",
-    val1_loader=None, val2_loader=None
+    val1_loader=None, val2_loader=None,
+    teacher_model=None, distillation_weight=0.5, temperature=2.0
 ):
     """
     Hallucination-based supervision with different objectives.
@@ -1016,7 +1150,7 @@ def delulu_supervision(
 
     Args:
         model: Model with modality_classifiers
-        unlabeled_train_loader: DataLoader for unlabeled multimodal data (Stage 1)
+        unlabeled_train_loader: DataLoader for unlabeled multimodal data (Stage 1, also used for distillation in Stage 2)
         labeled_train_loader: DataLoader for labeled monomodal data (Stage 2)
         test_loader: DataLoader for test data (Stage 3)
         device: torch device
@@ -1025,11 +1159,15 @@ def delulu_supervision(
         labeled_modalities: Tuple of labeled modality names
         intermediate_projectors: Pre-trained sequence projectors
         lr: Learning rate
-        epochs: Number of training epochs
+        epochs: Number of training epochs for Stage 1
+        stage2epochs: Number of training epochs for Stage 2
         eval_every_n_epochs: Evaluation frequency in Stage 2
         objective: One of "transfer", "addition", "peeking"
         val1_loader: Validation loader from train1 (monomodal, for stage 2)
         val2_loader: Validation loader from train2 (multimodal, for stage 1)
+        teacher_model: Optional monomodal teacher model for distillation (frozen, operates on labeled modality)
+        distillation_weight: Weight for distillation loss vs CE loss (default 0.5)
+        temperature: Softmax temperature for KL divergence (default 2.0)
 
     Returns:
         Tuple of (best_acc, softvote_test_acc)
@@ -1060,12 +1198,17 @@ def delulu_supervision(
     )
 
     # Stage 2: trains on labeled monomodal (train1), validated on val1
+    # Optionally uses distillation from teacher on unlabeled multimodal data (train2)
     best_acc = _delulu_stage2_train_classifier(
         model, evan, labeled_train_loader, device, modality_bands_dict,
         unlabeled_modalities, labeled_modalities, all_modalities,
         intermediate_projectors, fused_projector, lr, stage2epochs,
         test_loader=test_loader, eval_every_n_epochs=eval_every_n_epochs, objective=objective,
-        val_loader=val1_loader
+        val_loader=val1_loader,
+        teacher_model=teacher_model,
+        unlabeled_multimodal_loader=unlabeled_train_loader,
+        distillation_weight=distillation_weight,
+        temperature=temperature
     )
 
     # Stage 3
