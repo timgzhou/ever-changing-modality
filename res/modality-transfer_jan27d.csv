@@ -1,0 +1,13 @@
+checkpoint,num_supervised_epochs,starting_modality,supported_modalities,eval_type,distillation,real_modality,hallucinated_modality,test_acc,best_test_acc
+checkpoints/vre_to_rgb_jan27c.pt,1,vre,vre+rgb,delulu-transfer,True,rgb,vre,87.33333333333333,87.33333333333333
+checkpoints/vre_to_rgb_jan27c.pt,1,vre,vre+rgb,delulu-addition,True,vre+rgb,,90.35185185185185,90.35185185185185
+checkpoints/vre_to_rgb_jan27c.pt,1,vre,vre+rgb,delulu-peeking,True,vre,rgb,90.25925925925925,90.25925925925925
+checkpoints/vre_to_rgb_jan27c.pt,1,vre,vre+rgb,delulu-transfer,False,rgb,vre,87.22222222222223,87.22222222222223
+checkpoints/vre_to_rgb_jan27c.pt,1,vre,vre+rgb,delulu-addition,False,vre+rgb,,90.16666666666667,90.16666666666667
+checkpoints/vre_to_rgb_jan27c.pt,1,vre,vre+rgb,delulu-peeking,False,vre,rgb,90.11111111111111,90.11111111111111
+checkpoints/vre_to_rgb_jan27c.pt,4,vre,vre+rgb,delulu-transfer,True,rgb,vre,87.61111111111111,87.61111111111111
+checkpoints/vre_to_rgb_jan27c.pt,4,vre,vre+rgb,delulu-addition,True,vre+rgb,,90.4074074074074,90.4074074074074
+checkpoints/vre_to_rgb_jan27c.pt,4,vre,vre+rgb,delulu-peeking,True,vre,rgb,90.03703703703704,90.18518518518519
+checkpoints/vre_to_rgb_jan27c.pt,4,vre,vre+rgb,delulu-transfer,False,rgb,vre,87.44444444444444,87.44444444444444
+checkpoints/vre_to_rgb_jan27c.pt,4,vre,vre+rgb,delulu-addition,False,vre+rgb,,90.42592592592592,90.42592592592592
+checkpoints/vre_to_rgb_jan27c.pt,4,vre,vre+rgb,delulu-peeking,False,vre,rgb,90.14814814814815,90.22222222222223

@@ -121,7 +121,7 @@ for use_distillation in [True, False]:
             intermediate_projectors=intermediate_projectors,
             lr=eval_lr,
             epochs=num_supervised_epochs,
-            stage2epochs=8,
+            stage2epochs=2,
             eval_every_n_epochs=1,
             objective=objective,
             val1_loader=val1_loader,
