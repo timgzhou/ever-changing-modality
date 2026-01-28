@@ -23,15 +23,3 @@ checkpoints/nir_to_rgb.pt,36,nir,nir+rgb,delulu-peeking,nir,rgb,81.5370370370370
 checkpoints/nir_to_vre.pt,36,nir,nir+vre,delulu-transfer,vre,nir,79.11111111111111,79.38888888888889
 checkpoints/nir_to_vre.pt,36,nir,nir+vre,delulu-addition,nir+vre,,79.79629629629629,80.18518518518519
 checkpoints/nir_to_vre.pt,36,nir,nir+vre,delulu-peeking,nir,vre,79.11111111111111,79.38888888888889
-checkpoints/swir_to_nir.pt,36,swir,swir+nir,delulu-transfer,nir,swir,11.037037037037036,11.037037037037036
-checkpoints/swir_to_nir.pt,36,swir,swir+nir,delulu-addition,swir+nir,,11.037037037037036,11.037037037037036
-checkpoints/swir_to_nir.pt,36,swir,swir+nir,delulu-peeking,swir,nir,11.037037037037036,11.037037037037036
-checkpoints/nir_to_swir.pt,36,nir,nir+swir,delulu-transfer,swir,nir,11.037037037037036,11.037037037037036
-checkpoints/nir_to_swir.pt,36,nir,nir+swir,delulu-addition,nir+swir,,11.037037037037036,11.037037037037036
-checkpoints/nir_to_swir.pt,36,nir,nir+swir,delulu-peeking,nir,swir,11.037037037037036,11.037037037037036
-checkpoints/swir_to_vre.pt,36,swir,swir+vre,delulu-transfer,vre,swir,11.037037037037036,11.037037037037036
-checkpoints/swir_to_vre.pt,36,swir,swir+vre,delulu-addition,swir+vre,,11.037037037037036,11.037037037037036
-checkpoints/swir_to_vre.pt,36,swir,swir+vre,delulu-peeking,swir,vre,11.037037037037036,11.037037037037036
-checkpoints/swir_to_rgb.pt,36,swir,swir+rgb,delulu-transfer,rgb,swir,11.037037037037036,11.037037037037036
-checkpoints/swir_to_rgb.pt,36,swir,swir+rgb,delulu-addition,swir+rgb,,11.037037037037036,11.037037037037036
-checkpoints/swir_to_rgb.pt,36,swir,swir+rgb,delulu-peeking,swir,rgb,11.037037037037036,11.037037037037036
