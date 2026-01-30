@@ -74,7 +74,7 @@ def main():
     # Create datasets
     print("\n=== Creating datasets ===")
 
-    _, train2_loader, _ = get_loaders(32,4)
+    _, train2_loader, test_loader = get_loaders(32,4)
 
     evan = model.evan
     model = model.to(device)
@@ -94,16 +94,13 @@ def main():
             train_loader=train2_loader,
             device=device,
             args=args,
-            mae_modalities=[newmod],  # new modality reconstructs pixels
+            mae_modalities=[starting_modality,newmod],  # new modality reconstructs pixels
             latent_reconstruct_modalities=[starting_modality],
             modality_bands_dict=modality_bands_dict,
         )
 
     # ========================================= EVALUATION =====================================
     print("\n=== Evaluating trained model ===")
-
-    # Create test loader
-    _, _, test_loader = get_loaders(args.batch_size, args.num_workers)
 
     all_modalities = [starting_modality, newmod]
 

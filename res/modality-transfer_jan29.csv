@@ -35,3 +35,6 @@ checkpoints/swir_to_rgb.pt,16,swir,swir+rgb,delulu-peeking,none,swir,rgb,87.9259
 checkpoints/vre_to_rgb.pt,16,vre,vre+rgb,delulu-transfer,none,rgb,vre,89.62962962962963,89.62962962962963
 checkpoints/vre_to_rgb.pt,16,vre,vre+rgb,delulu-addition,none,vre+rgb,,91.03703703703704,91.03703703703704
 checkpoints/vre_to_rgb.pt,16,vre,vre+rgb,delulu-peeking,none,vre,rgb,90.0925925925926,90.0925925925926
+checkpoints/vre_to_rgb.pt,32,vre,vre+rgb,delulu-transfer,none,rgb,vre,89.42592592592592,89.5
+checkpoints/vre_to_rgb.pt,32,vre,vre+rgb,delulu-addition,none,vre+rgb,,91.01851851851852,91.07407407407408
+checkpoints/vre_to_rgb.pt,32,vre,vre+rgb,delulu-peeking,none,vre,rgb,87.55555555555556,87.55555555555556

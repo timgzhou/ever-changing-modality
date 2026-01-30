@@ -287,8 +287,7 @@ def train_shot(
     latent_reconstruct_modalities: list[str] = ["rgb"],
     modality_bands_dict: dict = None,
     max_norm=4,
-    distillation_temperature: float = 2.0,
-    distillation_alpha: float = 1.0,
+    distillation_temperature: float = 2.0
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -379,7 +378,6 @@ def train_shot(
         train_pre_fusion_loss = 0.0
         train_distill_loss = 0.0
         train_count = 0
-        teacher_total = 0
 
         pbar = tqdm(train_loader, desc=f"SHOT Training Epoch {epoch+1}/{args.epochs}")
         for batch in pbar:
@@ -409,9 +407,8 @@ def train_shot(
                         tgt_seq = prefusion_features[tgt_mod].detach() if tgt_mod in latent_reconstruct_modalities else prefusion_features[tgt_mod]  # [B, 1+n_storage+num_patches, embed_dim]
                         key = f"{src_mod}_to_{tgt_mod}"
                         src_seq_norm = F.layer_norm(src_seq, [src_seq.shape[-1]])
-                        tgt_seq_norm = F.layer_norm(tgt_seq, [tgt_seq.shape[-1]])
                         projected_seq = intermediate_projectors[key](src_seq_norm)  # [B, seq_len, embed_dim]
-                        prefusion_loss = prefusion_loss + mse_fn(projected_seq, tgt_seq_norm)
+                        prefusion_loss = prefusion_loss + mse_fn(projected_seq, tgt_seq)
                         pre_fusion_loss_count += 1
             prefusion_loss = prefusion_loss / pre_fusion_loss_count if pre_fusion_loss_count > 0 else prefusion_loss
             batch_pre_fusion_loss = prefusion_loss.item()

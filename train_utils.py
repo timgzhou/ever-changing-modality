@@ -560,7 +560,7 @@ class CrossModalFusedProjector(nn.Module):
         for mod in self.modalities:
             end_idx = start_idx + seq_lens[mod]
             cls_token = projected_concat[:, start_idx, :]  # [B, embed_dim]
-            projected_cls[mod] = F.layer_norm(cls_token, [self.embed_dim])
+            projected_cls[mod] = cls_token
             start_idx = end_idx
 
         return projected_cls
