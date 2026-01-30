@@ -97,7 +97,7 @@ if args.teacher_checkpoint:
 distill_modes = ["none"]  # Always run without distillation
 if teacher_model is not None:
     distill_modes.extend(["alternating", "distill_only"])
-distill_modes=["distill_only"] # TODO:TEMP
+distill_modes=["none"] # TODO:TEMP
 for distill_mode in distill_modes:
     print("\n" + "="*70)
     print(f"=== Running {distill_mode} ===")
@@ -122,7 +122,7 @@ for distill_mode in distill_modes:
             intermediate_projectors=intermediate_projectors,
             lr=eval_lr,
             epochs=num_supervised_epochs,
-            stage2epochs=16,
+            stage2epochs=8,
             eval_every_n_epochs=1,
             objective=objective,
             val1_loader=val1_loader,

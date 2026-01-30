@@ -14,6 +14,7 @@ from eurosat_data_utils import (
     get_loaders,
     get_modality_bands_dict
 )
+from train_utils import _delulu_stage3_test
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 
@@ -98,6 +99,44 @@ def main():
             modality_bands_dict=modality_bands_dict,
         )
 
+    # ========================================= EVALUATION =====================================
+    print("\n=== Evaluating trained model ===")
+
+    # Create test loader
+    _, _, test_loader = get_loaders(args.batch_size, args.num_workers)
+
+    all_modalities = [starting_modality, newmod]
+
+    # Define evaluation objectives
+    objectives = {
+        "transfer": {"desc": f"Using only {newmod}, hallucinating {starting_modality}"},
+        "peeking": {"desc": f"Using only {starting_modality}, hallucinating {newmod}"},
+        "addition": {"desc": f"Using both {starting_modality} and {newmod}"}
+    }
+
+    # Run evaluations and store accuracies
+    accuracies = {}
+    for objective, info in objectives.items():
+        print(f"\n--- Evaluating: {objective.capitalize()} objective ---")
+        print(f"    {info['desc']}")
+
+        accuracy = _delulu_stage3_test(
+            model=model,
+            evan=model.evan,
+            test_loader=test_loader,
+            device=device,
+            modality_bands_dict=modality_bands_dict,
+            unlabeled_modalities=[newmod],
+            labeled_modalities=[starting_modality],
+            all_modalities=all_modalities,
+            intermediate_projectors=intermediate_projectors,
+            objective=objective
+        )
+
+        accuracies[objective] = accuracy
+        print(f"{objective.capitalize()} accuracy: {accuracy:.2f}%")
+        wandb.log({f"test/{objective}_accuracy": accuracy})
+
     # ========================================= CHECKPOINT =====================================
     timestamp_shot = datetime.now().strftime('%Y%m%d_%H%M%S')
     checkpoint_shotete = os.path.join(args.checkpoint_dir, f'evan_eurosat_{args.train_method}_{timestamp_shot}.pt')
@@ -113,11 +152,12 @@ def main():
     print(f"SHOT checkpoint saved to: {checkpoint_shotete} (includes intermediate_projectors)")
 
     # Log results to CSV
-    filename = "res/shot_e2e_train.csv"
+    filename = "res/shot_e2e_e2e.csv"
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "starting_modality","new_modality", "ssl_mode", "ssl_lr", "fusion_epochs",
         "mask_ratio", "modality_dropout","train_components","trainable_params",
+        "transfer_acc", "peeking_acc", "addition_acc",
         "stage0_checkpoint", "shote2e_checkpoint"
     ]
     with open(filename, mode='a', newline='') as file:
@@ -134,6 +174,9 @@ def main():
             args.modality_dropout,
             args.train_components,
             trainable_total,
+            f"{accuracies['transfer']:.2f}",
+            f"{accuracies['peeking']:.2f}",
+            f"{accuracies['addition']:.2f}",
             args.stage0_checkpoint,
             checkpoint_shotete,
         ])
@@ -144,3 +187,14 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+"""
+python -u shot_ete.py \
+    --checkpoint_name vre_to_rgb \
+    --stage0_checkpoint checkpoints/vre_fft.pt  \
+    --epochs 4 \
+    --train_components full \
+    --modality_dropout 0.4 \
+    --mae_mask_ratio 0.85 \
+    --new_mod_group rgb
+"""

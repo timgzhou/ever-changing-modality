@@ -147,3 +147,7 @@ nir,rgb,shot,0.0001,80,0.85,0.4,full,45759744,checkpoints/nir_fft.pt,checkpoints
 swir,rgb,shot,0.0001,80,0.85,0.4,full,45759744,checkpoints/swir_fft.pt,checkpoints/swir_to_rgb_jan27c.pt
 swir,nir,shot,0.0001,80,0.85,0.4,full,45562880,checkpoints/swir_fft.pt,checkpoints/swir_to_nir_jan27c.pt
 swir,vre,shot,0.0001,80,0.85,0.4,full,45759744,checkpoints/swir_fft.pt,checkpoints/swir_to_vre_jan27c.pt
+vre,rgb,shot,0.0001,4,0.85,0.4,full,45889940,checkpoints/vre_fft.pt,checkpoints/vre_to_rgb.pt
+vre,rgb,shot,0.0001,4,0.85,0.4,full,45889940,checkpoints/vre_fft.pt,checkpoints/vre_to_rgb.pt
+vre,rgb,shot,0.0001,16,0.85,0.4,full,45889940,checkpoints/vre_fft.pt,checkpoints/vre_to_rgb.pt
+vre,rgb,shot,0.0001,1,0.85,0.4,full,45889940,3.39,13.26,13.39,checkpoints/vre_fft.pt,checkpoints/vre_to_rgb.pt

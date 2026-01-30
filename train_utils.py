@@ -758,18 +758,15 @@ def _delulu_stage2_compute_loss(
         projected_cls = fused_projector(hallucinated_fused)
     else:
         projected_cls = None
-
-    all_logits = []
+    loss=0.0
     for mod in all_modalities:
         if projected_cls is not None:
             fused_cls = projected_cls[mod]
         else:
             fused_cls = hallucinated_fused[mod]['x_norm_clstoken']
         prediction = model.modality_classifiers[mod](fused_cls)
-        all_logits.append(prediction)
-
-    prediction = torch.stack(all_logits).mean(dim=0)
-    loss = ce_criteria(prediction, labels)
+        loss += ce_criteria(prediction, labels)
+    loss /= len(all_modalities)
     return loss
 
 
@@ -1062,10 +1059,15 @@ def _delulu_stage3_test(
     # Track pairwise disagreement for diversity measurement
     all_mods_list = list(all_modalities)
     pairwise_disagreement = {}
+    pairwise_oracle = {}
+    pairwise_wins = {}  # pairwise_wins[(mod_i, mod_j)] = wins for mod_i when disagreeing with mod_j
     for i, mod_i in enumerate(all_mods_list):
         for j, mod_j in enumerate(all_mods_list):
             if i < j:
                 pairwise_disagreement[f"{mod_i}_{mod_j}"] = 0
+                pairwise_oracle[f"{mod_i}_{mod_j}"] = 0
+                pairwise_wins[(mod_i, mod_j)] = 0
+                pairwise_wins[(mod_j, mod_i)] = 0
 
     with torch.no_grad():
         pbar = tqdm(test_loader, desc="Testing")
@@ -1121,17 +1123,25 @@ def _delulu_stage3_test(
                 all_preds.append(predicted_mod)
                 per_mod_correct[mod] += (predicted_mod == labels).sum().item()
 
-            # Compute pairwise disagreement for diversity
+            softvote_logits = torch.stack(all_logits).mean(dim=0)
+            _, softvote_predicted = torch.max(softvote_logits, 1)
+
+            # Compute pairwise disagreement, oracle accuracy, and win rates
             all_preds_stack = torch.stack(all_preds)  # [num_mods, B]
             for i, mod_i in enumerate(all_mods_list):
                 for j, mod_j in enumerate(all_mods_list):
                     if i < j:
                         pair_key = f"{mod_i}_{mod_j}"
-                        disagreement = (all_preds_stack[i] != all_preds_stack[j]).sum().item()
-                        pairwise_disagreement[pair_key] += disagreement
-
-            softvote_logits = torch.stack(all_logits).mean(dim=0)
-            _, softvote_predicted = torch.max(softvote_logits, 1)
+                        disagree_mask = (all_preds_stack[i] != all_preds_stack[j])
+                        pairwise_disagreement[pair_key] += disagree_mask.sum().item()
+                        # Oracle: either head got it right
+                        either_correct = (all_preds_stack[i] == labels) | (all_preds_stack[j] == labels)
+                        pairwise_oracle[pair_key] += either_correct.sum().item()
+                        # Win rates: when disagreeing, whose prediction matched the ensemble decision?
+                        i_dominated = (disagree_mask & (all_preds_stack[i] == softvote_predicted)).sum().item()
+                        j_dominated = (disagree_mask & (all_preds_stack[j] == softvote_predicted)).sum().item()
+                        pairwise_wins[(mod_i, mod_j)] += i_dominated
+                        pairwise_wins[(mod_j, mod_i)] += j_dominated
             softvote_correct += (softvote_predicted == labels).sum().item()
             pbar.set_postfix({'acc': f'{100 * softvote_correct / total:.2f}%'})
 
@@ -1142,10 +1152,18 @@ def _delulu_stage3_test(
         print(f"      Test Accuracy from {mod} classifier: {mod_test_acc:.2f}%")
 
     # Print predictive diversity (pairwise disagreement rates)
-    print(f"  Predictive Diversity (pairwise disagreement %):")
+    print(f"  Predictive Diversity (pairwise):")
     for pair_key, disagreement_count in pairwise_disagreement.items():
         disagreement_pct = 100 * disagreement_count / total
-        print(f"      {pair_key}: {disagreement_pct:.2f}%")
+        oracle_acc = 100 * pairwise_oracle[pair_key] / total
+        # Parse mod names from pair_key
+        mod_i, mod_j = pair_key.split("_", 1)
+        if disagreement_count > 0:
+            i_win_pct = 100 * pairwise_wins[(mod_i, mod_j)] / disagreement_count
+            j_win_pct = 100 * pairwise_wins[(mod_j, mod_i)] / disagreement_count
+        else:
+            i_win_pct = j_win_pct = 0.0
+        print(f"      {pair_key}: disagree {disagreement_pct:.2f}%, oracle {oracle_acc:.2f}%, wins {mod_i}:{i_win_pct:.1f}%/{mod_j}:{j_win_pct:.1f}%")
 
     return softvote_test_acc
 
