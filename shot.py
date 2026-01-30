@@ -8,6 +8,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 from einops import rearrange
 from eurosat_data_utils import create_multimodal_batch
+from train_utils import _delulu_stage3_test
 import wandb
 import numpy as np
 
@@ -287,7 +288,9 @@ def train_shot(
     latent_reconstruct_modalities: list[str] = ["rgb"],
     modality_bands_dict: dict = None,
     max_norm=4,
-    distillation_temperature: float = 2.0
+    distillation_temperature: float = 2.0,
+    test_loader=None,
+    eval_every_n_epochs: int = None,
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -321,8 +324,7 @@ def train_shot(
 
     model.freeze_all()
     model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=False, msla=True, patch_embedders=True, classifier=True)
-    if args.train_components=="full":
-        model.set_requires_grad("backbone", mask_token=False, blocks=True, norm=True)
+    model.set_requires_grad("backbone", mask_token=False, blocks=True, norm=True)
     
     evan = model.evan
     embed_dim = evan.embed_dim
@@ -520,6 +522,32 @@ def train_shot(
 
         print(f"\nEpoch {epoch+1}/{args.epochs}:")
         print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}, Pre-fusion: {train_pre_fusion_loss:.4f}, Distill: {train_distill_loss:.4f}, lr: {optimizer.param_groups[0]['lr']:.6f}")
+
+        # Periodic evaluation
+        if eval_every_n_epochs is not None and test_loader is not None and (epoch + 1) % eval_every_n_epochs == 0:
+            print(f"\n--- Periodic Evaluation at Epoch {epoch+1} ---")
+            model.eval()
+            unlabeled_modalities = [mod for mod in mae_modalities if mod not in latent_reconstruct_modalities]
+            if not unlabeled_modalities:
+                unlabeled_modalities = mae_modalities[:1]
+            labeled_modalities = latent_reconstruct_modalities
+
+            for objective in ["transfer", "peeking", "addition"]:
+                accuracy = _delulu_stage3_test(
+                    model=model,
+                    evan=evan,
+                    test_loader=test_loader,
+                    device=device,
+                    modality_bands_dict=modality_bands_dict,
+                    unlabeled_modalities=unlabeled_modalities,
+                    labeled_modalities=labeled_modalities,
+                    all_modalities=all_modalities,
+                    intermediate_projectors=intermediate_projectors,
+                    objective=objective
+                )
+                print(f"  {objective.capitalize()} accuracy: {accuracy:.2f}%")
+                wandb.log({f"test/{objective}_accuracy": accuracy, "epoch": epoch + 1})
+            model.train()
 
     print("\n=== Phase 2 (Fusion MAE Training) complete ===")
     return mae_decoders, latent_projectors, intermediate_projectors, trainable_total

@@ -20,28 +20,30 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 
 def main():
     parser = argparse.ArgumentParser(description='End to end training for SHOT model.')
+    # IMPORTANT
     parser.add_argument('--stage0_checkpoint', type=str, required=True,
                         help='Path to stage 0 checkpoint (required)')
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='Batch size for training (default: 32)')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of dataloader workers (default: 4)')
-    parser.add_argument('--new_mod_group', type=str, default='vre', choices=['vre', 'nir', 'swir','rgb'],
+    parser.add_argument('--new_mod_group', type=str, required=True, choices=['vre', 'nir', 'swir','rgb'],
                         help='New modality group to train')
-    parser.add_argument('--train_method', type=str, default='shot', choices=['shot'])
-    parser.add_argument('--epochs', type=int, default=4,
-                        help='Epochs for fusion MAE training (default: 4)')
-    parser.add_argument('--ssl_lr', type=float, default=1e-4,
-                        help='Learning rate for fusion MAE training (default: 1e-4)')
     parser.add_argument('--mae_mask_ratio', type=float, default=0.75,
                         help='Mask ratio for MAE training (default: 0.75)')
-    parser.add_argument('--modality_dropout', type=float, default=0.2,
-                        help='Probability of fully masking a modality (default: 0.2)')
-    parser.add_argument('--wandb_project', type=str, default='shot-end-to-end')
+    parser.add_argument('--modality_dropout', type=float, default=0.4,
+                        help='Probability of fully masking a modality')
+    parser.add_argument('--mae_modalities', type=str, default="all", choices=["all","newmod"]) # jan30 update: all > newmod
+    
+    # UNIMPORTANT
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='Batch size for training (default: 64)')
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help='Number of dataloader workers (default: 4)')
+    parser.add_argument('--epochs', type=int, default=4,
+                        help='Epochs for fusion MAE training (default: 4)')
+    parser.add_argument('--eval_every_n_epochs', type=int, default=4,
+                        help='Evaluate every N epochs during training (default: None, only eval at end)')
+    parser.add_argument('--ssl_lr', type=float, default=1e-4,
+                        help='Learning rate for fusion MAE training (default: 1e-4)')
+    parser.add_argument('--wandb_project', type=str, default='delulu-e2e')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
-    parser.add_argument('--multimodal_eval', action='store_true')
-    parser.add_argument('--monomodal_eval', action='store_true')
-    parser.add_argument('--train_components', type=str, default='full', choices=['full','adaptor'])
     parser.add_argument('--checkpoint_name', type=str, default=None)
     args = parser.parse_args()
 
@@ -68,13 +70,13 @@ def main():
     wandb.init(
         project=args.wandb_project,
         config={**config, **vars(args)},
-        name=f"{starting_modality}=+{newmod}--{args.mae_mask_ratio}mask"
+        name=f"{starting_modality}+={newmod}--{args.mae_modalities}_formae"
     )
 
     # Create datasets
     print("\n=== Creating datasets ===")
 
-    _, train2_loader, test_loader = get_loaders(32,4)
+    _, train2_loader, test_loader = get_loaders(args.batch_size,args.num_workers)
 
     evan = model.evan
     model = model.to(device)
@@ -87,17 +89,26 @@ def main():
         model = model.to(device)  # Move newly created components to device
     
     # ========================================== TRAIN SHOT ===========================================
-    if args.train_method=="shot":
-        print(f"\n Using SHOT (MAE + Latent Distillation + Sequence Projection) training method for fusion blocks")
-        _,_,intermediate_projectors,trainable_total=train_shot(
-            model=model,
-            train_loader=train2_loader,
-            device=device,
-            args=args,
-            mae_modalities=[starting_modality,newmod],  # new modality reconstructs pixels
-            latent_reconstruct_modalities=[starting_modality],
-            modality_bands_dict=modality_bands_dict,
-        )
+    print(f"\n Using SHOT (MAE + Latent Distillation + Sequence Projection) training method for fusion blocks")
+    match args.mae_modalities:
+        case "all":
+            print(f"requiring mae from all modalities.")
+            mae_modalities=[starting_modality,newmod]
+        case "newmod":
+            print(f"requiring mae from newmod only.")
+            mae_modalities=[newmod]
+        
+    _,_,intermediate_projectors,trainable_total=train_shot(
+        model=model,
+        train_loader=train2_loader,
+        device=device,
+        args=args,
+        mae_modalities=mae_modalities,
+        latent_reconstruct_modalities=[starting_modality],
+        modality_bands_dict=modality_bands_dict,
+        test_loader=test_loader,
+        eval_every_n_epochs=args.eval_every_n_epochs,
+    )
 
     # ========================================= EVALUATION =====================================
     print("\n=== Evaluating trained model ===")
@@ -135,8 +146,8 @@ def main():
         wandb.log({f"test/{objective}_accuracy": accuracy})
 
     # ========================================= CHECKPOINT =====================================
-    timestamp_shot = datetime.now().strftime('%Y%m%d_%H%M%S')
-    checkpoint_shotete = os.path.join(args.checkpoint_dir, f'evan_eurosat_{args.train_method}_{timestamp_shot}.pt')
+    timestamp_shot = datetime.now().strftime('%m%d_%H%M')
+    checkpoint_shotete = os.path.join(args.checkpoint_dir, f'delulunet_eurosat_{timestamp_shot}.pt')
     if args.checkpoint_name:
         checkpoint_shotete = os.path.join(args.checkpoint_dir, f'{args.checkpoint_name}.pt')
     # Save model checkpoint with intermediate_projectors included
@@ -149,11 +160,11 @@ def main():
     print(f"SHOT checkpoint saved to: {checkpoint_shotete} (includes intermediate_projectors)")
 
     # Log results to CSV
-    filename = "res/shot_e2e_e2e.csv"
+    filename = "res/shot_e2e_jan30.csv"
     file_exists = os.path.isfile(filename)
     fieldnames = [
-        "starting_modality","new_modality", "ssl_mode", "ssl_lr", "fusion_epochs",
-        "mask_ratio", "modality_dropout","train_components","trainable_params",
+        "starting_modality","new_modality", "ssl_lr", "epochs",
+        "mask_ratio", "modality_dropout","trainable_params",
         "transfer_acc", "peeking_acc", "addition_acc",
         "stage0_checkpoint", "shote2e_checkpoint"
     ]
@@ -164,12 +175,10 @@ def main():
         writer.writerow([
             starting_modality,
             newmod,
-            args.train_method,
             args.ssl_lr,
             args.epochs,
             args.mae_mask_ratio,
             args.modality_dropout,
-            args.train_components,
             trainable_total,
             f"{accuracies['transfer']:.2f}",
             f"{accuracies['peeking']:.2f}",
@@ -185,13 +194,15 @@ def main():
 if __name__ == '__main__':
     main()
 
+
+# DRYRUN (nir to rgb)
 """
+source env.sh
 python -u shot_ete.py \
-    --checkpoint_name vre_to_rgb \
-    --stage0_checkpoint checkpoints/vre_fft.pt  \
+    --new_mod_group rgb \
+    --checkpoint_name nir_to_rgb-dryrun \
+    --stage0_checkpoint checkpoints/nir_fft.pt  \
     --epochs 4 \
-    --train_components full \
-    --modality_dropout 0.4 \
-    --mae_mask_ratio 0.85 \
-    --new_mod_group rgb
+    --batch_size 64 \
+    --mae_modalities newmod
 """
