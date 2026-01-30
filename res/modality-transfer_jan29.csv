@@ -14,9 +14,6 @@ checkpoints/vre_to_nir.pt,16,vre,vre+nir,delulu-peeking,none,vre,nir,89.46296296
 checkpoints/vre_to_swir.pt,16,vre,vre+swir,delulu-transfer,none,swir,vre,87.62962962962963,87.62962962962963
 checkpoints/vre_to_swir.pt,16,vre,vre+swir,delulu-addition,none,vre+swir,,90.16666666666667,90.48148148148148
 checkpoints/vre_to_swir.pt,16,vre,vre+swir,delulu-peeking,none,vre,swir,89.70370370370371,89.94444444444444
-checkpoints/vre_to_rgb.pt,16,vre,vre+rgb,delulu-transfer,none,rgb,vre,89.03703703703704,89.16666666666667
-checkpoints/vre_to_rgb.pt,16,vre,vre+rgb,delulu-addition,none,vre+rgb,,90.27777777777777,90.81481481481481
-checkpoints/vre_to_rgb.pt,16,vre,vre+rgb,delulu-peeking,none,vre,rgb,89.79629629629629,89.83333333333333
 checkpoints/nir_to_swir.pt,16,nir,nir+swir,delulu-transfer,none,swir,nir,81.29629629629629,82.0925925925926
 checkpoints/nir_to_swir.pt,16,nir,nir+swir,delulu-addition,none,nir+swir,,82.14814814814815,82.14814814814815
 checkpoints/nir_to_swir.pt,16,nir,nir+swir,delulu-peeking,none,nir,swir,80.25925925925925,80.25925925925925
