@@ -416,7 +416,7 @@ def train_shot(
     assert num_params==trainable_total, f"{num_params=} != {trainable_total=}"
 
     optimizer = torch.optim.AdamW(params, lr=args.ssl_lr)
-    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=4, min_lr=1e-6)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=8, min_lr=1e-6)
 
     # Loss functions
     mse_fn = nn.MSELoss()

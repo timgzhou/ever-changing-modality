@@ -168,7 +168,7 @@ def main():
     print(f"SHOT checkpoint saved to: {checkpoint_shotete} (includes intermediate_projectors)")
 
     # Log results to CSV
-    filename = "res/shot_e2e_jan30_batchmixing.csv"
+    filename = "res/shot_e2e_jan30_batchmixing_randinitteacher.csv"
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "starting_modality","new_modality", "ssl_lr", "epochs",
