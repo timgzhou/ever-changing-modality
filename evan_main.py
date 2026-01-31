@@ -255,13 +255,16 @@ class EVAN(nn.Module):
                     src_block = self.modality_fusion_lora_adaptors[source][block_idx - self.tz_fusion_time]
             adaptor.load_state_dict(src_block.state_dict())
 
-    def load_pretrained_dino(self, model_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m"):
+    def load_pretrained_dino(self, model_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", load_weights:bool=True):
         """
         Load pretrained DINO weights from HuggingFace into EVAN.
 
         Args:
             model_name: HuggingFace model name (default: facebook/dinov3-vitl16-pretrain-lvd1689m)
         """
+        if not load_weights:
+            print("pretrained=False, not loading weight and returning directly.")
+            return
         print(f"\n=== Loading pretrained DINO weights ===")
         print(f"Model: {model_name}")
         print("Loading pretrained weights from HuggingFace...")
@@ -1020,7 +1023,7 @@ class EVAN(nn.Module):
 
 # EVAN preset functions (similar to DINOv3)
 
-def evan_small(pretrained: str = "facebook/dinov3-vits16-pretrain-lvd1689m", **kwargs):
+def evan_small(pretrained: str = "facebook/dinov3-vits16-pretrain-lvd1689m", load_weights:bool=True, **kwargs):
     """
     Create EVAN-Small model (384 dim, 12 blocks, 6 heads) with pretrained DINO weights.
 
@@ -1040,11 +1043,11 @@ def evan_small(pretrained: str = "facebook/dinov3-vits16-pretrain-lvd1689m", **k
         layerscale_init=1e-5,  # DINOv3 uses LayerScale
         **kwargs,
     )
-    model.load_pretrained_dino(model_name=pretrained)
+    model.load_pretrained_dino(model_name=pretrained, load_weights=load_weights)
     return model
 
 
-def evan_base(pretrained: str = "facebook/dinov3-vitb16-pretrain-lvd1689m", **kwargs):
+def evan_base(pretrained: str = "facebook/dinov3-vitb16-pretrain-lvd1689m", load_weights:bool=True, **kwargs):
     """
     Create EVAN-Base model (768 dim, 12 blocks, 12 heads) with pretrained DINO weights.
 
@@ -1064,11 +1067,11 @@ def evan_base(pretrained: str = "facebook/dinov3-vitb16-pretrain-lvd1689m", **kw
         layerscale_init=1e-5,  # DINOv3 uses LayerScale
         **kwargs,
     )
-    model.load_pretrained_dino(model_name=pretrained)
+    model.load_pretrained_dino(model_name=pretrained,load_weights=load_weights)
     return model
 
 
-def evan_large(pretrained: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", **kwargs):
+def evan_large(pretrained: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", load_weights:bool=True, **kwargs):
     """
     Create EVAN-Large model (1024 dim, 24 blocks, 16 heads) with pretrained DINO weights.
 
@@ -1088,7 +1091,7 @@ def evan_large(pretrained: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", **k
         layerscale_init=1e-5,  # DINOv3 uses LayerScale
         **kwargs,
     )
-    model.load_pretrained_dino(model_name=pretrained)
+    model.load_pretrained_dino(model_name=pretrained,load_weights=load_weights)
     return model
 
 

@@ -25,6 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description='Stage 0: Train EVAN on a single modality (using train1 split)')
     parser.add_argument('--model', type=str, default='evan_small', choices=['evan_small', 'evan_base', 'evan_large'],
                         help='EVAN model size (default: evan_small)')
+    parser.add_argument('--use_dino_weights', action="store_true")
     parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size for training (default: 32)')
     parser.add_argument('--lr', type=float, default=1e-4,
@@ -72,6 +73,7 @@ def main():
     print("\n=== Creating EVAN model ===")
     model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
     evan = model_fn(
+        load_weights=args.use_dino_weights,
         tz_fusion_time=args.tz_fusion_time,
         tz_lora_rank=args.tz_lora_rank,
         tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,

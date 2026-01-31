@@ -27,10 +27,12 @@ def main():
                         help='New modality group to train')
     parser.add_argument('--mae_mask_ratio', type=float, default=0.75,
                         help='Mask ratio for MAE training (default: 0.75)')
-    parser.add_argument('--modality_dropout', type=float, default=0.4,
+    parser.add_argument('--modality_dropout', type=float, default=0.3,
                         help='Probability of fully masking a modality')
     parser.add_argument('--mae_modalities', type=str, default="all", choices=["all","newmod"]) # jan30 update: all > newmod
-    
+    parser.add_argument('--labeled_frequency', type=float, default=0.3,
+                        help='Frequency of labeled monomodal batches from train1 (0-1, default: 0.3)')
+
     # UNIMPORTANT
     parser.add_argument('--batch_size', type=int, default=64,
                         help='Batch size for training (default: 64)')
@@ -70,13 +72,13 @@ def main():
     wandb.init(
         project=args.wandb_project,
         config={**config, **vars(args)},
-        name=f"{starting_modality}+={newmod}--{args.mae_modalities}_formae"
+        name=f"{starting_modality}+={newmod}--mae{args.mae_modalities}_lf{args.labeled_frequency}"
     )
 
     # Create datasets
     print("\n=== Creating datasets ===")
 
-    _, train2_loader, test_loader = get_loaders(args.batch_size,args.num_workers)
+    train1_loader, train2_loader, test_loader = get_loaders(args.batch_size,args.num_workers)
 
     evan = model.evan
     model = model.to(device)
@@ -108,6 +110,8 @@ def main():
         modality_bands_dict=modality_bands_dict,
         test_loader=test_loader,
         eval_every_n_epochs=args.eval_every_n_epochs,
+        labeled_train_loader=train1_loader,
+        labeled_frequency=args.labeled_frequency,
     )
 
     # ========================================= EVALUATION =====================================
@@ -124,11 +128,12 @@ def main():
 
     # Run evaluations and store accuracies
     accuracies = {}
+    addition_ens_acc = None
     for objective, info in objectives.items():
         print(f"\n--- Evaluating: {objective.capitalize()} objective ---")
         print(f"    {info['desc']}")
 
-        accuracy = _delulu_stage3_test(
+        accuracy, ens_acc = _delulu_stage3_test(
             model=model,
             evan=model.evan,
             test_loader=test_loader,
@@ -142,6 +147,9 @@ def main():
         )
 
         accuracies[objective] = accuracy
+        if objective == "addition" and ens_acc is not None:
+            addition_ens_acc = ens_acc
+            wandb.log({"test/addition_ens_accuracy": ens_acc})
         print(f"{objective.capitalize()} accuracy: {accuracy:.2f}%")
         wandb.log({f"test/{objective}_accuracy": accuracy})
 
@@ -160,12 +168,12 @@ def main():
     print(f"SHOT checkpoint saved to: {checkpoint_shotete} (includes intermediate_projectors)")
 
     # Log results to CSV
-    filename = "res/shot_e2e_jan30.csv"
+    filename = "res/shot_e2e_jan30_batchmixing.csv"
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "starting_modality","new_modality", "ssl_lr", "epochs",
         "mask_ratio", "modality_dropout","trainable_params",
-        "transfer_acc", "peeking_acc", "addition_acc",
+        "transfer_acc", "peeking_acc", "addition_acc", "addition_ens_acc",
         "stage0_checkpoint", "shote2e_checkpoint"
     ]
     with open(filename, mode='a', newline='') as file:
@@ -183,6 +191,7 @@ def main():
             f"{accuracies['transfer']:.2f}",
             f"{accuracies['peeking']:.2f}",
             f"{accuracies['addition']:.2f}",
+            f"{addition_ens_acc:.2f}" if addition_ens_acc is not None else "",
             args.stage0_checkpoint,
             checkpoint_shotete,
         ])
@@ -203,6 +212,5 @@ python -u shot_ete.py \
     --checkpoint_name nir_to_rgb-dryrun \
     --stage0_checkpoint checkpoints/nir_fft.pt  \
     --epochs 4 \
-    --batch_size 64 \
-    --mae_modalities newmod
+    --batch_size 64
 """

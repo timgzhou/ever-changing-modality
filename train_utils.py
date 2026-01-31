@@ -1035,6 +1035,7 @@ def _delulu_stage3_test(
 
     For objective="transfer": test on unlabeled only, hallucinate labeled
     For objective="addition": test on both modalities (all real, no hallucination)
+                              Also tracks ensemble of peeking + transfer paths
     For objective="peeking": test on labeled only, hallucinate unlabeled
     """
     # Determine test configuration based on objective
@@ -1056,6 +1057,8 @@ def _delulu_stage3_test(
     softvote_correct = 0
     total = 0
     per_mod_correct = {mod: 0 for mod in all_modalities}
+    # Track ensemble of peeking + transfer for addition objective
+    peeking_transfer_ensemble_correct = 0
     # Track pairwise disagreement for diversity measurement
     all_mods_list = list(all_modalities)
     pairwise_disagreement = {}
@@ -1109,6 +1112,42 @@ def _delulu_stage3_test(
 
             fused_output = evan.forward_fusion_from_modality_features(fusion_input)
 
+            # For addition objective, also compute peeking and transfer paths for ensemble
+            peeking_logits = None
+            transfer_logits = None
+            if objective == "addition":
+                # Peeking path: real labeled + hallucinated unlabeled
+                peeking_hal = hallucinate_intermediate_features(
+                    test_intermediate, labeled_modalities, unlabeled_modalities,
+                    intermediate_projectors
+                )
+                peeking_fusion_input = merge_intermediate_features(
+                    test_intermediate, peeking_hal,
+                    labeled_modalities, unlabeled_modalities
+                )
+                peeking_fused = evan.forward_fusion_from_modality_features(peeking_fusion_input)
+                peeking_logits_list = []
+                for mod in all_mods_list:
+                    fused_cls = peeking_fused[mod]['x_norm_clstoken']
+                    peeking_logits_list.append(model.modality_classifiers[mod](fused_cls))
+                peeking_logits = torch.stack(peeking_logits_list).mean(dim=0)
+
+                # Transfer path: real unlabeled + hallucinated labeled
+                transfer_hal = hallucinate_intermediate_features(
+                    test_intermediate, unlabeled_modalities, labeled_modalities,
+                    intermediate_projectors
+                )
+                transfer_fusion_input = merge_intermediate_features(
+                    test_intermediate, transfer_hal,
+                    unlabeled_modalities, labeled_modalities
+                )
+                transfer_fused = evan.forward_fusion_from_modality_features(transfer_fusion_input)
+                transfer_logits_list = []
+                for mod in all_mods_list:
+                    fused_cls = transfer_fused[mod]['x_norm_clstoken']
+                    transfer_logits_list.append(model.modality_classifiers[mod](fused_cls))
+                transfer_logits = torch.stack(transfer_logits_list).mean(dim=0)
+
             total += labels.size(0)
             all_logits = []
             for mod in all_mods_list:
@@ -1143,6 +1182,13 @@ def _delulu_stage3_test(
                         pairwise_wins[(mod_i, mod_j)] += i_dominated
                         pairwise_wins[(mod_j, mod_i)] += j_dominated
             softvote_correct += (softvote_predicted == labels).sum().item()
+
+            # Compute peeking + transfer ensemble accuracy for addition objective
+            if objective == "addition" and peeking_logits is not None and transfer_logits is not None:
+                ensemble_logits = (peeking_logits + transfer_logits) / 2
+                _, ensemble_predicted = torch.max(ensemble_logits, 1)
+                peeking_transfer_ensemble_correct += (ensemble_predicted == labels).sum().item()
+
             pbar.set_postfix({'acc': f'{100 * softvote_correct / total:.2f}%'})
 
     softvote_test_acc = 100 * softvote_correct / total
@@ -1150,6 +1196,12 @@ def _delulu_stage3_test(
     for mod in all_mods_list:
         mod_test_acc = 100 * per_mod_correct[mod] / total
         print(f"      Test Accuracy from {mod} classifier: {mod_test_acc:.2f}%")
+
+    # Report peeking + transfer ensemble for addition objective
+    peeking_transfer_acc = None
+    if objective == "addition":
+        peeking_transfer_acc = 100 * peeking_transfer_ensemble_correct / total
+        print(f"  Test Accuracy (peeking+transfer ensemble): {peeking_transfer_acc:.2f}%")
 
     # Print predictive diversity (pairwise disagreement rates)
     print(f"  Predictive Diversity (pairwise):")
@@ -1165,7 +1217,7 @@ def _delulu_stage3_test(
             i_win_pct = j_win_pct = 0.0
         print(f"      {pair_key}: disagree {disagreement_pct:.2f}%, oracle {oracle_acc:.2f}%, wins {mod_i}:{i_win_pct:.1f}%/{mod_j}:{j_win_pct:.1f}%")
 
-    return softvote_test_acc
+    return softvote_test_acc, peeking_transfer_acc
 
 
 def delulu_supervision(

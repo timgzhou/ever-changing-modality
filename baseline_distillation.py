@@ -638,7 +638,8 @@ def main():
             n_storage_tokens=4,
             starting_modality=args.modality,
             starting_n_chans=len(bands_mod),
-            device=device
+            device=device,
+            load_weights=False
         )
 
         # If student is RGB, reset patch embedder to random init (DINO pretrained weights are unfair)
