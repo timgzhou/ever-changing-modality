@@ -337,6 +337,7 @@ def train_shot(
     eval_every_n_epochs: int = None,
     labeled_train_loader=None,
     labeled_frequency: float = 0.0,
+    labeled_start_fraction: float = 0.0,
     active_losses: list[str] = None,
 ):
     """
@@ -351,13 +352,21 @@ def train_shot(
     - train_loader (train2): unlabeled multimodal data -> full SHOT losses with teacher distillation
     - labeled_train_loader (train1): labeled monomodal data -> CE loss with real labels + latent loss
     - labeled_frequency: probability of sampling from labeled_train_loader each iteration
+    - labeled_start_fraction: fraction of training to complete before labeled mixing starts
+        - 0.0: start labeled mixing from the beginning
+        - 0.5: start labeled mixing at 50% of training
+        - 1.0: never use labeled mixing
     """
+    # Compute epoch at which labeled mixing starts
+    labeled_start_epoch = int(args.epochs * labeled_start_fraction)
+
     print("\n" + "="*70)
     print(f"=== END TO END SHOT TRAINING===\n")
     print(f"  MAE modalities (pixel reconstruction): {mae_modalities}")
     print(f"  Latent modalities (feature matching): {latent_reconstruct_modalities}")
     if labeled_train_loader is not None and labeled_frequency > 0:
         print(f"  Mixed training mode: labeled_frequency={labeled_frequency:.2f}")
+        print(f"    - labeled_start_fraction={labeled_start_fraction:.2f} (starts at epoch {labeled_start_epoch + 1}/{args.epochs})")
         print(f"    - Unlabeled batches (train2): MAE + latent + pre-fusion + distillation losses")
         print(f"    - Labeled batches (train1): CE + latent losses (newmod hallucinated)")
 
@@ -428,7 +437,7 @@ def train_shot(
     # assert num_params==trainable_total, f"{num_params=} != {trainable_total=}"
 
     optimizer = torch.optim.AdamW(params, lr=args.ssl_lr)
-    scheduler = ReduceLROnPlateau(optimizer, factor=0.7, patience=12, min_lr=1e-6)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.7, patience=8, min_lr=1e-6)
 
     # Loss functions
     mse_fn = nn.MSELoss()
@@ -458,8 +467,14 @@ def train_shot(
         labeled_count = 0
         unlabeled_count = 0
 
+        # Compute effective labeled_frequency for this epoch based on schedule
+        if epoch >= labeled_start_epoch:
+            effective_labeled_freq = labeled_frequency
+        else:
+            effective_labeled_freq = 0.0
+
         pbar = tqdm(
-            mixed_batch_iterator(train_loader, labeled_train_loader, labeled_frequency),
+            mixed_batch_iterator(train_loader, labeled_train_loader, effective_labeled_freq),
             total=len(train_loader),
             desc=f"SHOT Epoch {epoch+1}/{args.epochs}"
         )
@@ -513,12 +528,20 @@ def train_shot(
                             latent_loss = latent_loss + mse_fn(projected_cls, teacher_cls) + mse_fn(projected_patches, teacher_patches)
                             batch_latent_loss += latent_loss.item()
 
-                # 6. Hard label CE loss
+                # 6. Hard label CE loss (per-modality, averaged)
                 total_loss = latent_loss
                 batch_ce_loss = 0.0
                 if 'ce' in active_losses:
-                    student_logits = model.classify_from_features(student_fused)
-                    ce_loss = ce_fn(student_logits, labels)
+                    ce_loss = torch.tensor(0.0, device=device)
+                    ce_count = 0
+                    for mod in student_fused.keys():
+                        if mod in model.modality_classifiers:
+                            cls_token = student_fused[mod]['x_norm_clstoken']
+                            mod_logits = model.modality_classifiers[mod](cls_token)
+                            ce_loss = ce_loss + ce_fn(mod_logits, labels)
+                            ce_count += 1
+                    if ce_count > 0:
+                        ce_loss = ce_loss / ce_count
                     total_loss = total_loss + ce_loss
                     batch_ce_loss = ce_loss.item()
 
@@ -564,11 +587,11 @@ def train_shot(
                     prefusion_loss = prefusion_loss / pre_fusion_loss_count if pre_fusion_loss_count > 0 else prefusion_loss
                     batch_pre_fusion_loss = prefusion_loss.item()
 
-                # Masking with protected_modalities to ensure newmod is never dropped (only when batch mixing)
+                # Masking with protected_modalities to ensure newmod is never dropped (only when batch mixing is active)
                 modality_masks, masked_mod_features = mask_input(
                     intermediate_projectors, batch_size, evan.n_storage_tokens, num_patches,
                     args.mae_mask_ratio, all_modalities, prefusion_features, args.modality_dropout, device,
-                    protected_modalities=newmod_list if labeled_frequency > 0 else None
+                    protected_modalities=newmod_list if effective_labeled_freq > 0 else None
                 )
 
                 # Step 3: Forward through fusion blocks
@@ -610,7 +633,7 @@ def train_shot(
                         total_loss = total_loss + latent_loss
                         batch_latent_loss += latent_loss.item()
 
-                # Label distillation
+                # Label distillation (per-modality, averaged)
                 batch_distill_loss = 0.0
                 if 'distill' in active_losses:
                     with torch.no_grad():
@@ -618,8 +641,16 @@ def train_shot(
                         teacher_input = {teacher_modality: full_multimodal_input[teacher_modality]}
                         teacher_logits = teacher_classifier(teacher_input)
 
-                    student_logits = model.classify_from_features(student_fused)
-                    distill_loss = distillation_loss(student_logits, teacher_logits, distillation_temperature)
+                    distill_loss = torch.tensor(0.0, device=device)
+                    distill_count = 0
+                    for mod in student_fused.keys():
+                        if mod in model.modality_classifiers:
+                            cls_token = student_fused[mod]['x_norm_clstoken']
+                            mod_logits = model.modality_classifiers[mod](cls_token)
+                            distill_loss = distill_loss + distillation_loss(mod_logits, teacher_logits, distillation_temperature)
+                            distill_count += 1
+                    if distill_count > 0:
+                        distill_loss = distill_loss / distill_count
                     total_loss = total_loss + distill_loss
                     batch_distill_loss = distill_loss.item()
 
@@ -660,6 +691,7 @@ def train_shot(
                 'distill_loss': batch_distill_loss,
                 'ce_loss': batch_ce_loss,
                 'is_labeled': 1 if is_labeled else 0,
+                'effective_labeled_freq': effective_labeled_freq,
                 'grad_norm': grad_norm.item(),
                 'epoch': epoch + 1,
                 'lr': optimizer.param_groups[0]['lr']

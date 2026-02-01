@@ -32,6 +32,8 @@ def main():
     parser.add_argument('--mae_modalities', type=str, default="all", choices=["all","newmod"]) # jan30 update: all > newmod
     parser.add_argument('--labeled_frequency', type=float, default=0.3,
                         help='Frequency of labeled monomodal batches from train1 (0-1, default: 0.3)')
+    parser.add_argument('--labeled_start_fraction', type=float, default=0.0,
+                        help='Fraction of training before labeled mixing starts (0=start, 0.5=halfway, 1=never)')
     parser.add_argument('--active_losses', type=str, nargs='+', default=None,
                         choices=['mae', 'latent', 'prefusion', 'distill', 'ce'],
                         help='Which losses to activate (default: all)')
@@ -117,6 +119,7 @@ def main():
         eval_every_n_epochs=args.eval_every_n_epochs,
         labeled_train_loader=train1_loader,
         labeled_frequency=args.labeled_frequency,
+        labeled_start_fraction=args.labeled_start_fraction,
         active_losses=args.active_losses,
     )
 
@@ -178,7 +181,7 @@ def main():
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "starting_modality","new_modality", "ssl_lr", "epochs",
-        "mask_ratio", "modality_dropout","labeled_frequency","trainable_params", "active_losses",
+        "mask_ratio", "modality_dropout","labeled_frequency","labeled_start_fraction","trainable_params", "active_losses",
         "transfer_acc", "peeking_acc", "addition_acc", "addition_ens_acc",
         "stage0_checkpoint", "shote2e_checkpoint"
     ]
@@ -196,6 +199,7 @@ def main():
             args.mae_mask_ratio,
             args.modality_dropout,
             args.labeled_frequency,
+            args.labeled_start_fraction,
             trainable_total,
             active_losses_str,
             f"{accuracies['transfer']:.2f}",
