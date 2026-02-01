@@ -8,7 +8,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 from einops import rearrange
 from eurosat_data_utils import create_multimodal_batch
-from train_utils import _delulu_stage3_test
+from train_utils import _delulu_stage3_test, hallucinate_intermediate_features, merge_intermediate_features
 import wandb
 import numpy as np
 
@@ -333,40 +333,49 @@ def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dic
                               starting_modality, intermediate_projectors, all_modalities):
     """
     Compute peeking accuracy on labeled monomodal validation data.
-    Uses real starting_mod + hallucinated newmod.
+    Uses real starting_mod + hallucinated newmod (peeking path).
     """
     model.eval()
     correct = 0
     total = 0
+    newmod_modalities = [m for m in all_modalities if m != starting_modality]
 
     with torch.no_grad():
         for batch in val_loader:
             # Create monomodal batch (starting_mod only)
             mm_batch = create_multimodal_batch(
-                batch, modality_bands_dict, device,
+                batch,
+                modality_bands_dict=modality_bands_dict,
                 modalities=(starting_modality,)
             )
+            mm_batch = {k: v.to(device) for k, v in mm_batch.items()}
             labels = batch['label'].to(device)
 
-            # Get prefusion features from EVAN
-            prefusion_feats = evan.forward_prefusion_with_metadata(mm_batch)[0]
+            # Get intermediate features from EVAN
+            intermediate_feats = evan.forward_modality_specific_features(mm_batch)
 
-            # Hallucinate newmod via intermediate projectors
-            starting_feat = prefusion_feats[starting_modality]
-            starting_feat_norm = F.layer_norm(starting_feat, [starting_feat.shape[-1]])
-
-            all_feats = {starting_modality: starting_feat}
-            for mod in all_modalities:
-                if mod != starting_modality:
-                    key = f"{starting_modality}_to_{mod}"
-                    all_feats[mod] = intermediate_projectors[key](starting_feat_norm)
+            # Hallucinate newmod from starting_mod
+            hallucinated = hallucinate_intermediate_features(
+                intermediate_feats,
+                source_modalities=(starting_modality,),
+                target_modalities=tuple(newmod_modalities),
+                intermediate_projectors=intermediate_projectors
+            )
+            fusion_input = merge_intermediate_features(
+                intermediate_feats, hallucinated,
+                (starting_modality,), tuple(newmod_modalities)
+            )
 
             # Forward through fusion + classifier
-            fused = model.forward_fusion_from_modality_features(all_feats)
-            logits = model.classify_from_features(fused)
+            fused_output = evan.forward_fusion_from_modality_features(fusion_input)
 
             # Soft vote across classifiers
-            avg_logits = torch.stack(list(logits.values())).mean(dim=0)
+            all_logits = []
+            for mod in all_modalities:
+                fused_cls = fused_output[mod]['x_norm_clstoken']
+                all_logits.append(model.modality_classifiers[mod](fused_cls))
+
+            avg_logits = torch.stack(all_logits).mean(dim=0)
             preds = avg_logits.argmax(dim=1)
 
             correct += (preds == labels).sum().item()
@@ -380,10 +389,6 @@ def compute_teacher_agreement(model, teacher, evan, val_loader, device, modality
     """
     Compute agreement rate between student and teacher on unlabeled multimodal data.
     Tests transfer path: real newmod + hallucinated starting_mod.
-
-    The intermediate_projectors contain bidirectional projectors like:
-    - "rgb_to_nir" (starting_mod → newmod)
-    - "nir_to_rgb" (newmod → starting_mod) ← we use this for transfer path
     """
     model.eval()
     teacher.eval()
@@ -394,39 +399,47 @@ def compute_teacher_agreement(model, teacher, evan, val_loader, device, modality
         for batch in val_loader:
             # Create full multimodal batch to get newmod features
             mm_batch = create_multimodal_batch(
-                batch, modality_bands_dict, device,
+                batch,
+                modality_bands_dict=modality_bands_dict,
                 modalities=tuple(all_modalities)
             )
+            mm_batch = {k: v.to(device) for k, v in mm_batch.items()}
 
             # Teacher prediction (uses starting_mod only)
             teacher_batch = create_multimodal_batch(
-                batch, modality_bands_dict, device,
+                batch,
+                modality_bands_dict=modality_bands_dict,
                 modalities=(starting_modality,)
             )
+            teacher_batch = {k: v.to(device) for k, v in teacher_batch.items()}
             teacher_logits = teacher(teacher_batch)
             teacher_preds = teacher_logits.argmax(dim=1)
 
             # Student prediction (transfer path: real newmod + hallucinated starting_mod)
-            prefusion_feats = evan.forward_prefusion_with_metadata(mm_batch)[0]
+            intermediate_feats = evan.forward_modality_specific_features(mm_batch)
 
-            # Build transfer features: real newmod + hallucinated starting_mod
-            transfer_feats = {}
-            for mod in newmod_modalities:
-                transfer_feats[mod] = prefusion_feats[mod]  # Real newmod features
-
-            # Hallucinate starting_mod from newmod (use mean of projections if multiple newmods)
-            hallucinated_starting = []
-            for newmod in newmod_modalities:
-                newmod_seq = prefusion_feats[newmod]
-                newmod_seq_norm = F.layer_norm(newmod_seq, [newmod_seq.shape[-1]])
-                key = f"{newmod}_to_{starting_modality}"  # Reverse projector
-                hallucinated_starting.append(intermediate_projectors[key](newmod_seq_norm))
-            transfer_feats[starting_modality] = torch.stack(hallucinated_starting).mean(dim=0)
+            # Hallucinate starting_mod from newmod
+            hallucinated = hallucinate_intermediate_features(
+                intermediate_feats,
+                source_modalities=tuple(newmod_modalities),
+                target_modalities=(starting_modality,),
+                intermediate_projectors=intermediate_projectors
+            )
+            fusion_input = merge_intermediate_features(
+                intermediate_feats, hallucinated,
+                tuple(newmod_modalities), (starting_modality,)
+            )
 
             # Forward through fusion + classifier
-            fused = model.forward_fusion_from_modality_features(transfer_feats)
-            logits = model.classify_from_features(fused)
-            avg_logits = torch.stack(list(logits.values())).mean(dim=0)
+            fused_output = evan.forward_fusion_from_modality_features(fusion_input)
+
+            # Soft vote across classifiers
+            all_logits = []
+            for mod in all_modalities:
+                fused_cls = fused_output[mod]['x_norm_clstoken']
+                all_logits.append(model.modality_classifiers[mod](fused_cls))
+
+            avg_logits = torch.stack(all_logits).mean(dim=0)
             student_preds = avg_logits.argmax(dim=1)
 
             agree += (student_preds == teacher_preds).sum().item()

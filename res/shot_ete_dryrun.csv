@@ -1,3 +1,5 @@
 starting_modality,new_modality,ssl_lr,epochs,mask_ratio,modality_dropout,trainable_params,active_losses,transfer_acc,peeking_acc,addition_acc,addition_ens_acc,stage0_checkpoint,shote2e_checkpoint
 nir,rgb,0.0001,4,0.75,0.3,47172628,prefusion+distill,54.48,69.87,78.07,78.98,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
 nir,rgb,0.0001,2,0.75,0.3,0.4,0.5,47172628,all,35.89,71.59,78.52,69.89,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
+nir,rgb,0.0001,0.01,2,0.75,0.3,0.0,0.0,47172628,prefusion+distill,35.26,73.44,69.28,77.04,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
+nir,rgb,0.0001,0.01,2,0.75,0.3,0.0,0.0,47172628,prefusion+distill,52.54,73.33,67.09,77.39,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
