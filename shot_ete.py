@@ -32,6 +32,11 @@ def main():
     parser.add_argument('--mae_modalities', type=str, default="all", choices=["all","newmod"]) # jan30 update: all > newmod
     parser.add_argument('--labeled_frequency', type=float, default=0.3,
                         help='Frequency of labeled monomodal batches from train1 (0-1, default: 0.3)')
+    parser.add_argument('--active_losses', type=str, nargs='+', default=None,
+                        choices=['mae', 'latent', 'prefusion', 'distill', 'ce'],
+                        help='Which losses to activate (default: all)')
+    parser.add_argument('--results_csv', type=str, required=True,
+                        help='Path to results CSV file')
 
     # UNIMPORTANT
     parser.add_argument('--batch_size', type=int, default=64,
@@ -44,7 +49,7 @@ def main():
                         help='Evaluate every N epochs during training (default: None, only eval at end)')
     parser.add_argument('--ssl_lr', type=float, default=1e-4,
                         help='Learning rate for fusion MAE training (default: 1e-4)')
-    parser.add_argument('--wandb_project', type=str, default='delulu-e2e')
+    parser.add_argument('--wandb_project', type=str, default='delulu-e2e-lossablate')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--checkpoint_name', type=str, default=None)
     args = parser.parse_args()
@@ -112,6 +117,7 @@ def main():
         eval_every_n_epochs=args.eval_every_n_epochs,
         labeled_train_loader=train1_loader,
         labeled_frequency=args.labeled_frequency,
+        active_losses=args.active_losses,
     )
 
     # ========================================= EVALUATION =====================================
@@ -168,11 +174,11 @@ def main():
     print(f"SHOT checkpoint saved to: {checkpoint_shotete} (includes intermediate_projectors)")
 
     # Log results to CSV
-    filename = "res/shot_e2e_jan30_batchmixing_randinitteacher.csv"
+    filename = args.results_csv
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "starting_modality","new_modality", "ssl_lr", "epochs",
-        "mask_ratio", "modality_dropout","trainable_params",
+        "mask_ratio", "modality_dropout","labeled_frequency","trainable_params", "active_losses",
         "transfer_acc", "peeking_acc", "addition_acc", "addition_ens_acc",
         "stage0_checkpoint", "shote2e_checkpoint"
     ]
@@ -180,6 +186,8 @@ def main():
         writer = csv.writer(file)
         if not file_exists:
             writer.writerow(fieldnames)
+        # Format active_losses for CSV (join with +, or "all" if None was passed)
+        active_losses_str = "+".join(args.active_losses) if args.active_losses else "all"
         writer.writerow([
             starting_modality,
             newmod,
@@ -187,7 +195,9 @@ def main():
             args.epochs,
             args.mae_mask_ratio,
             args.modality_dropout,
+            args.labeled_frequency,
             trainable_total,
+            active_losses_str,
             f"{accuracies['transfer']:.2f}",
             f"{accuracies['peeking']:.2f}",
             f"{accuracies['addition']:.2f}",
@@ -211,6 +221,9 @@ python -u shot_ete.py \
     --new_mod_group rgb \
     --checkpoint_name nir_to_rgb-dryrun \
     --stage0_checkpoint checkpoints/nir_fft.pt  \
-    --epochs 4 \
-    --batch_size 64
+    --epochs 2 \
+    --batch_size 64 \
+    --results_csv res/shot_ete_dryrun.csv \
+    --active_losses prefusion distill \
+    --labeled_frequency 0
 """

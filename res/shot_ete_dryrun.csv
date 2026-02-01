@@ -1,0 +1,2 @@
+starting_modality,new_modality,ssl_lr,epochs,mask_ratio,modality_dropout,trainable_params,active_losses,transfer_acc,peeking_acc,addition_acc,addition_ens_acc,stage0_checkpoint,shote2e_checkpoint
+nir,rgb,0.0001,4,0.75,0.3,47172628,prefusion+distill,54.48,69.87,78.07,78.98,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt

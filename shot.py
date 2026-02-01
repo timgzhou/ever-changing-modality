@@ -337,6 +337,7 @@ def train_shot(
     eval_every_n_epochs: int = None,
     labeled_train_loader=None,
     labeled_frequency: float = 0.0,
+    active_losses: list[str] = None,
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -359,6 +360,17 @@ def train_shot(
         print(f"  Mixed training mode: labeled_frequency={labeled_frequency:.2f}")
         print(f"    - Unlabeled batches (train2): MAE + latent + pre-fusion + distillation losses")
         print(f"    - Labeled batches (train1): CE + latent losses (newmod hallucinated)")
+
+    # Validate and set default for active_losses
+    all_loss_names = ['mae', 'latent', 'prefusion', 'distill', 'ce']
+    if active_losses is None:
+        active_losses = all_loss_names
+    else:
+        invalid = set(active_losses) - set(all_loss_names)
+        if invalid:
+            raise ValueError(f"Invalid loss names: {invalid}. Valid: {all_loss_names}")
+    print(f"  Active losses: {active_losses}")
+
     all_modalities = list(set(mae_modalities + latent_reconstruct_modalities))
 
     # Create frozen copy of full classifier for both feature and label distillation
@@ -405,18 +417,18 @@ def train_shot(
     print(f"    Latent projectors (CLS + Patch): {trainable_projector}")
     print(f"    Intermediate projectors: {trainable_intermediate_proj}")
 
-    params = (
-        list(filter(lambda p: p.requires_grad, model.parameters())) +
-        list(mae_decoders.parameters()) +
-        list(latent_projectors.parameters()) +
-        list(intermediate_projectors.parameters())
-    )
+    params = list(filter(lambda p: p.requires_grad, model.parameters()))
+    params += list(intermediate_projectors.parameters())
+    if 'mae' in active_losses:
+        params += list(mae_decoders.parameters())
+    if 'latent' in active_losses:
+        params += list(latent_projectors.parameters())
     num_params = sum(p.numel() for p in params)
     print(f"Total trainable parameters: {num_params:,}")
-    assert num_params==trainable_total, f"{num_params=} != {trainable_total=}"
+    # assert num_params==trainable_total, f"{num_params=} != {trainable_total=}"
 
     optimizer = torch.optim.AdamW(params, lr=args.ssl_lr)
-    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=8, min_lr=1e-6)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.7, patience=12, min_lr=1e-6)
 
     # Loss functions
     mse_fn = nn.MSELoss()
@@ -480,32 +492,35 @@ def train_shot(
                 student_fused = evan.forward_fusion_from_modality_features(prefusion_features)
 
                 # 5. Latent loss (match teacher on starting_modality only)
-                with torch.no_grad():
-                    teacher_out = teacher_classifier.evan.forward_features(monomodal_input)
-
                 batch_latent_loss = 0.0
                 latent_loss = torch.tensor(0.0, device=device)
-                for mod in latent_reconstruct_modalities:
-                    if mod == starting_modality:  # Only compute for real modality
-                        student_patches = student_fused[mod]['x_norm_patchtokens']
-                        teacher_patches = teacher_out[mod]['x_norm_patchtokens'].detach()
-                        student_cls = student_fused[mod]['x_norm_clstoken']
-                        teacher_cls = teacher_out[mod]['x_norm_clstoken'].detach()
+                if 'latent' in active_losses:
+                    with torch.no_grad():
+                        teacher_out = teacher_classifier.evan.forward_features(monomodal_input)
 
-                        student_seq = torch.cat([student_cls.unsqueeze(1), student_patches], dim=1)
-                        projected_seq = latent_projectors[mod](student_seq)
-                        projected_cls = projected_seq[:, 0, :]
-                        projected_patches = projected_seq[:, 1:, :]
+                    for mod in latent_reconstruct_modalities:
+                        if mod == starting_modality:  # Only compute for real modality
+                            student_patches = student_fused[mod]['x_norm_patchtokens']
+                            teacher_patches = teacher_out[mod]['x_norm_patchtokens'].detach()
+                            student_cls = student_fused[mod]['x_norm_clstoken']
+                            teacher_cls = teacher_out[mod]['x_norm_clstoken'].detach()
 
-                        latent_loss = latent_loss + mse_fn(projected_cls, teacher_cls) + mse_fn(projected_patches, teacher_patches)
-                        batch_latent_loss += latent_loss.item()
+                            student_seq = torch.cat([student_cls.unsqueeze(1), student_patches], dim=1)
+                            projected_seq = latent_projectors[mod](student_seq)
+                            projected_cls = projected_seq[:, 0, :]
+                            projected_patches = projected_seq[:, 1:, :]
+
+                            latent_loss = latent_loss + mse_fn(projected_cls, teacher_cls) + mse_fn(projected_patches, teacher_patches)
+                            batch_latent_loss += latent_loss.item()
 
                 # 6. Hard label CE loss
-                student_logits = model.classify_from_features(student_fused)
-                ce_loss = ce_fn(student_logits, labels)
-
-                total_loss = ce_loss + latent_loss
-                batch_ce_loss = ce_loss.item()
+                total_loss = latent_loss
+                batch_ce_loss = 0.0
+                if 'ce' in active_losses:
+                    student_logits = model.classify_from_features(student_fused)
+                    ce_loss = ce_fn(student_logits, labels)
+                    total_loss = total_loss + ce_loss
+                    batch_ce_loss = ce_loss.item()
 
                 # No MAE, pre-fusion, or distillation loss for labeled batches
                 batch_mae_loss = 0.0
@@ -534,25 +549,26 @@ def train_shot(
                 # Step 2: Compute pre-fusion sequence projection loss
                 batch_pre_fusion_loss = 0.0
                 prefusion_loss = torch.tensor(0.0, device=device)
-                pre_fusion_loss_count = 0
-                for src_mod in all_modalities:
-                    src_seq = prefusion_features[src_mod].detach() if src_mod in latent_reconstruct_modalities else prefusion_features[src_mod]
-                    for tgt_mod in all_modalities:
-                        if src_mod != tgt_mod:
-                            tgt_seq = prefusion_features[tgt_mod].detach() if tgt_mod in latent_reconstruct_modalities else prefusion_features[tgt_mod]
-                            key = f"{src_mod}_to_{tgt_mod}"
-                            src_seq_norm = F.layer_norm(src_seq, [src_seq.shape[-1]])
-                            projected_seq = intermediate_projectors[key](src_seq_norm)
-                            prefusion_loss = prefusion_loss + mse_fn(projected_seq, tgt_seq)
-                            pre_fusion_loss_count += 1
-                prefusion_loss = prefusion_loss / pre_fusion_loss_count if pre_fusion_loss_count > 0 else prefusion_loss
-                batch_pre_fusion_loss = prefusion_loss.item()
+                if 'prefusion' in active_losses:
+                    pre_fusion_loss_count = 0
+                    for src_mod in all_modalities:
+                        src_seq = prefusion_features[src_mod].detach() if src_mod in latent_reconstruct_modalities else prefusion_features[src_mod]
+                        for tgt_mod in all_modalities:
+                            if src_mod != tgt_mod:
+                                tgt_seq = prefusion_features[tgt_mod].detach() if tgt_mod in latent_reconstruct_modalities else prefusion_features[tgt_mod]
+                                key = f"{src_mod}_to_{tgt_mod}"
+                                src_seq_norm = F.layer_norm(src_seq, [src_seq.shape[-1]])
+                                projected_seq = intermediate_projectors[key](src_seq_norm)
+                                prefusion_loss = prefusion_loss + mse_fn(projected_seq, tgt_seq)
+                                pre_fusion_loss_count += 1
+                    prefusion_loss = prefusion_loss / pre_fusion_loss_count if pre_fusion_loss_count > 0 else prefusion_loss
+                    batch_pre_fusion_loss = prefusion_loss.item()
 
-                # Masking with protected_modalities to ensure newmod is never dropped
+                # Masking with protected_modalities to ensure newmod is never dropped (only when batch mixing)
                 modality_masks, masked_mod_features = mask_input(
                     intermediate_projectors, batch_size, evan.n_storage_tokens, num_patches,
                     args.mae_mask_ratio, all_modalities, prefusion_features, args.modality_dropout, device,
-                    protected_modalities=newmod_list
+                    protected_modalities=newmod_list if labeled_frequency > 0 else None
                 )
 
                 # Step 3: Forward through fusion blocks
@@ -564,45 +580,48 @@ def train_shot(
                 batch_latent_loss = 0.0
 
                 # MAE loss
-                for mod in mae_modalities:
-                    mask_float = modality_masks[mod].float()
-                    if mask_float.sum() == 0:
-                        continue
-                    student_patches = student_fused[mod]['x_norm_patchtokens']
-                    pred_pixels = mae_decoders[mod](student_patches)
-                    target_img = full_multimodal_input[mod]
-                    target_patches = patchify(target_img, patch_size)
-                    mae_loss = mae_reconstruction_loss(pred_pixels, target_patches, mask_float)
-                    total_loss = total_loss + mae_loss
-                    batch_mae_loss += mae_loss.item()
+                if 'mae' in active_losses:
+                    for mod in mae_modalities:
+                        mask_float = modality_masks[mod].float()
+                        if mask_float.sum() == 0:
+                            continue
+                        student_patches = student_fused[mod]['x_norm_patchtokens']
+                        pred_pixels = mae_decoders[mod](student_patches)
+                        target_img = full_multimodal_input[mod]
+                        target_patches = patchify(target_img, patch_size)
+                        mae_loss = mae_reconstruction_loss(pred_pixels, target_patches, mask_float)
+                        total_loss = total_loss + mae_loss
+                        batch_mae_loss += mae_loss.item()
 
                 # Latent loss
-                for mod in latent_reconstruct_modalities:
-                    student_patches = student_fused[mod]['x_norm_patchtokens']
-                    teacher_patches = teacher_out[mod]['x_norm_patchtokens'].detach()
-                    student_cls = student_fused[mod]['x_norm_clstoken']
-                    teacher_cls = teacher_out[mod]['x_norm_clstoken'].detach()
+                if 'latent' in active_losses:
+                    for mod in latent_reconstruct_modalities:
+                        student_patches = student_fused[mod]['x_norm_patchtokens']
+                        teacher_patches = teacher_out[mod]['x_norm_patchtokens'].detach()
+                        student_cls = student_fused[mod]['x_norm_clstoken']
+                        teacher_cls = teacher_out[mod]['x_norm_clstoken'].detach()
 
-                    student_seq = torch.cat([student_cls.unsqueeze(1), student_patches], dim=1)
-                    projected_seq = latent_projectors[mod](student_seq)
-                    projected_cls = projected_seq[:, 0, :]
-                    projected_patches = projected_seq[:, 1:, :]
+                        student_seq = torch.cat([student_cls.unsqueeze(1), student_patches], dim=1)
+                        projected_seq = latent_projectors[mod](student_seq)
+                        projected_cls = projected_seq[:, 0, :]
+                        projected_patches = projected_seq[:, 1:, :]
 
-                    latent_loss = mse_fn(projected_cls, teacher_cls) + mse_fn(projected_patches, teacher_patches)
-                    total_loss = total_loss + latent_loss
-                    batch_latent_loss += latent_loss.item()
+                        latent_loss = mse_fn(projected_cls, teacher_cls) + mse_fn(projected_patches, teacher_patches)
+                        total_loss = total_loss + latent_loss
+                        batch_latent_loss += latent_loss.item()
 
                 # Label distillation
                 batch_distill_loss = 0.0
-                with torch.no_grad():
-                    teacher_modality = teacher_classifier.evan.starting_modality
-                    teacher_input = {teacher_modality: full_multimodal_input[teacher_modality]}
-                    teacher_logits = teacher_classifier(teacher_input)
+                if 'distill' in active_losses:
+                    with torch.no_grad():
+                        teacher_modality = teacher_classifier.evan.starting_modality
+                        teacher_input = {teacher_modality: full_multimodal_input[teacher_modality]}
+                        teacher_logits = teacher_classifier(teacher_input)
 
-                student_logits = model.classify_from_features(student_fused)
-                distill_loss = distillation_loss(student_logits, teacher_logits, distillation_temperature)
-                total_loss = total_loss + distill_loss
-                batch_distill_loss = distill_loss.item()
+                    student_logits = model.classify_from_features(student_fused)
+                    distill_loss = distillation_loss(student_logits, teacher_logits, distillation_temperature)
+                    total_loss = total_loss + distill_loss
+                    batch_distill_loss = distill_loss.item()
 
                 # No CE loss for unlabeled batches
                 batch_ce_loss = 0.0

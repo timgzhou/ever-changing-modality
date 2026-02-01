@@ -55,7 +55,7 @@ NIR_BAND_NAMES = [
     'B08', 'B8A'
 ]
 SWIR_BAND_NAMES = [
-    'B11', 'B12'
+    'B10', 'B11', 'B12'
 ]
 AW_BAND_NAMES = [
     'B01', 'B09'

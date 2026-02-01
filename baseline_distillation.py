@@ -690,7 +690,7 @@ def main():
 
     # Run distillation training loop
     train_acc, test_acc, best_test_acc, best_epoch = distillation_training_loop(
-        student_model, teacher_model, train1_loader, test_loader, device,
+        student_model, teacher_model, train2_loader, test_loader, device,
         student_modality_bands_dict, teacher_modality_bands_dict,
         optimizer, num_epochs, args.modality, teacher_modality,
         temperature=args.temperature, alpha=args.alpha,
