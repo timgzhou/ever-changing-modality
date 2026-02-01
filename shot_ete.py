@@ -11,7 +11,7 @@ import wandb
 from evan_main import EVANClassifier
 from eurosat_data_utils import (
     ALL_BAND_NAMES,
-    get_loaders,
+    get_loaders_with_val,
     get_modality_bands_dict
 )
 from train_utils import _delulu_stage3_test
@@ -51,6 +51,8 @@ def main():
                         help='Evaluate every N epochs during training (default: None, only eval at end)')
     parser.add_argument('--ssl_lr', type=float, default=1e-4,
                         help='Learning rate for fusion MAE training (default: 1e-4)')
+    parser.add_argument('--weight_decay', type=float, default=0.01,
+                        help='Weight decay for AdamW optimizer (default: 0.01)')
     parser.add_argument('--wandb_project', type=str, default='delulu-e2e-lossablate')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--checkpoint_name', type=str, default=None)
@@ -85,7 +87,7 @@ def main():
     # Create datasets
     print("\n=== Creating datasets ===")
 
-    train1_loader, train2_loader, test_loader = get_loaders(args.batch_size,args.num_workers)
+    train1_loader, val1_loader, train2_loader, val2_loader, test_loader = get_loaders_with_val(args.batch_size, args.num_workers)
 
     evan = model.evan
     model = model.to(device)
@@ -121,6 +123,10 @@ def main():
         labeled_frequency=args.labeled_frequency,
         labeled_start_fraction=args.labeled_start_fraction,
         active_losses=args.active_losses,
+        weight_decay=args.weight_decay,
+        # Validation-based checkpoint selection
+        val_loader=val2_loader,           # unlabeled multimodal for teacher agreement
+        val_labeled_loader=val1_loader,   # labeled monomodal for peeking accuracy
     )
 
     # ========================================= EVALUATION =====================================
@@ -180,7 +186,7 @@ def main():
     filename = args.results_csv
     file_exists = os.path.isfile(filename)
     fieldnames = [
-        "starting_modality","new_modality", "ssl_lr", "epochs",
+        "starting_modality","new_modality", "ssl_lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout","labeled_frequency","labeled_start_fraction","trainable_params", "active_losses",
         "transfer_acc", "peeking_acc", "addition_acc", "addition_ens_acc",
         "stage0_checkpoint", "shote2e_checkpoint"
@@ -195,6 +201,7 @@ def main():
             starting_modality,
             newmod,
             args.ssl_lr,
+            args.weight_decay,
             args.epochs,
             args.mae_mask_ratio,
             args.modality_dropout,

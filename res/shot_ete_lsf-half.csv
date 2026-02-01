@@ -8,3 +8,4 @@ rgb,swir,0.0001,128,0.75,0.4,0.4,0.5,47369492,all,81.41,88.37,83.20,90.74,checkp
 nir,rgb,0.0001,128,0.75,0.4,0.4,0.5,47172628,all,76.87,79.20,65.02,84.04,checkpoints/nir_randinit_fft.pt,checkpoints/nir_to_rgb.pt
 rgb,vre,0.0001,128,0.75,0.4,0.4,0.5,47369492,all,83.52,88.07,82.78,90.78,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_vre.pt
 vre,rgb,0.0001,128,0.75,0.4,0.4,0.5,47369492,all,82.69,90.63,90.13,91.13,checkpoints/vre_randinit_fft.pt,checkpoints/vre_to_rgb.pt
+swir,vre,0.0001,128,0.75,0.4,0.4,0.5,47369492,all,82.52,86.44,83.17,87.56,checkpoints/swir_randinit_fft.pt,checkpoints/swir_to_vre.pt

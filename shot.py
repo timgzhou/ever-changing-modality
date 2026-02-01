@@ -292,12 +292,16 @@ def mask_input(intermediate_projectors, batch_size, n_storage_tokens, num_patche
 
 def mixed_batch_iterator(unlabeled_loader, labeled_loader, labeled_freq):
     """
-    Yield (batch, is_labeled) tuples, mixing batches from both loaders.
+    Yield (batch, is_labeled) tuples, interleaving labeled batches into unlabeled stream.
+
+    All unlabeled batches are yielded. Before each unlabeled batch, a labeled batch
+    is inserted with probability labeled_freq. This makes epochs ~(1 + labeled_freq)
+    times longer but ensures the modality masking ratio for starting_mod is preserved.
 
     Args:
         unlabeled_loader: Primary loader (train2, unlabeled multimodal)
         labeled_loader: Secondary loader (train1, labeled monomodal), can be None
-        labeled_freq: Probability of sampling from labeled_loader each iteration
+        labeled_freq: Probability of inserting a labeled batch before each unlabeled batch
 
     Yields:
         (batch, is_labeled): Tuple of batch dict and boolean indicating if from labeled loader
@@ -305,24 +309,130 @@ def mixed_batch_iterator(unlabeled_loader, labeled_loader, labeled_freq):
     unlabeled_iter = iter(unlabeled_loader)
     labeled_iter = iter(labeled_loader) if labeled_loader else None
 
-    # Total batches = length of unlabeled loader (primary)
+    # Exhaust all unlabeled batches, interleaving labeled batches
     for _ in range(len(unlabeled_loader)):
-        use_labeled = labeled_iter is not None and np.random.rand() < labeled_freq
-
-        if use_labeled:
+        # Maybe insert a labeled batch before the unlabeled one
+        if labeled_iter is not None and np.random.rand() < labeled_freq:
             try:
                 batch = next(labeled_iter)
             except StopIteration:
                 labeled_iter = iter(labeled_loader)
                 batch = next(labeled_iter)
             yield batch, True
-        else:
-            try:
-                batch = next(unlabeled_iter)
-            except StopIteration:
-                unlabeled_iter = iter(unlabeled_loader)
-                batch = next(unlabeled_iter)
-            yield batch, False
+
+        # Always yield the next unlabeled batch
+        try:
+            batch = next(unlabeled_iter)
+        except StopIteration:
+            unlabeled_iter = iter(unlabeled_loader)
+            batch = next(unlabeled_iter)
+        yield batch, False
+
+
+def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dict,
+                              starting_modality, intermediate_projectors, all_modalities):
+    """
+    Compute peeking accuracy on labeled monomodal validation data.
+    Uses real starting_mod + hallucinated newmod.
+    """
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for batch in val_loader:
+            # Create monomodal batch (starting_mod only)
+            mm_batch = create_multimodal_batch(
+                batch, modality_bands_dict, device,
+                modalities=(starting_modality,)
+            )
+            labels = batch['label'].to(device)
+
+            # Get prefusion features from EVAN
+            prefusion_feats = evan.forward_prefusion_with_metadata(mm_batch)[0]
+
+            # Hallucinate newmod via intermediate projectors
+            starting_feat = prefusion_feats[starting_modality]
+            starting_feat_norm = F.layer_norm(starting_feat, [starting_feat.shape[-1]])
+
+            all_feats = {starting_modality: starting_feat}
+            for mod in all_modalities:
+                if mod != starting_modality:
+                    key = f"{starting_modality}_to_{mod}"
+                    all_feats[mod] = intermediate_projectors[key](starting_feat_norm)
+
+            # Forward through fusion + classifier
+            fused = model.forward_fusion_from_modality_features(all_feats)
+            logits = model.classify_from_features(fused)
+
+            # Soft vote across classifiers
+            avg_logits = torch.stack(list(logits.values())).mean(dim=0)
+            preds = avg_logits.argmax(dim=1)
+
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+    return 100.0 * correct / total
+
+
+def compute_teacher_agreement(model, teacher, evan, val_loader, device, modality_bands_dict,
+                               starting_modality, newmod_modalities, intermediate_projectors, all_modalities):
+    """
+    Compute agreement rate between student and teacher on unlabeled multimodal data.
+    Tests transfer path: real newmod + hallucinated starting_mod.
+
+    The intermediate_projectors contain bidirectional projectors like:
+    - "rgb_to_nir" (starting_mod → newmod)
+    - "nir_to_rgb" (newmod → starting_mod) ← we use this for transfer path
+    """
+    model.eval()
+    teacher.eval()
+    agree = 0
+    total = 0
+
+    with torch.no_grad():
+        for batch in val_loader:
+            # Create full multimodal batch to get newmod features
+            mm_batch = create_multimodal_batch(
+                batch, modality_bands_dict, device,
+                modalities=tuple(all_modalities)
+            )
+
+            # Teacher prediction (uses starting_mod only)
+            teacher_batch = create_multimodal_batch(
+                batch, modality_bands_dict, device,
+                modalities=(starting_modality,)
+            )
+            teacher_logits = teacher(teacher_batch)
+            teacher_preds = teacher_logits.argmax(dim=1)
+
+            # Student prediction (transfer path: real newmod + hallucinated starting_mod)
+            prefusion_feats = evan.forward_prefusion_with_metadata(mm_batch)[0]
+
+            # Build transfer features: real newmod + hallucinated starting_mod
+            transfer_feats = {}
+            for mod in newmod_modalities:
+                transfer_feats[mod] = prefusion_feats[mod]  # Real newmod features
+
+            # Hallucinate starting_mod from newmod (use mean of projections if multiple newmods)
+            hallucinated_starting = []
+            for newmod in newmod_modalities:
+                newmod_seq = prefusion_feats[newmod]
+                newmod_seq_norm = F.layer_norm(newmod_seq, [newmod_seq.shape[-1]])
+                key = f"{newmod}_to_{starting_modality}"  # Reverse projector
+                hallucinated_starting.append(intermediate_projectors[key](newmod_seq_norm))
+            transfer_feats[starting_modality] = torch.stack(hallucinated_starting).mean(dim=0)
+
+            # Forward through fusion + classifier
+            fused = model.forward_fusion_from_modality_features(transfer_feats)
+            logits = model.classify_from_features(fused)
+            avg_logits = torch.stack(list(logits.values())).mean(dim=0)
+            student_preds = avg_logits.argmax(dim=1)
+
+            agree += (student_preds == teacher_preds).sum().item()
+            total += teacher_preds.size(0)
+
+    return 100.0 * agree / total
 
 
 # SHOT_TRAINING!
@@ -339,6 +449,12 @@ def train_shot(
     labeled_frequency: float = 0.0,
     labeled_start_fraction: float = 0.0,
     active_losses: list[str] = None,
+    weight_decay: float = 0.01,
+    # Validation-based checkpoint selection
+    val_loader=None,                    # val2 (unlabeled multimodal) for teacher agreement
+    val_labeled_loader=None,            # val1 (labeled monomodal) for peeking accuracy
+    checkpoint_selection='combined',    # 'combined', 'peeking', 'teacher_agreement'
+    val_weights=None,                   # {'peeking': 0.5, 'teacher_agreement': 0.5}
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -436,7 +552,7 @@ def train_shot(
     print(f"Total trainable parameters: {num_params:,}")
     # assert num_params==trainable_total, f"{num_params=} != {trainable_total=}"
 
-    optimizer = torch.optim.AdamW(params, lr=args.ssl_lr)
+    optimizer = torch.optim.AdamW(params, lr=args.ssl_lr, weight_decay=weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, factor=0.7, patience=8, min_lr=1e-6)
 
     # Loss functions
@@ -446,6 +562,12 @@ def train_shot(
     starting_modality = evan.starting_modality
     newmod_list = [m for m in all_modalities if m != starting_modality]
     ce_fn = nn.CrossEntropyLoss()
+
+    # Checkpoint tracking for validation-based selection
+    best_val_metric = -float('inf')
+    best_checkpoint_state = None
+    if val_weights is None:
+        val_weights = {'peeking': 0.5, 'teacher_agreement': 0.5}
 
     # Training loop
     global_step = 0
@@ -738,7 +860,83 @@ def train_shot(
                 wandb.log({f"test/{objective}_accuracy": accuracy, "epoch": epoch + 1})
                 if objective == "addition" and ens_acc is not None:
                     wandb.log({f"test/addition_ens_accuracy": ens_acc, "epoch": epoch + 1})
+
+            # Validation-based checkpoint selection (same eval frequency)
+            if val_loader is not None or val_labeled_loader is not None:
+                print(f"--- Validation Metrics at Epoch {epoch+1} ---")
+                val_metrics = {}
+
+                # 1. Peeking accuracy on val1 (labeled, monomodal)
+                if val_labeled_loader is not None:
+                    peeking_acc = compute_peeking_accuracy(
+                        model=model,
+                        evan=evan,
+                        val_loader=val_labeled_loader,
+                        device=device,
+                        modality_bands_dict=modality_bands_dict,
+                        starting_modality=starting_modality,
+                        intermediate_projectors=intermediate_projectors,
+                        all_modalities=all_modalities,
+                    )
+                    val_metrics['peeking'] = peeking_acc
+                    print(f"  Val peeking accuracy: {peeking_acc:.2f}%")
+
+                # 2. Teacher agreement on val2 (unlabeled, multimodal)
+                if val_loader is not None:
+                    teacher_agreement = compute_teacher_agreement(
+                        model=model,
+                        teacher=teacher_classifier,
+                        evan=evan,
+                        val_loader=val_loader,
+                        device=device,
+                        modality_bands_dict=modality_bands_dict,
+                        starting_modality=starting_modality,
+                        newmod_modalities=newmod_list,
+                        intermediate_projectors=intermediate_projectors,
+                        all_modalities=all_modalities,
+                    )
+                    val_metrics['teacher_agreement'] = teacher_agreement
+                    print(f"  Val teacher agreement: {teacher_agreement:.2f}%")
+
+                # Compute combined metric
+                if checkpoint_selection == 'combined':
+                    current_metric = sum(val_weights.get(k, 0) * val_metrics.get(k, 0) for k in val_weights)
+                else:
+                    current_metric = val_metrics.get(checkpoint_selection, 0)
+
+                # Track best checkpoint
+                if current_metric > best_val_metric:
+                    best_val_metric = current_metric
+                    best_checkpoint_state = {
+                        'model': copy.deepcopy(model.state_dict()),
+                        'intermediate_projectors': copy.deepcopy({k: v.state_dict() for k, v in intermediate_projectors.items()}),
+                        'mae_decoders': copy.deepcopy({k: v.state_dict() for k, v in mae_decoders.items()}),
+                        'latent_projectors': copy.deepcopy({k: v.state_dict() for k, v in latent_projectors.items()}),
+                        'epoch': epoch,
+                        'val_metrics': val_metrics,
+                    }
+                    print(f"  >> New best checkpoint (val {checkpoint_selection}: {current_metric:.2f})")
+
+                wandb.log({
+                    'val/peeking_acc': val_metrics.get('peeking', 0),
+                    'val/teacher_agreement': val_metrics.get('teacher_agreement', 0),
+                    'val/combined': sum(val_weights.get(k, 0) * val_metrics.get(k, 0) for k in val_weights),
+                    'epoch': epoch + 1
+                })
+
             model.train()
+
+    # Restore best checkpoint based on validation
+    if best_checkpoint_state is not None:
+        model.load_state_dict(best_checkpoint_state['model'])
+        for k, v in best_checkpoint_state['intermediate_projectors'].items():
+            intermediate_projectors[k].load_state_dict(v)
+        for k, v in best_checkpoint_state['mae_decoders'].items():
+            mae_decoders[k].load_state_dict(v)
+        for k, v in best_checkpoint_state['latent_projectors'].items():
+            latent_projectors[k].load_state_dict(v)
+        print(f"\nRestored best checkpoint from epoch {best_checkpoint_state['epoch']+1}")
+        print(f"  Val metrics: {best_checkpoint_state['val_metrics']}")
 
     print("\n=== Phase 2 (Fusion MAE Training) complete ===")
     return mae_decoders, latent_projectors, intermediate_projectors, trainable_total
