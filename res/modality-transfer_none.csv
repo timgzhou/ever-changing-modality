@@ -1,7 +1,0 @@
-checkpoint,num_supervised_epochs,starting_modality,supported_modalities,eval_type,real_modality,hallucinated_modality,test_acc,best_test_acc
-checkpoints/vre_to_swir.pt,4,vre,vre+swir,real-multimodal-real-supervision,vre+swir,,89.18518518518519,89.18518518518519
-checkpoints/vre_to_swir.pt,4,vre,vre+swir,hallucinated-multimodal-real-supervision,vre,swir,89.5925925925926,89.5925925925926
-checkpoints/vre_to_swir.pt,4,vre,vre+swir,hallucinated-multimodal-real-supervision,swir,vre,87.27777777777777,87.27777777777777
-checkpoints/vre_to_swir.pt,4,vre,vre+swir,real-monomodal-real-supervision,vre,,88.61111111111111,88.61111111111111
-checkpoints/vre_to_swir.pt,4,vre,vre+swir,real-monomodal-real-supervision,swir,,82.24074074074075,82.24074074074075
-checkpoints/vre_to_swir.pt,4,vre,vre+swir,hallucinated-multimodal-pseudo-supervision,swir,vre,85.87037037037037,86.31481481481481

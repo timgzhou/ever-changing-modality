@@ -1,7 +1,0 @@
-modality_a,modality_b,model_a_acc,model_b_acc,ensemble_acc,asymmetric_acc,oracle_acc,best_temp_a,best_temp_b
-rgb,vre,98.31,89.43,97.81,97.37,99.30,2.5,2.5
-rgb,nir,98.31,79.24,97.20,96.39,99.07,2.5,2.5
-rgb,swir,98.31,87.63,97.35,96.93,99.09,2.5,2.5
-vre,nir,89.43,79.24,90.15,90.41,94.76,3.0,3.0
-vre,swir,89.43,87.63,91.04,91.37,94.87,3.0,3.0
-nir,swir,79.24,87.63,89.44,89.48,94.15,3.0,3.0
