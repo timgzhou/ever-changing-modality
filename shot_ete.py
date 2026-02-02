@@ -37,6 +37,10 @@ def main():
     parser.add_argument('--active_losses', type=str, nargs='+', default=None,
                         choices=['mae', 'latent', 'prefusion', 'distill', 'ce'],
                         help='Which losses to activate (default: all)')
+    parser.add_argument('--use_mfla', action='store_true',
+                        help='Enable MFLA training for hallucinated modalities')
+    parser.add_argument('--mfla_warmup_epochs', type=int, default=0,
+                        help='Epochs where backbone + MFLA train together before freezing backbone (default: 0)')
     parser.add_argument('--results_csv', type=str, required=True,
                         help='Path to results CSV file')
 
@@ -127,6 +131,9 @@ def main():
         # Validation-based checkpoint selection
         val_loader=val2_loader,           # unlabeled multimodal for teacher agreement
         val_labeled_loader=val1_loader,   # labeled monomodal for peeking accuracy
+        # MFLA training options
+        use_mfla=args.use_mfla,
+        mfla_warmup_epochs=args.mfla_warmup_epochs,
     )
 
     # ========================================= EVALUATION =====================================
@@ -158,7 +165,8 @@ def main():
             labeled_modalities=[starting_modality],
             all_modalities=all_modalities,
             intermediate_projectors=intermediate_projectors,
-            objective=objective
+            objective=objective,
+            use_mfla=args.use_mfla,
         )
 
         accuracies[objective] = accuracy

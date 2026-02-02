@@ -1029,7 +1029,7 @@ def _delulu_stage2_train_classifier(
 def _delulu_stage3_test(
     model, evan, test_loader, device, modality_bands_dict,
     unlabeled_modalities, labeled_modalities, all_modalities,
-    intermediate_projectors, objective="transfer"
+    intermediate_projectors, objective="transfer", use_mfla=False
 ):
     """Stage 3: Test with modalities based on objective.
 
@@ -1037,6 +1037,8 @@ def _delulu_stage3_test(
     For objective="addition": test on both modalities (all real, no hallucination)
                               Also tracks ensemble of peeking + transfer paths
     For objective="peeking": test on labeled only, hallucinate unlabeled
+
+    If use_mfla is True, MFLAs are applied only to hallucinated modalities.
     """
     # Determine test configuration based on objective
     if objective == "transfer":
@@ -1096,9 +1098,12 @@ def _delulu_stage3_test(
                     test_intermediate, hallucinated_intermediate,
                     unlabeled_modalities, labeled_modalities
                 )
+                # Transfer: labeled modalities are hallucinated
+                hallucinated_mods = set(labeled_modalities) if use_mfla else None
             elif objective == "addition":
                 # Both modalities are real, no hallucination needed
                 fusion_input = test_intermediate
+                hallucinated_mods = None  # All real
             elif objective == "peeking":
                 # Real labeled + hallucinated unlabeled
                 hallucinated_intermediate = hallucinate_intermediate_features(
@@ -1109,8 +1114,13 @@ def _delulu_stage3_test(
                     test_intermediate, hallucinated_intermediate,
                     labeled_modalities, unlabeled_modalities
                 )
+                # Peeking: unlabeled modalities are hallucinated
+                hallucinated_mods = set(unlabeled_modalities) if use_mfla else None
 
-            fused_output = evan.forward_fusion_from_modality_features(fusion_input)
+            fused_output = evan.forward_fusion_from_modality_features(
+                fusion_input,
+                hallucinated_modalities=hallucinated_mods
+            )
 
             # For addition objective, also compute peeking and transfer paths for ensemble
             peeking_logits = None
@@ -1125,7 +1135,11 @@ def _delulu_stage3_test(
                     test_intermediate, peeking_hal,
                     labeled_modalities, unlabeled_modalities
                 )
-                peeking_fused = evan.forward_fusion_from_modality_features(peeking_fusion_input)
+                peeking_hallucinated_mods = set(unlabeled_modalities) if use_mfla else None
+                peeking_fused = evan.forward_fusion_from_modality_features(
+                    peeking_fusion_input,
+                    hallucinated_modalities=peeking_hallucinated_mods
+                )
                 peeking_logits_list = []
                 for mod in all_mods_list:
                     fused_cls = peeking_fused[mod]['x_norm_clstoken']
@@ -1141,7 +1155,11 @@ def _delulu_stage3_test(
                     test_intermediate, transfer_hal,
                     unlabeled_modalities, labeled_modalities
                 )
-                transfer_fused = evan.forward_fusion_from_modality_features(transfer_fusion_input)
+                transfer_hallucinated_mods = set(labeled_modalities) if use_mfla else None
+                transfer_fused = evan.forward_fusion_from_modality_features(
+                    transfer_fusion_input,
+                    hallucinated_modalities=transfer_hallucinated_mods
+                )
                 transfer_logits_list = []
                 for mod in all_mods_list:
                     fused_cls = transfer_fused[mod]['x_norm_clstoken']

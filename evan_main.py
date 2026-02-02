@@ -693,6 +693,7 @@ class EVAN(nn.Module):
     def forward_fusion_from_modality_features(
         self,
         embedded_modalities: Dict[str, Tensor],
+        hallucinated_modalities: Optional[set] = None,
     ) -> Dict[str, Dict[str, Tensor]]:
         """
         Forward through fusion blocks only, starting from pre-computed modality-specific features.
@@ -703,6 +704,9 @@ class EVAN(nn.Module):
         Args:
             embedded_modalities: Dict mapping modality_key -> tensor [B, 1+n_storage+num_patches, embed_dim]
                                 Output from forward_modality_specific_features (possibly with masking applied)
+            hallucinated_modalities: Optional set of modality names that are hallucinated (not real).
+                                    When provided, only MFLAs for these modalities are applied.
+                                    When None, no MFLAs are applied (backward compatible behavior).
 
         Returns:
             Dictionary with normalized features per modality (same format as forward_features):
@@ -763,14 +767,16 @@ class EVAN(nn.Module):
             # Shared block forward on concatenated representation
             x_fused = self.blocks[i](x_fused, rope_sincos)
 
-            # Add fusion LoRA: sum LoRAs from all present modalities
-            lora_idx = i - self.tz_fusion_time
-            lora_output = 0
-            for modality_key in embedded_modalities.keys():
-                lora = self.modality_fusion_lora_adaptors[modality_key][lora_idx]
-                lora_output = lora_output + lora(x_fused)
-
-            x_fused = x_fused + lora_output
+            # Add fusion LoRA only for hallucinated modalities (if specified)
+            if hallucinated_modalities:
+                lora_idx = i - self.tz_fusion_time
+                lora_output = 0
+                for modality_key in hallucinated_modalities:
+                    if modality_key in self.modality_fusion_lora_adaptors:
+                        lora = self.modality_fusion_lora_adaptors[modality_key][lora_idx]
+                        lora_output = lora_output + lora(x_fused)
+                x_fused = x_fused + lora_output
+            # else: no MFLA applied when hallucinated_modalities is None (all real)
 
         # Step 3: Split fused representation back into modality-specific outputs
         total_cls_storage = n_modalities * n_cls_storage_per_modality

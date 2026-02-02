@@ -1,0 +1,13 @@
+starting_modality,new_modality,ssl_lr,weight_decay,epochs,mask_ratio,modality_dropout,labeled_frequency,labeled_start_fraction,trainable_params,active_losses,transfer_acc,peeking_acc,addition_acc,addition_ens_acc,stage0_checkpoint,shote2e_checkpoint
+rgb,nir,0.0001,0.01,128,0.75,0.5,0.4,0.5,47614996,all,77.26,85.89,84.96,90.35,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_nir.pt
+vre,nir,0.0001,0.01,128,0.75,0.5,0.4,0.5,47614996,all,74.89,89.85,88.67,88.70,checkpoints/vre_randinit_fft.pt,checkpoints/vre_to_nir.pt
+rgb,vre,0.0001,0.01,128,0.75,0.5,0.4,0.5,47811860,all,84.11,87.31,81.98,90.31,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_vre.pt
+rgb,swir,0.0001,0.01,128,0.75,0.5,0.4,0.5,47811860,all,82.54,88.00,81.72,89.78,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_swir.pt
+vre,rgb,0.0001,0.01,128,0.75,0.5,0.4,0.5,47811860,all,83.85,91.52,90.06,91.54,checkpoints/vre_randinit_fft.pt,checkpoints/vre_to_rgb.pt
+vre,swir,0.0001,0.01,128,0.75,0.5,0.4,0.5,47811860,all,84.02,89.48,89.57,89.76,checkpoints/vre_randinit_fft.pt,checkpoints/vre_to_swir.pt
+nir,vre,0.0001,0.01,128,0.75,0.5,0.4,0.5,47614996,all,78.43,79.11,69.20,80.69,checkpoints/nir_randinit_fft.pt,checkpoints/nir_to_vre.pt
+nir,rgb,0.0001,0.01,128,0.75,0.5,0.4,0.5,47614996,all,77.50,78.85,70.57,83.87,checkpoints/nir_randinit_fft.pt,checkpoints/nir_to_rgb.pt
+nir,swir,0.0001,0.01,128,0.75,0.5,0.4,0.5,47614996,all,78.04,78.61,66.70,81.02,checkpoints/nir_randinit_fft.pt,checkpoints/nir_to_swir.pt
+swir,vre,0.0001,0.01,128,0.75,0.5,0.4,0.5,47811860,all,83.30,84.80,77.78,85.89,checkpoints/swir_randinit_fft.pt,checkpoints/swir_to_vre.pt
+swir,rgb,0.0001,0.01,128,0.75,0.5,0.4,0.5,47811860,all,82.19,87.30,86.31,89.30,checkpoints/swir_randinit_fft.pt,checkpoints/swir_to_rgb.pt
+swir,nir,0.0001,0.01,128,0.75,0.5,0.4,0.5,47614996,all,76.63,85.76,85.09,87.69,checkpoints/swir_randinit_fft.pt,checkpoints/swir_to_nir.pt

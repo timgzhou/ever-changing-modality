@@ -287,7 +287,7 @@ def mask_input(intermediate_projectors, batch_size, n_storage_tokens, num_patche
             # Replace masked positions with projected tokens
             masked_mod_features[mod] = torch.where(full_mask_expanded, projected_seq, features)
 
-    return modality_masks, masked_mod_features
+    return modality_masks, masked_mod_features, modality_dropped
 
 
 def mixed_batch_iterator(unlabeled_loader, labeled_loader, labeled_freq):
@@ -330,7 +330,8 @@ def mixed_batch_iterator(unlabeled_loader, labeled_loader, labeled_freq):
 
 
 def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dict,
-                              starting_modality, intermediate_projectors, all_modalities):
+                              starting_modality, intermediate_projectors, all_modalities,
+                              use_mfla=False):
     """
     Compute peeking accuracy on labeled monomodal validation data.
     Uses real starting_mod + hallucinated newmod (peeking path).
@@ -366,8 +367,12 @@ def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dic
                 (starting_modality,), tuple(newmod_modalities)
             )
 
-            # Forward through fusion + classifier
-            fused_output = evan.forward_fusion_from_modality_features(fusion_input)
+            # Forward through fusion + classifier (peeking: newmod is hallucinated)
+            hallucinated_mods = set(newmod_modalities) if use_mfla else None
+            fused_output = evan.forward_fusion_from_modality_features(
+                fusion_input,
+                hallucinated_modalities=hallucinated_mods
+            )
 
             # Soft vote across classifiers
             all_logits = []
@@ -385,7 +390,8 @@ def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dic
 
 
 def compute_teacher_agreement(model, teacher, evan, val_loader, device, modality_bands_dict,
-                               starting_modality, newmod_modalities, intermediate_projectors, all_modalities):
+                               starting_modality, newmod_modalities, intermediate_projectors, all_modalities,
+                               use_mfla=False):
     """
     Compute agreement rate between student and teacher on unlabeled multimodal data.
     Tests transfer path: real newmod + hallucinated starting_mod.
@@ -430,8 +436,12 @@ def compute_teacher_agreement(model, teacher, evan, val_loader, device, modality
                 tuple(newmod_modalities), (starting_modality,)
             )
 
-            # Forward through fusion + classifier
-            fused_output = evan.forward_fusion_from_modality_features(fusion_input)
+            # Forward through fusion + classifier (transfer: starting_mod is hallucinated)
+            hallucinated_mods = {starting_modality} if use_mfla else None
+            fused_output = evan.forward_fusion_from_modality_features(
+                fusion_input,
+                hallucinated_modalities=hallucinated_mods
+            )
 
             # Soft vote across classifiers
             all_logits = []
@@ -446,6 +456,46 @@ def compute_teacher_agreement(model, teacher, evan, val_loader, device, modality
             total += teacher_preds.size(0)
 
     return 100.0 * agree / total
+
+
+def set_mfla_training_mode(evan, hallucinated_modalities, all_modalities, in_warmup=False):
+    """
+    Toggle requires_grad based on which modalities are hallucinated.
+
+    Args:
+        evan: EVAN model
+        hallucinated_modalities: Set of modality names that are hallucinated
+        all_modalities: List of all modality names
+        in_warmup: If True, backbone stays trainable even during hallucination
+
+    Behavior:
+        Warmup phase (in_warmup=True):
+          - Backbone fusion blocks: always trainable
+          - MFLA for hallucinated mods: trainable
+          - MFLA for real mods: frozen
+
+        Freeze phase (in_warmup=False):
+          - When hallucination: backbone frozen, only hallucinated MFLA trains
+          - When no hallucination: backbone trains, all MFLAs frozen
+    """
+    has_hallucination = len(hallucinated_modalities) > 0
+
+    # Toggle backbone fusion blocks
+    if in_warmup:
+        # Warmup: backbone always trainable
+        backbone_trainable = True
+    else:
+        # Freeze phase: backbone frozen when hallucinating
+        backbone_trainable = not has_hallucination
+
+    for i in range(evan.tz_fusion_time, len(evan.blocks)):
+        for param in evan.blocks[i].parameters():
+            param.requires_grad = backbone_trainable
+
+    # Toggle MFLAs: only train hallucinated modality's MFLA
+    for mod in all_modalities:
+        for param in evan.modality_fusion_lora_adaptors[mod].parameters():
+            param.requires_grad = (mod in hallucinated_modalities)
 
 
 # SHOT_TRAINING!
@@ -468,6 +518,9 @@ def train_shot(
     val_labeled_loader=None,            # val1 (labeled monomodal) for peeking accuracy
     checkpoint_selection='combined',    # 'combined', 'peeking', 'teacher_agreement'
     val_weights=None,                   # {'peeking': 0.5, 'teacher_agreement': 0.5}
+    # MFLA training options
+    use_mfla: bool = False,             # Enable MFLA training for hallucinated modalities
+    mfla_warmup_epochs: int = 0,        # Epochs where backbone + MFLA train together before freezing backbone
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -485,6 +538,8 @@ def train_shot(
         - 0.0: start labeled mixing from the beginning
         - 0.5: start labeled mixing at 50% of training
         - 1.0: never use labeled mixing
+    - use_mfla: Enable MFLA training for hallucinated modalities
+    - mfla_warmup_epochs: Epochs where backbone + MFLA train together before freezing backbone
     """
     # Compute epoch at which labeled mixing starts
     labeled_start_epoch = int(args.epochs * labeled_start_fraction)
@@ -493,6 +548,8 @@ def train_shot(
     print(f"=== END TO END SHOT TRAINING===\n")
     print(f"  MAE modalities (pixel reconstruction): {mae_modalities}")
     print(f"  Latent modalities (feature matching): {latent_reconstruct_modalities}")
+    if use_mfla:
+        print(f"  MFLA training: enabled (warmup_epochs={mfla_warmup_epochs})")
     if labeled_train_loader is not None and labeled_frequency > 0:
         print(f"  Mixed training mode: labeled_frequency={labeled_frequency:.2f}")
         print(f"    - labeled_start_fraction={labeled_start_fraction:.2f} (starts at epoch {labeled_start_epoch + 1}/{args.epochs})")
@@ -528,7 +585,7 @@ def train_shot(
                 model.instantiate_modality_classifier(mod)
 
     model.freeze_all()
-    model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=False, msla=True, patch_embedders=True, classifier=True)
+    model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=use_mfla, msla=True, patch_embedders=True, classifier=True)
     model.set_requires_grad("backbone", mask_token=False, blocks=True, norm=True)
     
     evan = model.evan
@@ -591,6 +648,9 @@ def train_shot(
         latent_projectors.train()
         intermediate_projectors.train()
 
+        # Determine if we're in MFLA warmup phase
+        in_warmup = (epoch < mfla_warmup_epochs) if use_mfla else False
+
         # Track losses separately for labeled and unlabeled batches
         train_loss = 0.0
         train_mae_loss = 0.0
@@ -638,8 +698,16 @@ def train_shot(
                     key = f"{starting_modality}_to_{newmod}"
                     prefusion_features[newmod] = intermediate_projectors[key](src_seq_norm)
 
+                # Toggle gradients if MFLA training is enabled (newmod is hallucinated)
+                hallucinated_mods = set(newmod_list) if use_mfla else set()
+                if use_mfla:
+                    set_mfla_training_mode(evan, hallucinated_mods, all_modalities, in_warmup=in_warmup)
+
                 # 4. Forward through fusion
-                student_fused = evan.forward_fusion_from_modality_features(prefusion_features)
+                student_fused = evan.forward_fusion_from_modality_features(
+                    prefusion_features,
+                    hallucinated_modalities=hallucinated_mods if use_mfla else None
+                )
 
                 # 5. Latent loss (match teacher on starting_modality only)
                 batch_latent_loss = 0.0
@@ -723,14 +791,22 @@ def train_shot(
                     batch_pre_fusion_loss = prefusion_loss.item()
 
                 # Masking with protected_modalities to ensure newmod is never dropped (only when batch mixing is active)
-                modality_masks, masked_mod_features = mask_input(
+                modality_masks, masked_mod_features, modality_dropped = mask_input(
                     intermediate_projectors, batch_size, evan.n_storage_tokens, num_patches,
                     args.mae_mask_ratio, all_modalities, prefusion_features, args.modality_dropout, device,
                     protected_modalities=newmod_list if effective_labeled_freq > 0 else None
                 )
 
+                # Compute hallucinated modalities and toggle gradients if MFLA training is enabled
+                hallucinated_mods = {mod for mod, dropped in modality_dropped.items() if dropped} if use_mfla else set()
+                if use_mfla:
+                    set_mfla_training_mode(evan, hallucinated_mods, all_modalities, in_warmup=in_warmup)
+
                 # Step 3: Forward through fusion blocks
-                student_fused = evan.forward_fusion_from_modality_features(masked_mod_features)
+                student_fused = evan.forward_fusion_from_modality_features(
+                    masked_mod_features,
+                    hallucinated_modalities=hallucinated_mods if use_mfla else None
+                )
 
                 # Step 4: Compute losses
                 total_loss = prefusion_loss
@@ -867,7 +943,8 @@ def train_shot(
                     labeled_modalities=labeled_modalities,
                     all_modalities=all_modalities,
                     intermediate_projectors=intermediate_projectors,
-                    objective=objective
+                    objective=objective,
+                    use_mfla=use_mfla,
                 )
                 print(f"  {objective.capitalize()} accuracy: {accuracy:.2f}%")
                 wandb.log({f"test/{objective}_accuracy": accuracy, "epoch": epoch + 1})
@@ -890,6 +967,7 @@ def train_shot(
                         starting_modality=starting_modality,
                         intermediate_projectors=intermediate_projectors,
                         all_modalities=all_modalities,
+                        use_mfla=use_mfla,
                     )
                     val_metrics['peeking'] = peeking_acc
                     print(f"  Val peeking accuracy: {peeking_acc:.2f}%")
@@ -907,6 +985,7 @@ def train_shot(
                         newmod_modalities=newmod_list,
                         intermediate_projectors=intermediate_projectors,
                         all_modalities=all_modalities,
+                        use_mfla=use_mfla,
                     )
                     val_metrics['teacher_agreement'] = teacher_agreement
                     print(f"  Val teacher agreement: {teacher_agreement:.2f}%")
