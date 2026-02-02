@@ -3,3 +3,5 @@ nir,rgb,0.0001,4,0.75,0.3,47172628,prefusion+distill,54.48,69.87,78.07,78.98,che
 nir,rgb,0.0001,2,0.75,0.3,0.4,0.5,47172628,all,35.89,71.59,78.52,69.89,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
 nir,rgb,0.0001,0.01,2,0.75,0.3,0.0,0.0,47172628,prefusion+distill,35.26,73.44,69.28,77.04,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
 nir,rgb,0.0001,0.01,2,0.75,0.3,0.0,0.0,47172628,prefusion+distill,52.54,73.33,67.09,77.39,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
+nir,rgb,0.0001,0.01,2,0.75,0.3,0.0,0.0,47614996,prefusion+distill,41.63,73.94,73.61,78.11,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
+nir,rgb,0.0001,0.01,2,0.75,0.3,0.0,0.0,47614996,prefusion+distill,34.61,72.89,74.46,76.56,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt

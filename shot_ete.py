@@ -241,8 +241,11 @@ python -u shot_ete.py \
     --checkpoint_name nir_to_rgb-dryrun \
     --stage0_checkpoint checkpoints/nir_fft.pt  \
     --epochs 2 \
+    --eval_every_n_epochs 1 \
     --batch_size 64 \
     --results_csv res/shot_ete_dryrun.csv \
     --active_losses prefusion distill \
-    --labeled_frequency 0
+    --labeled_frequency 0.1 \
+    --use_mfla \
+    --mfla_warmup_epochs 1
 """
