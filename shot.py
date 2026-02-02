@@ -927,6 +927,7 @@ def train_shot(
         if eval_every_n_epochs is not None and test_loader is not None and (epoch + 1) % eval_every_n_epochs == 0:
             print(f"\n--- Periodic Evaluation at Epoch {epoch+1} ---")
             model.eval()
+            intermediate_projectors.eval()
             unlabeled_modalities = [mod for mod in mae_modalities if mod not in latent_reconstruct_modalities]
             if not unlabeled_modalities:
                 unlabeled_modalities = mae_modalities[:1]
@@ -1017,6 +1018,7 @@ def train_shot(
                 })
 
             model.train()
+            intermediate_projectors.train()
 
     # Restore best checkpoint based on validation
     if best_checkpoint_state is not None:

@@ -1056,6 +1056,7 @@ def _delulu_stage3_test(
     print(f"\n--- Stage 3: {desc} ---")
 
     model.eval()
+    intermediate_projectors.eval()
     softvote_correct = 0
     total = 0
     per_mod_correct = {mod: 0 for mod in all_modalities}
