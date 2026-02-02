@@ -196,6 +196,7 @@ def main():
     fieldnames = [
         "starting_modality","new_modality", "ssl_lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout","labeled_frequency","labeled_start_fraction","trainable_params", "active_losses",
+        "use_mfla", "mfla_warmup_epochs",
         "transfer_acc", "peeking_acc", "addition_acc", "addition_ens_acc",
         "stage0_checkpoint", "shote2e_checkpoint"
     ]
@@ -217,6 +218,8 @@ def main():
             args.labeled_start_fraction,
             trainable_total,
             active_losses_str,
+            args.use_mfla,
+            args.mfla_warmup_epochs,
             f"{accuracies['transfer']:.2f}",
             f"{accuracies['peeking']:.2f}",
             f"{accuracies['addition']:.2f}",

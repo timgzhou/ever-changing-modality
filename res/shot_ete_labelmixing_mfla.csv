@@ -20,3 +20,6 @@ nir,rgb,0.0001,0.01,128,0.75,0.5,0.4,0.5,47614996,all,78.24,78.57,63.15,84.46,ch
 nir,vre,0.0001,0.01,128,0.75,0.5,0.4,0.5,47614996,all,77.07,78.41,68.59,80.31,checkpoints/nir_randinit_fft.pt,checkpoints/nir_to_vre.pt
 vre,swir,0.0001,0.01,128,0.75,0.5,0.4,0.5,47811860,all,84.24,90.48,89.87,90.19,checkpoints/vre_randinit_fft.pt,checkpoints/vre_to_swir.pt
 nir,swir,0.0001,0.01,128,0.75,0.5,0.4,0.5,47614996,all,79.02,78.00,70.94,83.28,checkpoints/nir_randinit_fft.pt,checkpoints/nir_to_swir.pt
+swir,nir,0.0001,0.01,128,0.75,0.5,0.4,0.5,47614996,all,76.37,85.09,85.15,87.74,checkpoints/swir_randinit_fft.pt,checkpoints/swir_to_nir.pt
+swir,rgb,0.0001,0.01,128,0.75,0.5,0.4,0.5,47811860,all,82.81,85.96,85.67,88.76,checkpoints/swir_randinit_fft.pt,checkpoints/swir_to_rgb.pt
+swir,vre,0.0001,0.01,128,0.75,0.5,0.4,0.5,47811860,all,83.61,85.35,80.13,87.85,checkpoints/swir_randinit_fft.pt,checkpoints/swir_to_vre.pt
