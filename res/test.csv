@@ -1,2 +1,0 @@
-starting_modality,new_modality,ssl_lr,weight_decay,epochs,mask_ratio,modality_dropout,labeled_frequency,labeled_start_fraction,trainable_params,active_losses,transfer_acc,peeking_acc,addition_acc,addition_ens_acc,stage0_checkpoint,shote2e_checkpoint
-nir,rgb,0.0001,0.01,4,0.75,0.3,0.3,0.0,47614996,all,64.87,76.89,81.46,84.35,checkpoints/nir_fft.pt,checkpoints/delulunet_eurosat_0201_1325.pt

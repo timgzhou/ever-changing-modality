@@ -11,3 +11,11 @@ rgb,vre,0.0001,0.01,128,0.25,0.5,0.4,0.5,45889940,all,False,0,83.22,85.15,88.11,
 rgb,swir,0.0001,0.01,128,0.25,0.5,0.4,0.5,45889940,all,False,0,82.69,87.50,89.02,89.93,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_swir.pt
 rgb,swir,0.0001,0.01,128,0.75,0.5,0.4,0.5,45889940,all,False,0,82.57,87.87,78.80,90.17,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_swir.pt
 rgb,swir,0.0001,0.01,128,0.75,0.4,0.3,0.5,45889940,all,False,0,81.02,88.43,84.78,89.98,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_swir.pt
+nir,swir,0.0001,0.01,128,0.75,0.5,0.4,0.5,45791636,all,False,0,77.31,78.46,71.20,83.31,checkpoints/nir_randinit_fft.pt,checkpoints/nir_to_swir.pt
+nir,vre,0.0001,0.01,128,0.75,0.5,0.4,0.5,45791636,all,False,0,78.67,78.43,71.04,81.31,checkpoints/nir_randinit_fft.pt,checkpoints/nir_to_vre.pt
+rgb,vre,0.0001,0.01,128,0.75,0.5,0.4,0.5,45889940,all,False,0,82.72,87.78,83.81,90.94,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_vre.pt
+rgb,swir,0.0001,0.01,128,0.75,0.5,0.4,0.5,45889940,all,False,0,81.43,87.89,83.69,89.85,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_swir.pt
+nir,vre,0.0001,0.01,128,0.75,0.5,0.4,0.0,47172628,all,False,0,78.07,79.24,67.19,81.69,checkpoints/nir_randinit_fft.pt,checkpoints/nir_to_vre.pt
+nir,swir,0.0001,0.01,128,0.75,0.5,0.4,0.0,47172628,all,False,0,81.56,78.72,70.78,83.93,checkpoints/nir_randinit_fft.pt,checkpoints/nir_to_swir.pt
+rgb,vre,0.0001,0.01,128,0.75,0.5,0.4,0.0,47369492,all,False,0,82.83,87.87,81.20,89.91,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_vre.pt
+rgb,swir,0.0001,0.01,128,0.75,0.5,0.4,0.0,47369492,all,False,0,80.96,87.17,82.11,89.48,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_swir.pt

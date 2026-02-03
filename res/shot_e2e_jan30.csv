@@ -1,8 +1,0 @@
-starting_modality,new_modality,ssl_lr,epochs,mask_ratio,modality_dropout,trainable_params,transfer_acc,peeking_acc,addition_acc,stage0_checkpoint,shote2e_checkpoint
-nir,rgb,0.0001,4,0.75,0.4,45791636,58.19,77.67,77.04,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
-nir,rgb,0.0001,16,0.75,0.4,47172628,76.00,79.00,79.67,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
-nir,rgb,0.0001,4,0.75,0.3,47172628,60.11,76.56,72.78,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
-nir,rgb,0.0001,1,0.75,0.3,47172628,38.07,73.67,62.17,77.04,checkpoints/nir_fft.pt,checkpoints/nir_to_rgb-dryrun.pt
-rgb,nir,0.0001,128,0.75,0.4,47172628,89.76,98.69,98.76,checkpoints/rgb_fft.pt,checkpoints/rgb_to_nir.pt
-rgb,vre,0.0001,128,0.75,0.4,47369492,96.54,98.41,97.98,checkpoints/rgb_fft.pt,checkpoints/rgb_to_vre.pt
-rgb,swir,0.0001,128,0.75,0.4,47172628,95.07,98.35,97.98,checkpoints/rgb_fft.pt,checkpoints/rgb_to_swir.pt

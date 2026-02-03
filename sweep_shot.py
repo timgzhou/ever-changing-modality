@@ -151,7 +151,7 @@ def main():
 
     # ========================================== TRAIN SHOT ===========================================
     print(f"\n=== Training with SHOT ===")
-    _, _, intermediate_projectors, trainable_total = train_shot(
+    _, _, intermediate_projectors, trainable_total, best_checkpoints = train_shot(
         model=model,
         train_loader=train2_loader,
         device=device,
@@ -169,6 +169,14 @@ def main():
         val_loader=val2_loader,
         val_labeled_loader=val1_loader,
     )
+
+    # Log best checkpoint test accuracies to wandb summary
+    for ckpt_name, ckpt_data in best_checkpoints.items():
+        if ckpt_data['test_accs'] is not None:
+            wandb.run.summary[f'{ckpt_name}_test_transfer'] = ckpt_data['test_accs']['transfer']
+            wandb.run.summary[f'{ckpt_name}_test_peeking'] = ckpt_data['test_accs']['peeking']
+            wandb.run.summary[f'{ckpt_name}_test_addition'] = ckpt_data['test_accs']['addition']
+            wandb.run.summary[f'{ckpt_name}_test_addition_ens'] = ckpt_data['test_accs'].get('addition_ens', 0)
 
     # ========================================= EVALUATION =====================================
     print("\n=== Evaluating trained model ===")

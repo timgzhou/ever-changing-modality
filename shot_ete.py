@@ -113,7 +113,7 @@ def main():
             print(f"requiring mae from newmod only.")
             mae_modalities=[newmod]
         
-    _,_,intermediate_projectors,trainable_total=train_shot(
+    _,_,intermediate_projectors,trainable_total,best_checkpoints,best_checkpoint_summary=train_shot(
         model=model,
         train_loader=train2_loader,
         device=device,
@@ -198,8 +198,16 @@ def main():
         "mask_ratio", "modality_dropout","labeled_frequency","labeled_start_fraction","trainable_params", "active_losses",
         "use_mfla", "mfla_warmup_epochs",
         "transfer_acc", "peeking_acc", "addition_acc", "addition_ens_acc",
+        "valchecked_transfer_acc", "valchecked_peek_acc", "valchecked_add_acc", "valchecked_add_ens_acc",
         "stage0_checkpoint", "shote2e_checkpoint"
     ]
+
+    # Extract val-checked test accuracies from best_checkpoint_summary
+    def get_valchecked(ckpt_name, metric_key):
+        if ckpt_name in best_checkpoint_summary:
+            return f"{best_checkpoint_summary[ckpt_name][metric_key]:.2f}"
+        return ""
+
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
         if not file_exists:
@@ -224,6 +232,10 @@ def main():
             f"{accuracies['peeking']:.2f}",
             f"{accuracies['addition']:.2f}",
             f"{addition_ens_acc:.2f}" if addition_ens_acc is not None else "",
+            get_valchecked('best_transfer', 'test_transfer'),
+            get_valchecked('best_peeking', 'test_peeking'),
+            get_valchecked('best_addition', 'test_addition'),
+            get_valchecked('best_ens_addition', 'test_addition_ens'),
             args.stage0_checkpoint,
             checkpoint_shotete,
         ])
@@ -243,11 +255,10 @@ python -u shot_ete.py \
     --new_mod_group rgb \
     --checkpoint_name nir_to_rgb-dryrun \
     --stage0_checkpoint checkpoints/nir_fft.pt  \
-    --epochs 2 \
+    --epochs 4 \
     --eval_every_n_epochs 1 \
     --batch_size 64 \
     --results_csv res/shot_ete_dryrun.csv \
-    --active_losses prefusion distill \
     --labeled_frequency 0.1 \
     --use_mfla \
     --mfla_warmup_epochs 1

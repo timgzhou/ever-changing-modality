@@ -458,6 +458,61 @@ def compute_teacher_agreement(model, teacher, evan, val_loader, device, modality
     return 100.0 * agree / total
 
 
+def compute_addition_agreement(model, teacher, evan, val_loader, device, modality_bands_dict,
+                                starting_modality, all_modalities):
+    """
+    Compute agreement rate between student and teacher on unlabeled multimodal data.
+    Uses BOTH real modalities (no hallucination) - tests addition path.
+    """
+    model.eval()
+    teacher.eval()
+    agree = 0
+    total = 0
+
+    with torch.no_grad():
+        for batch in val_loader:
+            # Create full multimodal batch (both modalities real)
+            mm_batch = create_multimodal_batch(
+                batch,
+                modality_bands_dict=modality_bands_dict,
+                modalities=tuple(all_modalities)
+            )
+            mm_batch = {k: v.to(device) for k, v in mm_batch.items()}
+
+            # Teacher prediction (uses starting_mod only - same as always)
+            teacher_batch = create_multimodal_batch(
+                batch,
+                modality_bands_dict=modality_bands_dict,
+                modalities=(starting_modality,)
+            )
+            teacher_batch = {k: v.to(device) for k, v in teacher_batch.items()}
+            teacher_logits = teacher(teacher_batch)
+            teacher_preds = teacher_logits.argmax(dim=1)
+
+            # Student prediction (addition path: both modalities real, no hallucination)
+            intermediate_feats = evan.forward_modality_specific_features(mm_batch)
+
+            # Forward through fusion + classifier (no hallucination, all modalities real)
+            fused_output = evan.forward_fusion_from_modality_features(
+                intermediate_feats,
+                hallucinated_modalities=None
+            )
+
+            # Soft vote across classifiers
+            all_logits = []
+            for mod in all_modalities:
+                fused_cls = fused_output[mod]['x_norm_clstoken']
+                all_logits.append(model.modality_classifiers[mod](fused_cls))
+
+            avg_logits = torch.stack(all_logits).mean(dim=0)
+            student_preds = avg_logits.argmax(dim=1)
+
+            agree += (student_preds == teacher_preds).sum().item()
+            total += teacher_preds.size(0)
+
+    return 100.0 * agree / total
+
+
 def set_mfla_training_mode(evan, hallucinated_modalities, all_modalities, in_warmup=False):
     """
     Toggle requires_grad based on which modalities are hallucinated.
@@ -638,6 +693,14 @@ def train_shot(
     best_checkpoint_state = None
     if val_weights is None:
         val_weights = {'peeking': 0.5, 'teacher_agreement': 0.5}
+
+    # Track 4 independent best checkpoints (metrics only, no model weights)
+    best_checkpoints = {
+        'best_transfer': {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
+        'best_peeking': {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
+        'best_addition': {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
+        'best_ens_addition': {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
+    }
 
     # Training loop
     global_step = 0
@@ -871,6 +934,15 @@ def train_shot(
 
             # Backward pass (same for both paths)
             optimizer.zero_grad()
+            if not total_loss.requires_grad:
+                print(f"\n[DEBUG] total_loss has no grad!")
+                print(f"  is_labeled: {is_labeled}")
+                print(f"  prefusion_loss.requires_grad: {prefusion_loss.requires_grad if isinstance(prefusion_loss, torch.Tensor) else 'N/A'}")
+                print(f"  batch_pre_fusion_loss: {batch_pre_fusion_loss}")
+                print(f"  batch_distill_loss: {batch_distill_loss}")
+                print(f"  'prefusion' in active_losses: {'prefusion' in active_losses}")
+                print(f"  'distill' in active_losses: {'distill' in active_losses}")
+                raise RuntimeError("total_loss has no grad - see debug output above")
             total_loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=max_norm)
             optimizer.step()
@@ -933,6 +1005,7 @@ def train_shot(
                 unlabeled_modalities = mae_modalities[:1]
             labeled_modalities = latent_reconstruct_modalities
 
+            periodic_test_accs = {}
             for objective in ["transfer", "peeking", "addition"]:
                 accuracy, ens_acc = _delulu_stage3_test(
                     model=model,
@@ -947,9 +1020,11 @@ def train_shot(
                     objective=objective,
                     use_mfla=use_mfla,
                 )
+                periodic_test_accs[objective] = accuracy
                 print(f"  {objective.capitalize()} accuracy: {accuracy:.2f}%")
                 wandb.log({f"test/{objective}_accuracy": accuracy, "epoch": epoch + 1})
                 if objective == "addition" and ens_acc is not None:
+                    periodic_test_accs['addition_ens'] = ens_acc
                     wandb.log({f"test/addition_ens_accuracy": ens_acc, "epoch": epoch + 1})
 
             # Validation-based checkpoint selection (same eval frequency)
@@ -957,23 +1032,7 @@ def train_shot(
                 print(f"--- Validation Metrics at Epoch {epoch+1} ---")
                 val_metrics = {}
 
-                # 1. Peeking accuracy on val1 (labeled, monomodal)
-                if val_labeled_loader is not None:
-                    peeking_acc = compute_peeking_accuracy(
-                        model=model,
-                        evan=evan,
-                        val_loader=val_labeled_loader,
-                        device=device,
-                        modality_bands_dict=modality_bands_dict,
-                        starting_modality=starting_modality,
-                        intermediate_projectors=intermediate_projectors,
-                        all_modalities=all_modalities,
-                        use_mfla=use_mfla,
-                    )
-                    val_metrics['peeking'] = peeking_acc
-                    print(f"  Val peeking accuracy: {peeking_acc:.2f}%")
-
-                # 2. Teacher agreement on val2 (unlabeled, multimodal)
+                # 1. Teacher agreement on val2 (unlabeled, multimodal) - transfer path
                 if val_loader is not None:
                     teacher_agreement = compute_teacher_agreement(
                         model=model,
@@ -989,15 +1048,52 @@ def train_shot(
                         use_mfla=use_mfla,
                     )
                     val_metrics['teacher_agreement'] = teacher_agreement
-                    print(f"  Val teacher agreement: {teacher_agreement:.2f}%")
+                    print(f"  Val transfer agreement: {teacher_agreement:.2f}%")
+                    
+                # 2. Peeking accuracy on val1 (labeled, monomodal)
+                if val_labeled_loader is not None:
+                    peeking_acc = compute_peeking_accuracy(
+                        model=model,
+                        evan=evan,
+                        val_loader=val_labeled_loader,
+                        device=device,
+                        modality_bands_dict=modality_bands_dict,
+                        starting_modality=starting_modality,
+                        intermediate_projectors=intermediate_projectors,
+                        all_modalities=all_modalities,
+                        use_mfla=use_mfla,
+                    )
+                    val_metrics['peeking'] = peeking_acc
+                    print(f"  Val peeking accuracy: {peeking_acc:.2f}%")
+                    
+                # 3. Addition agreement on val2 (unlabeled, multimodal, both real)
+                if val_loader is not None:
+                    addition_agreement = compute_addition_agreement(
+                        model=model,
+                        teacher=teacher_classifier,
+                        evan=evan,
+                        val_loader=val_loader,
+                        device=device,
+                        modality_bands_dict=modality_bands_dict,
+                        starting_modality=starting_modality,
+                        all_modalities=all_modalities,
+                    )
+                    val_metrics['addition'] = addition_agreement
+                    print(f"  Val addition agreement: {addition_agreement:.2f}%")
 
-                # Compute combined metric
+                # 4. Compute ensemble addition proxy: (peeking + teacher_agreement) / 2
+                if 'peeking' in val_metrics and 'teacher_agreement' in val_metrics:
+                    ens_addition = (val_metrics['peeking'] + val_metrics['teacher_agreement']) / 2
+                    val_metrics['ens_addition'] = ens_addition
+                    print(f"  Val ens_addition (peeking+transfer)/2: {ens_addition:.2f}%")
+
+                # Compute combined metric for model checkpoint selection
                 if checkpoint_selection == 'combined':
                     current_metric = sum(val_weights.get(k, 0) * val_metrics.get(k, 0) for k in val_weights)
                 else:
                     current_metric = val_metrics.get(checkpoint_selection, 0)
 
-                # Track best checkpoint
+                # Track best model checkpoint (for restoration)
                 if current_metric > best_val_metric:
                     best_val_metric = current_metric
                     best_checkpoint_state = {
@@ -1008,11 +1104,46 @@ def train_shot(
                         'epoch': epoch,
                         'val_metrics': val_metrics,
                     }
-                    print(f"  >> New best checkpoint (val {checkpoint_selection}: {current_metric:.2f})")
+                    print(f"  >> New best model checkpoint (val {checkpoint_selection}: {current_metric:.2f})")
+
+                # Update 4 independent best checkpoint trackers
+                checkpoint_criteria = {
+                    'best_transfer': 'teacher_agreement',
+                    'best_peeking': 'peeking',
+                    'best_addition': 'addition',
+                    'best_ens_addition': 'ens_addition',
+                }
+                new_records = []
+                for ckpt_name, metric_key in checkpoint_criteria.items():
+                    if metric_key in val_metrics and val_metrics[metric_key] > best_checkpoints[ckpt_name]['metric']:
+                        best_checkpoints[ckpt_name] = {
+                            'metric': val_metrics[metric_key],
+                            'epoch': epoch,
+                            'test_accs': periodic_test_accs.copy(),
+                        }
+                        new_records.append(f"{ckpt_name} (val {metric_key}: {val_metrics[metric_key]:.2f}%)")
+
+                        # Log test accuracies for this checkpoint
+                        wandb.log({
+                            f'best/{ckpt_name}_test_transfer': periodic_test_accs['transfer'],
+                            f'best/{ckpt_name}_test_peeking': periodic_test_accs['peeking'],
+                            f'best/{ckpt_name}_test_addition': periodic_test_accs['addition'],
+                            f'best/{ckpt_name}_test_addition_ens': periodic_test_accs.get('addition_ens', 0),
+                            f'best/{ckpt_name}_epoch': epoch + 1,
+                            'epoch': epoch + 1,
+                        })
+
+                if new_records:
+                    print(f"  >> New records at epoch {epoch+1}: {', '.join(new_records)}")
+                    print(f"     Test accs: transfer={periodic_test_accs['transfer']:.2f}%, "
+                            f"peeking={periodic_test_accs['peeking']:.2f}%, "
+                            f"addition={periodic_test_accs['addition']:.2f}%")
 
                 wandb.log({
                     'val/peeking_acc': val_metrics.get('peeking', 0),
                     'val/teacher_agreement': val_metrics.get('teacher_agreement', 0),
+                    'val/addition_agreement': val_metrics.get('addition', 0),
+                    'val/ens_addition': val_metrics.get('ens_addition', 0),
                     'val/combined': sum(val_weights.get(k, 0) * val_metrics.get(k, 0) for k in val_weights),
                     'epoch': epoch + 1
                 })
@@ -1032,5 +1163,25 @@ def train_shot(
         print(f"\nRestored best checkpoint from epoch {best_checkpoint_state['epoch']+1}")
         print(f"  Val metrics: {best_checkpoint_state['val_metrics']}")
 
+    # Build best checkpoint summary dict and print
+    print("\n=== Best Checkpoint Summary (test accuracies at best val) ===")
+    best_checkpoint_summary = {}
+    for ckpt_name, ckpt_data in best_checkpoints.items():
+        if ckpt_data['test_accs'] is not None:
+            test_accs = ckpt_data['test_accs']
+            best_checkpoint_summary[ckpt_name] = {
+                'epoch': ckpt_data['epoch'] + 1,
+                'val_metric': ckpt_data['metric'],
+                'test_transfer': test_accs['transfer'],
+                'test_peeking': test_accs['peeking'],
+                'test_addition': test_accs['addition'],
+                'test_addition_ens': test_accs.get('addition_ens', 0),
+            }
+            print(f"\n{ckpt_name} (epoch {ckpt_data['epoch']+1}, val={ckpt_data['metric']:.2f}%):")
+            print(f"  test/transfer: {test_accs['transfer']:.2f}%")
+            print(f"  test/peeking: {test_accs['peeking']:.2f}%")
+            print(f"  test/addition: {test_accs['addition']:.2f}%")
+            print(f"  test/addition_ens: {test_accs.get('addition_ens', 0):.2f}%")
+
     print("\n=== Phase 2 (Fusion MAE Training) complete ===")
-    return mae_decoders, latent_projectors, intermediate_projectors, trainable_total
+    return mae_decoders, latent_projectors, intermediate_projectors, trainable_total, best_checkpoints, best_checkpoint_summary

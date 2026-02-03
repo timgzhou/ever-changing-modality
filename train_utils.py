@@ -1053,8 +1053,6 @@ def _delulu_stage3_test(
     else:
         raise ValueError(f"Unknown objective: {objective}")
 
-    print(f"\n--- Stage 3: {desc} ---")
-
     model.eval()
     intermediate_projectors.eval()
     softvote_correct = 0
@@ -1211,30 +1209,13 @@ def _delulu_stage3_test(
             pbar.set_postfix({'acc': f'{100 * softvote_correct / total:.2f}%'})
 
     softvote_test_acc = 100 * softvote_correct / total
-    print(f"  Test Accuracy (softvote): {softvote_test_acc:.2f}%")
-    for mod in all_mods_list:
-        mod_test_acc = 100 * per_mod_correct[mod] / total
-        print(f"      Test Accuracy from {mod} classifier: {mod_test_acc:.2f}%")
+    # print(f"  Test Accuracy (softvote): {softvote_test_acc:.2f}%")
 
     # Report peeking + transfer ensemble for addition objective
     peeking_transfer_acc = None
     if objective == "addition":
         peeking_transfer_acc = 100 * peeking_transfer_ensemble_correct / total
         print(f"  Test Accuracy (peeking+transfer ensemble): {peeking_transfer_acc:.2f}%")
-
-    # Print predictive diversity (pairwise disagreement rates)
-    print(f"  Predictive Diversity (pairwise):")
-    for pair_key, disagreement_count in pairwise_disagreement.items():
-        disagreement_pct = 100 * disagreement_count / total
-        oracle_acc = 100 * pairwise_oracle[pair_key] / total
-        # Parse mod names from pair_key
-        mod_i, mod_j = pair_key.split("_", 1)
-        if disagreement_count > 0:
-            i_win_pct = 100 * pairwise_wins[(mod_i, mod_j)] / disagreement_count
-            j_win_pct = 100 * pairwise_wins[(mod_j, mod_i)] / disagreement_count
-        else:
-            i_win_pct = j_win_pct = 0.0
-        print(f"      {pair_key}: disagree {disagreement_pct:.2f}%, oracle {oracle_acc:.2f}%, wins {mod_i}:{i_win_pct:.1f}%/{mod_j}:{j_win_pct:.1f}%")
 
     return softvote_test_acc, peeking_transfer_acc
 

@@ -373,24 +373,24 @@ def get_loaders(bs=32,nw=4):
     return train1_loader, train2_loader, test_loader
 
 
-def get_loaders_with_val(bs=32, nw=4, val_ratio=0.1, seed=42):
+def get_loaders_with_val(bs=32, nw=4, seed=42):
     """
-    Get dataloaders with validation splits from both train1 and train2.
+    Get dataloaders with validation splits.
 
+    Uses the default EuroSAT val split, divided into val1 and val2.
     Stage 1 (self-supervised on multimodal): uses train2, validated on val2
     Stage 2 (pseudo-supervised on monomodal): uses train1, validated on val1
 
     Args:
         bs: Batch size
         nw: Number of workers
-        val_ratio: Fraction of each split to use for validation (default: 0.1)
         seed: Random seed for reproducible val split
 
     Returns:
         train1_loader: Labeled training data (monomodal, for stage 2)
-        val1_loader: Validation from train1 (monomodal, for stage 2)
+        val1_loader: Validation for stage 2 (half of default val split)
         train2_loader: Unlabeled training data (multimodal, for stage 1)
-        val2_loader: Validation from train2 (multimodal, for stage 1)
+        val2_loader: Validation for stage 1 (half of default val split)
         test_loader: Test data
     """
     import random
@@ -399,7 +399,7 @@ def get_loaders_with_val(bs=32, nw=4, val_ratio=0.1, seed=42):
     resize_transform = DictTransform(transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True))
 
     train_dataset_full = EuroSAT(
-        root='datasets',
+        root='ds_ers',
         split='train',
         bands=bands_full,
         transforms=resize_transform,
@@ -410,29 +410,30 @@ def get_loaders_with_val(bs=32, nw=4, val_ratio=0.1, seed=42):
     train1_indices = load_split_indices('datasets/eurosat-train1.txt', train_dataset_full)
     train2_indices = load_split_indices('datasets/eurosat-train2.txt', train_dataset_full)
 
+    # Load the default validation split
+    val_dataset_full = EuroSAT(
+        root='ds_ers',
+        split='val',
+        bands=bands_full,
+        transforms=resize_transform,
+        download=True,
+        checksum=False
+    )
+
+    # Split validation set into val1 and val2 (half each)
     rng = random.Random(seed)
+    val_indices = list(range(len(val_dataset_full)))
+    rng.shuffle(val_indices)
+    val1_indices = val_indices[:len(val_indices) // 2]
+    val2_indices = val_indices[len(val_indices) // 2:]
 
-    # Split train1 into train1 and val1
-    train1_indices_shuffled = train1_indices.copy()
-    rng.shuffle(train1_indices_shuffled)
-    val1_size = int(len(train1_indices_shuffled) * val_ratio)
-    val1_indices = train1_indices_shuffled[:val1_size]
-    train1_indices_remaining = train1_indices_shuffled[val1_size:]
-
-    # Split train2 into train2 and val2
-    train2_indices_shuffled = train2_indices.copy()
-    rng.shuffle(train2_indices_shuffled)
-    val2_size = int(len(train2_indices_shuffled) * val_ratio)
-    val2_indices = train2_indices_shuffled[:val2_size]
-    train2_indices_remaining = train2_indices_shuffled[val2_size:]
-
-    train1_dataset = Subset(train_dataset_full, train1_indices_remaining)
-    val1_dataset = Subset(train_dataset_full, val1_indices)
-    train2_dataset = Subset(train_dataset_full, train2_indices_remaining)
-    val2_dataset = Subset(train_dataset_full, val2_indices)
+    train1_dataset = Subset(train_dataset_full, train1_indices)
+    train2_dataset = Subset(train_dataset_full, train2_indices)
+    val1_dataset = Subset(val_dataset_full, val1_indices)
+    val2_dataset = Subset(val_dataset_full, val2_indices)
 
     test_dataset_full = EuroSAT(
-        root='datasets',
+        root='ds_ers',
         split='test',
         bands=bands_full,
         transforms=resize_transform,
@@ -440,8 +441,8 @@ def get_loaders_with_val(bs=32, nw=4, val_ratio=0.1, seed=42):
         checksum=False
     )
 
-    print(f"Split train1 into {len(train1_indices_remaining)} train and {len(val1_indices)} val samples ({val_ratio*100:.0f}% val).")
-    print(f"Split train2 into {len(train2_indices_remaining)} train and {len(val2_indices)} val samples ({val_ratio*100:.0f}% val).")
+    print(f"Train1 samples: {len(train1_indices)}, Train2 samples: {len(train2_indices)}")
+    print(f"Val1 samples: {len(val1_indices)}, Val2 samples: {len(val2_indices)} (from default val split)")
     print(f"Test samples: {len(test_dataset_full)}")
 
     # Create dataloaders
