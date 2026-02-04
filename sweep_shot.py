@@ -18,12 +18,9 @@ import wandb
 
 from evan_main import EVANClassifier
 from eurosat_data_utils import (
-    ALL_BAND_NAMES,
     get_loaders_with_val,
     get_modality_bands_dict
 )
-from train_utils import _delulu_stage3_test
-
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 
@@ -47,21 +44,30 @@ def main():
     parser.add_argument('--wandb_project', type=str, default='delulu-sweep')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--mae_modalities', type=str, default="all", choices=["all", "newmod"])
+    # Swept hyperparameters - defaults here, wandb sweep overrides via command line
+    parser.add_argument('--mae_mask_ratio', type=float, default=0.75)
+    parser.add_argument('--modality_dropout', type=float, default=0.3)
+    parser.add_argument('--labeled_frequency', type=float, default=0.3)
+    parser.add_argument('--labeled_start_fraction', type=float, default=0.0)
+    parser.add_argument('--ssl_lr', type=float, default=1e-4)
+    parser.add_argument('--weight_decay', type=float, default=0.01)
+    parser.add_argument('--use_mae', type=lambda x: x.lower() == 'true', default=True)
+    parser.add_argument('--use_latent', type=lambda x: x.lower() == 'true', default=True)
     args = parser.parse_args()
 
     # Initialize wandb - sweep will override config
     wandb.init(project=args.wandb_project)
     config = wandb.config
 
-    # Get swept hyperparameters from wandb config (with defaults)
-    mae_mask_ratio = config.get('mae_mask_ratio', 0.75)
-    modality_dropout = config.get('modality_dropout', 0.3)
-    labeled_frequency = config.get('labeled_frequency', 0.3)
-    labeled_start_fraction = config.get('labeled_start_fraction', 0.0)
-    ssl_lr = config.get('ssl_lr', 1e-4)
-    weight_decay = config.get('weight_decay', 0.01)
-    use_mae = config.get('use_mae', True)
-    use_latent = config.get('use_latent', True)
+    # Get swept hyperparameters from args (passed by wandb sweep via command line)
+    mae_mask_ratio = args.mae_mask_ratio
+    modality_dropout = args.modality_dropout
+    labeled_frequency = args.labeled_frequency
+    labeled_start_fraction = args.labeled_start_fraction
+    ssl_lr = args.ssl_lr
+    weight_decay = args.weight_decay
+    use_mae = args.use_mae
+    use_latent = args.use_latent
 
     # Build active_losses based on labeled_frequency and optional losses
     # Base losses: prefusion + distill always, +ce when using labeled data
@@ -151,7 +157,7 @@ def main():
 
     # ========================================== TRAIN SHOT ===========================================
     print(f"\n=== Training with SHOT ===")
-    _, _, intermediate_projectors, trainable_total, best_checkpoints = train_shot(
+    _, _, intermediate_projectors, trainable_total, best_checkpoints, _ = train_shot(
         model=model,
         train_loader=train2_loader,
         device=device,
@@ -178,43 +184,6 @@ def main():
             wandb.run.summary[f'{ckpt_name}_test_addition'] = ckpt_data['test_accs']['addition']
             wandb.run.summary[f'{ckpt_name}_test_addition_ens'] = ckpt_data['test_accs'].get('addition_ens', 0)
 
-    # ========================================= EVALUATION =====================================
-    print("\n=== Evaluating trained model ===")
-
-    all_modalities = [starting_modality, newmod]
-
-    objectives = {
-        "transfer": {"desc": f"Using only {newmod}, hallucinating {starting_modality}"},
-        "peeking": {"desc": f"Using only {starting_modality}, hallucinating {newmod}"},
-        "addition": {"desc": f"Using both {starting_modality} and {newmod}"}
-    }
-
-    accuracies = {}
-    addition_ens_acc = None
-    for objective, info in objectives.items():
-        print(f"\n--- Evaluating: {objective.capitalize()} objective ---")
-        print(f"    {info['desc']}")
-
-        accuracy, ens_acc = _delulu_stage3_test(
-            model=model,
-            evan=model.evan,
-            test_loader=test_loader,
-            device=device,
-            modality_bands_dict=modality_bands_dict,
-            unlabeled_modalities=[newmod],
-            labeled_modalities=[starting_modality],
-            all_modalities=all_modalities,
-            intermediate_projectors=intermediate_projectors,
-            objective=objective
-        )
-
-        accuracies[objective] = accuracy
-        if objective == "addition" and ens_acc is not None:
-            addition_ens_acc = ens_acc
-            wandb.log({"test/addition_ens_accuracy": ens_acc})
-        print(f"{objective.capitalize()} accuracy: {accuracy:.2f}%")
-        wandb.log({f"test/{objective}_accuracy": accuracy})
-
     # ========================================= CHECKPOINT =====================================
     timestamp_shot = datetime.now().strftime('%m%d_%H%M')
     checkpoint_shotete = os.path.join(args.checkpoint_dir, f'sweep_{wandb.run.id}_{timestamp_shot}.pt')
@@ -239,6 +208,20 @@ def main():
     print(f"Checkpoint saved to: {checkpoint_shotete}")
 
     # ========================================= CSV LOGGING =====================================
+    # Extract val metrics and test accuracies from best checkpoints
+    # Each objective uses its own best checkpoint (by validation metric)
+    def get_ckpt_data(ckpt_name, metric_key, test_key):
+        ckpt = best_checkpoints.get(ckpt_name, {})
+        val_metric = ckpt.get('metric')
+        test_accs = ckpt.get('test_accs')
+        test_acc = test_accs.get(test_key) if test_accs else None
+        return val_metric, test_acc
+
+    val_transfer, test_transfer = get_ckpt_data('best_transfer', 'metric', 'transfer')
+    val_peeking, test_peeking = get_ckpt_data('best_peeking', 'metric', 'peeking')
+    val_addition, test_addition = get_ckpt_data('best_addition', 'metric', 'addition')
+    val_ens_addition, test_ens_addition = get_ckpt_data('best_ens_addition', 'metric', 'addition_ens')
+
     filename = args.results_csv
     file_exists = os.path.isfile(filename)
     fieldnames = [
@@ -246,7 +229,10 @@ def main():
         "ssl_lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
         "use_mae", "use_latent", "trainable_params", "active_losses",
-        "transfer_acc", "peeking_acc", "addition_acc", "addition_ens_acc",
+        "val_transfer", "test_transfer",
+        "val_peeking", "test_peeking",
+        "val_addition", "test_addition",
+        "val_ens_addition", "test_ens_addition",
         "stage0_checkpoint", "shote2e_checkpoint"
     ]
     with open(filename, mode='a', newline='') as file:
@@ -269,10 +255,14 @@ def main():
             use_latent,
             trainable_total,
             active_losses_str,
-            f"{accuracies['transfer']:.2f}",
-            f"{accuracies['peeking']:.2f}",
-            f"{accuracies['addition']:.2f}",
-            f"{addition_ens_acc:.2f}" if addition_ens_acc is not None else "",
+            f"{val_transfer:.2f}" if val_transfer is not None else "",
+            f"{test_transfer:.2f}" if test_transfer is not None else "",
+            f"{val_peeking:.2f}" if val_peeking is not None else "",
+            f"{test_peeking:.2f}" if test_peeking is not None else "",
+            f"{val_addition:.2f}" if val_addition is not None else "",
+            f"{test_addition:.2f}" if test_addition is not None else "",
+            f"{val_ens_addition:.2f}" if val_ens_addition is not None else "",
+            f"{test_ens_addition:.2f}" if test_ens_addition is not None else "",
             args.stage0_checkpoint,
             checkpoint_shotete,
         ])
