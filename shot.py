@@ -292,41 +292,40 @@ def mask_input(intermediate_projectors, batch_size, n_storage_tokens, num_patche
 
 def mixed_batch_iterator(unlabeled_loader, labeled_loader, labeled_freq):
     """
-    Yield (batch, is_labeled) tuples, interleaving labeled batches into unlabeled stream.
+    Yield (batch, is_labeled) tuples with labeled_freq controlling the proportion.
 
-    All unlabeled batches are yielded. Before each unlabeled batch, a labeled batch
-    is inserted with probability labeled_freq. This makes epochs ~(1 + labeled_freq)
-    times longer but ensures the modality masking ratio for starting_mod is preserved.
+    Total batches per epoch = min(len(labeled_loader), len(unlabeled_loader)).
+    Fraction labeled_freq of batches come from labeled_loader.
 
     Args:
         unlabeled_loader: Primary loader (train2, unlabeled multimodal)
         labeled_loader: Secondary loader (train1, labeled monomodal), can be None
-        labeled_freq: Probability of inserting a labeled batch before each unlabeled batch
+        labeled_freq: Proportion of batches that should be labeled (0 to 1)
 
     Yields:
         (batch, is_labeled): Tuple of batch dict and boolean indicating if from labeled loader
     """
+    if labeled_loader is None or labeled_freq == 0:
+        for batch in unlabeled_loader:
+            yield batch, False
+        return
+
+    total_batches = min(len(unlabeled_loader), len(labeled_loader))
+    n_labeled = int(total_batches * labeled_freq)
+    n_unlabeled = total_batches - n_labeled
+
     unlabeled_iter = iter(unlabeled_loader)
-    labeled_iter = iter(labeled_loader) if labeled_loader else None
+    labeled_iter = iter(labeled_loader)
 
-    # Exhaust all unlabeled batches, interleaving labeled batches
-    for _ in range(len(unlabeled_loader)):
-        # Maybe insert a labeled batch before the unlabeled one
-        if labeled_iter is not None and np.random.rand() < labeled_freq:
-            try:
-                batch = next(labeled_iter)
-            except StopIteration:
-                labeled_iter = iter(labeled_loader)
-                batch = next(labeled_iter)
-            yield batch, True
+    # Create schedule: True for labeled, False for unlabeled, then shuffle
+    schedule = [True] * n_labeled + [False] * n_unlabeled
+    np.random.shuffle(schedule)
 
-        # Always yield the next unlabeled batch
-        try:
-            batch = next(unlabeled_iter)
-        except StopIteration:
-            unlabeled_iter = iter(unlabeled_loader)
-            batch = next(unlabeled_iter)
-        yield batch, False
+    for is_labeled in schedule:
+        if is_labeled:
+            yield next(labeled_iter), True
+        else:
+            yield next(unlabeled_iter), False
 
 
 def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dict,
@@ -731,9 +730,15 @@ def train_shot(
         else:
             effective_labeled_freq = 0.0
 
+        # Compute total batches for progress bar
+        if labeled_train_loader is not None and effective_labeled_freq > 0:
+            total_batches = min(len(train_loader), len(labeled_train_loader))
+        else:
+            total_batches = len(train_loader)
+
         pbar = tqdm(
             mixed_batch_iterator(train_loader, labeled_train_loader, effective_labeled_freq),
-            total=len(train_loader),
+            total=total_batches,
             desc=f"SHOT Epoch {epoch+1}/{args.epochs}"
         )
 

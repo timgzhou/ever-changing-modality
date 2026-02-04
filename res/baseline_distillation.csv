@@ -11,3 +11,6 @@ evan_small,vre,rgb,fft,32,fft,0.0001,27533194,48,2.0,1.0,regular,82.98,83.31,30,
 evan_small,swir,nir,fft,32,fft,0.0001,27434890,48,2.0,1.0,regular,70.89,72.06,14,86.50,85.52,,,,checkpoints/evan_distill_swir_to_nir_20260201_053748.pt,clstoken,checkpoints/swir_randinit_fft.pt
 evan_small,swir,rgb,fft,32,fft,0.0001,27533194,48,2.0,1.0,regular,81.93,82.07,47,87.57,86.76,,,,checkpoints/evan_distill_swir_to_rgb_20260201_053838.pt,clstoken,checkpoints/swir_randinit_fft.pt
 evan_small,swir,vre,fft,32,fft,0.0001,27533194,48,2.0,1.0,regular,81.91,82.31,45,86.46,86.19,,,,checkpoints/evan_distill_swir_to_vre_20260201_053909.pt,clstoken,checkpoints/swir_randinit_fft.pt
+evan_small,rgb,vre,fft,32,fft,0.0001,27533194,48,2.0,1.0,regular,94.61,94.67,42,98.57,98.52,,,,checkpoints/evan_distill_rgb_to_vre_20260204_172339.pt,clstoken,checkpoints/rgb_dinoinit_fft.pt
+evan_small,rgb,swir,fft,32,fft,0.0001,27533194,48,2.0,1.0,regular,88.67,88.85,37,97.81,97.81,,,,checkpoints/evan_distill_rgb_to_swir_20260204_172351.pt,clstoken,checkpoints/rgb_dinoinit_fft.pt
+evan_small,rgb,nir,fft,32,fft,0.0001,27434890,48,2.0,1.0,regular,83.19,83.33,25,97.61,97.72,,,,checkpoints/evan_distill_rgb_to_nir_20260204_172526.pt,clstoken,checkpoints/rgb_dinoinit_fft.pt
