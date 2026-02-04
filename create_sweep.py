@@ -23,19 +23,24 @@ CHECKPOINT_MAP = {
     "swir": "checkpoints/swir_randinit_fft.pt",
 }
 
+CHECKPOINT_MAP_DINO = {
+    "rgb": "checkpoints/rgb_dinoinit_fft.pt",
+}
 
-def create_sweep(starting_mod: str, new_mod: str) -> str:
+def create_sweep(starting_mod: str, new_mod: str, dino: bool=False) -> str:
     # Load base config
     with open(BASE_CONFIG_PATH, 'r') as f:
         config = yaml.safe_load(f)
-
+    cpt_map = CHECKPOINT_MAP_DINO if dino else CHECKPOINT_MAP
     # Get checkpoint path
-    if starting_mod not in CHECKPOINT_MAP:
-        raise ValueError(f"Unknown starting modality: {starting_mod}. Options: {list(CHECKPOINT_MAP.keys())}")
-    stage0_checkpoint = CHECKPOINT_MAP[starting_mod]
+    if starting_mod not in cpt_map:
+        raise ValueError(f"Unknown starting modality: {starting_mod}. Options: {list(cpt_map.keys())}")
+    stage0_checkpoint = cpt_map[starting_mod]
 
     # Set project name based on modality combo
     project_name = f"delulu-sweep-{starting_mod}-{new_mod}"
+    if dino:
+        project_name = f"delulu-sweep-{starting_mod}-{new_mod}-dino"
     config['project'] = project_name
 
     # Add modality args to command
@@ -63,17 +68,21 @@ def main():
     parser.add_argument('--newmod', type=str, required=True,
                         choices=['nir', 'rgb', 'vre', 'swir'],
                         help='New modality to add')
+    parser.add_argument('--dino', action='store_true')
     args = parser.parse_args()
 
     if args.starting == args.newmod:
         print("Error: starting and newmod must be different")
         return
 
-    create_sweep(args.starting, args.newmod)
+    create_sweep(args.starting, args.newmod, args.dino)
 
 
 if __name__ == '__main__':
     main()
 
-
+# randominit
 # for m1 in rgb nir vre swir; do for m2 in rgb nir vre swir; do if [ "$m1" != "$m2" ]; then python create_sweep.py --starting "$m1" --newmod "$m2"; fi; done; done
+
+# dino
+# for m1 in rgb; do for m2 in nir vre swir; do if [ "$m1" != "$m2" ]; then python create_sweep.py --starting "$m1" --newmod "$m2" --dino; fi; done; done
