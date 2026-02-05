@@ -7,7 +7,7 @@
 # Run all sweeps:
 #   python run_all_sweeps.py
 
-# Old sweeps (commented out 2026-02-03) (64 epochs)
+# 64 epoch sweeps 2026-02-02
 # delulu-sweep-rgb-nir tgz/delulu-sweep-rgb-nir/5fqnj1g0 checkpoints/rgb_randinit_fft.pt nir
 # delulu-sweep-rgb-vre tgz/delulu-sweep-rgb-vre/vi90inq5 checkpoints/rgb_randinit_fft.pt vre
 # delulu-sweep-rgb-swir tgz/delulu-sweep-rgb-swir/32j28k91 checkpoints/rgb_randinit_fft.pt swir
@@ -21,20 +21,24 @@
 # delulu-sweep-swir-nir tgz/delulu-sweep-swir-nir/u0auclpb checkpoints/swir_randinit_fft.pt nir
 # delulu-sweep-swir-vre tgz/delulu-sweep-swir-vre/nwajw88k checkpoints/swir_randinit_fft.pt vre
 
-# New sweeps (2026-02-03) (128 epochs)
-delulu-sweep-rgb-nir tgz/delulu-sweep-rgb-nir/kgydzqnf checkpoints/rgb_randinit_fft.pt nir
-delulu-sweep-rgb-vre tgz/delulu-sweep-rgb-vre/vk2kgivy checkpoints/rgb_randinit_fft.pt vre
-delulu-sweep-rgb-swir tgz/delulu-sweep-rgb-swir/nca758ss checkpoints/rgb_randinit_fft.pt swir
-delulu-sweep-nir-rgb tgz/delulu-sweep-nir-rgb/x1g529xa checkpoints/nir_randinit_fft.pt rgb
-delulu-sweep-nir-vre tgz/delulu-sweep-nir-vre/y6jlakey checkpoints/nir_randinit_fft.pt vre
-delulu-sweep-nir-swir tgz/delulu-sweep-nir-swir/o1iwgekb checkpoints/nir_randinit_fft.pt swir
-delulu-sweep-vre-rgb tgz/delulu-sweep-vre-rgb/s1hj0nk8 checkpoints/vre_randinit_fft.pt rgb
-delulu-sweep-vre-nir tgz/delulu-sweep-vre-nir/u7rbwutt checkpoints/vre_randinit_fft.pt nir
-delulu-sweep-vre-swir tgz/delulu-sweep-vre-swir/oc76iit6 checkpoints/vre_randinit_fft.pt swir
-delulu-sweep-swir-rgb tgz/delulu-sweep-swir-rgb/sgt0lvkw checkpoints/swir_randinit_fft.pt rgb
-delulu-sweep-swir-nir tgz/delulu-sweep-swir-nir/u3m4lo1j checkpoints/swir_randinit_fft.pt nir
-delulu-sweep-swir-vre tgz/delulu-sweep-swir-vre/wfic33ui checkpoints/swir_randinit_fft.pt vre
+# 128 epochs sweeps (2026-02-03)
+# delulu-sweep-rgb-nir tgz/delulu-sweep-rgb-nir/kgydzqnf checkpoints/rgb_randinit_fft.pt nir
+# delulu-sweep-rgb-vre tgz/delulu-sweep-rgb-vre/vk2kgivy checkpoints/rgb_randinit_fft.pt vre
+# delulu-sweep-rgb-swir tgz/delulu-sweep-rgb-swir/nca758ss checkpoints/rgb_randinit_fft.pt swir
+# delulu-sweep-nir-rgb tgz/delulu-sweep-nir-rgb/x1g529xa checkpoints/nir_randinit_fft.pt rgb
+# delulu-sweep-nir-vre tgz/delulu-sweep-nir-vre/y6jlakey checkpoints/nir_randinit_fft.pt vre
+# delulu-sweep-nir-swir tgz/delulu-sweep-nir-swir/o1iwgekb checkpoints/nir_randinit_fft.pt swir
+# delulu-sweep-vre-rgb tgz/delulu-sweep-vre-rgb/s1hj0nk8 checkpoints/vre_randinit_fft.pt rgb
+# delulu-sweep-vre-nir tgz/delulu-sweep-vre-nir/u7rbwutt checkpoints/vre_randinit_fft.pt nir
+# delulu-sweep-vre-swir tgz/delulu-sweep-vre-swir/oc76iit6 checkpoints/vre_randinit_fft.pt swir
+# delulu-sweep-swir-rgb tgz/delulu-sweep-swir-rgb/sgt0lvkw checkpoints/swir_randinit_fft.pt rgb
+# delulu-sweep-swir-nir tgz/delulu-sweep-swir-nir/u3m4lo1j checkpoints/swir_randinit_fft.pt nir
+# delulu-sweep-swir-vre tgz/delulu-sweep-swir-vre/wfic33ui checkpoints/swir_randinit_fft.pt vre
 
 # delulu-sweep-rgb-nir-dino tgz/delulu-sweep-rgb-nir-dino/tyqvzw2k checkpoints/rgb_dinoinit_fft.pt nir
 # delulu-sweep-rgb-swir-dino tgz/delulu-sweep-rgb-swir-dino/zaipsisl checkpoints/rgb_dinoinit_fft.pt swir
 # delulu-sweep-rgb-vre-dino tgz/delulu-sweep-rgb-vre-dino/zl8y8r9z checkpoints/rgb_dinoinit_fft.pt vre
+
+delulu-sweep-rgb-nir-dino tgz/delulu-sweep-rgb-nir-dino/cmby1hdv checkpoints/rgb_dinoinit_fft.pt nir
+delulu-sweep-rgb-vre-dino tgz/delulu-sweep-rgb-vre-dino/8fnjoyvi checkpoints/rgb_dinoinit_fft.pt vre
+delulu-sweep-rgb-swir-dino tgz/delulu-sweep-rgb-swir-dino/rxefgcbs checkpoints/rgb_dinoinit_fft.pt swir
