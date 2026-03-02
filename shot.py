@@ -8,7 +8,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 from einops import rearrange
 from eurosat_data_utils import create_multimodal_batch
-from train_utils import _delulu_stage3_test, hallucinate_intermediate_features, merge_intermediate_features
+from train_utils import _delulu_stage3_test, _compute_map, hallucinate_intermediate_features, merge_intermediate_features
 import wandb
 import numpy as np
 
@@ -135,7 +135,8 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0):
 def create_mae_decoders(hidden_dim,patch_size,modality_bands_dict,mae_modalities,device):
     mae_decoders = nn.ModuleDict()
     for mod in mae_modalities:
-        num_channels = len(modality_bands_dict[mod])
+        bands = modality_bands_dict[mod]
+        num_channels = (bands.stop - bands.start) if isinstance(bands, slice) else len(bands)
         mae_decoders[mod] = FullSequenceMAEDecoder(
             embed_dim=hidden_dim,
             num_channels=num_channels,
@@ -330,14 +331,16 @@ def mixed_batch_iterator(unlabeled_loader, labeled_loader, labeled_freq):
 
 def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dict,
                               starting_modality, intermediate_projectors, all_modalities,
-                              use_mfla=False):
+                              use_mfla=False, multilabel=False, label_key='label'):
     """
-    Compute peeking accuracy on labeled monomodal validation data.
+    Compute peeking accuracy (or mAP for multilabel) on labeled monomodal validation data.
     Uses real starting_mod + hallucinated newmod (peeking path).
     """
     model.eval()
     correct = 0
     total = 0
+    all_logits_list = []
+    all_labels_list = []
     newmod_modalities = [m for m in all_modalities if m != starting_modality]
 
     with torch.no_grad():
@@ -349,7 +352,9 @@ def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dic
                 modalities=(starting_modality,)
             )
             mm_batch = {k: v.to(device) for k, v in mm_batch.items()}
-            labels = batch['label'].to(device)
+            labels = batch[label_key].to(device)
+            if multilabel:
+                labels = labels.float()
 
             # Get intermediate features from EVAN
             intermediate_feats = evan.forward_modality_specific_features(mm_batch)
@@ -374,17 +379,23 @@ def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dic
             )
 
             # Soft vote across classifiers
-            all_logits = []
+            logits_per_mod = []
             for mod in all_modalities:
                 fused_cls = fused_output[mod]['x_norm_clstoken']
-                all_logits.append(model.modality_classifiers[mod](fused_cls))
+                logits_per_mod.append(model.modality_classifiers[mod](fused_cls))
 
-            avg_logits = torch.stack(all_logits).mean(dim=0)
-            preds = avg_logits.argmax(dim=1)
+            avg_logits = torch.stack(logits_per_mod).mean(dim=0)
 
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
+            if multilabel:
+                all_logits_list.append(avg_logits.cpu())
+                all_labels_list.append(labels.cpu())
+            else:
+                preds = avg_logits.argmax(dim=1)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
 
+    if multilabel:
+        return _compute_map(torch.cat(all_logits_list), torch.cat(all_labels_list))
     return 100.0 * correct / total
 
 
@@ -575,6 +586,9 @@ def train_shot(
     # MFLA training options
     use_mfla: bool = False,             # Enable MFLA training for hallucinated modalities
     mfla_warmup_epochs: int = 0,        # Epochs where backbone + MFLA train together before freezing backbone
+    # Dataset options
+    multilabel: bool = False,           # Use BCEWithLogitsLoss instead of CrossEntropyLoss
+    label_key: str = 'label',           # Batch key for labels
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -685,7 +699,7 @@ def train_shot(
     # Identify newmod (modalities that are not the starting modality)
     starting_modality = evan.starting_modality
     newmod_list = [m for m in all_modalities if m != starting_modality]
-    ce_fn = nn.CrossEntropyLoss()
+    ce_fn = nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss()
 
     # Checkpoint tracking for validation-based selection
     best_val_metric = -float('inf')
@@ -746,7 +760,9 @@ def train_shot(
             if is_labeled:
                 # ===== LABELED MONOMODAL PATH (train1) =====
                 # Only starting_modality available, use real labels
-                labels = batch['label'].to(device)
+                labels = batch[label_key].to(device)
+                if multilabel:
+                    labels = labels.float()
 
                 # 1. Extract only starting_modality
                 monomodal_input = create_multimodal_batch(
@@ -1011,6 +1027,7 @@ def train_shot(
             labeled_modalities = latent_reconstruct_modalities
 
             periodic_test_accs = {}
+            metric_label = "mAP" if multilabel else "accuracy"
             for objective in ["transfer", "peeking", "addition"]:
                 accuracy, ens_acc = _delulu_stage3_test(
                     model=model,
@@ -1024,13 +1041,15 @@ def train_shot(
                     intermediate_projectors=intermediate_projectors,
                     objective=objective,
                     use_mfla=use_mfla,
+                    multilabel=multilabel,
+                    label_key=label_key,
                 )
                 periodic_test_accs[objective] = accuracy
-                print(f"  {objective.capitalize()} accuracy: {accuracy:.2f}%")
-                wandb.log({f"test/{objective}_accuracy": accuracy, "epoch": epoch + 1})
+                print(f"  {objective.capitalize()} {metric_label}: {accuracy:.2f}%")
+                wandb.log({f"test/{objective}_{metric_label}": accuracy, "epoch": epoch + 1})
                 if objective == "addition" and ens_acc is not None:
                     periodic_test_accs['addition_ens'] = ens_acc
-                    wandb.log({f"test/addition_ens_accuracy": ens_acc, "epoch": epoch + 1})
+                    wandb.log({f"test/addition_ens_{metric_label}": ens_acc, "epoch": epoch + 1})
 
             # Validation-based checkpoint selection (same eval frequency)
             if val_loader is not None or val_labeled_loader is not None:
@@ -1067,6 +1086,8 @@ def train_shot(
                         intermediate_projectors=intermediate_projectors,
                         all_modalities=all_modalities,
                         use_mfla=use_mfla,
+                        multilabel=multilabel,
+                        label_key=label_key,
                     )
                     val_metrics['peeking'] = peeking_acc
                     print(f"  Val peeking accuracy: {peeking_acc:.2f}%")

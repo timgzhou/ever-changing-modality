@@ -155,21 +155,51 @@ class FullSequenceMAEDecoder(nn.Module):
         return self.pred(x)
 
 
+def _compute_map(all_outputs, all_labels):
+    """Compute mean Average Precision for multilabel classification.
+
+    Args:
+        all_outputs: [N, C] float logits
+        all_labels:  [N, C] float binary targets
+
+    Returns:
+        mAP as a percentage (0-100)
+    """
+    scores = torch.sigmoid(all_outputs)  # [N, C]
+    num_classes = scores.shape[1]
+    aps = []
+    for c in range(num_classes):
+        gt = all_labels[:, c]
+        if gt.sum() == 0:
+            continue  # skip classes with no positives in this split
+        sc = scores[:, c]
+        # Sort by descending score
+        order = sc.argsort(descending=True)
+        gt_sorted = gt[order]
+        tp_cumsum = gt_sorted.cumsum(0)
+        precision_at_k = tp_cumsum / torch.arange(1, len(gt_sorted) + 1, dtype=torch.float32, device=gt.device)
+        ap = (precision_at_k * gt_sorted).sum() / gt.sum()
+        aps.append(ap.item())
+    return 100.0 * (sum(aps) / len(aps)) if aps else 0.0
+
+
 def evaluate(model, dataloader, criterion, device, modality_bands_dict,
-             modalities_to_use=('rgb',), pseudo_modalities=None, intermediate_projectors=None):
+             modalities_to_use=('rgb',), pseudo_modalities=None, intermediate_projectors=None,
+             multilabel=False, label_key='label'):
     """
     Evaluate model on a dataloader.
 
     Args:
         model: EVAN classifier
-        dataloader: DataLoader (RGB only or full bands)
+        dataloader: DataLoader
         criterion: Loss function
         device: torch device
-        modality_bands_dict: Dict mapping modality names to their band tuples
-                            e.g., {'rgb': ('B04', 'B03', 'B02'), 'infrared': ('B08', 'B8A', 'B09', 'B10')}
-        modalities_to_use: Tuple of modality names to use for evaluation (e.g., ('rgb',) or ('rgb', 'infrared'))
+        modality_bands_dict: Dict mapping modality names to their band tuples or slices
+        modalities_to_use: Tuple of modality names to use for evaluation
         pseudo_modalities: Optional list of modalities to hallucinate using sequence projection
-        intermediate_projectors: Required if pseudo_modalities is provided; trained sequence projectors
+        intermediate_projectors: Required if pseudo_modalities is provided
+        multilabel: If True, report mAP instead of top-1 accuracy (for BEN-v2 etc.)
+        label_key: Key for labels in batch dict ('label' or 'mask')
     """
     model.eval()
     if intermediate_projectors is not None:
@@ -177,10 +207,14 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
     total_loss = 0.0
     correct = 0
     total = 0
+    all_outputs_list = []
+    all_labels_list = []
 
     with torch.no_grad():
         for batch in dataloader:
-            labels = batch['label'].to(device)
+            labels = batch[label_key].to(device)
+            if multilabel:
+                labels = labels.float()
 
             # Create multi-modal input with specified modalities
             modal_input = create_multimodal_batch(
@@ -194,16 +228,23 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
                 outputs = model(modal_input)
 
             loss = criterion(outputs, labels)
-
             total_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
+
+            if multilabel:
+                all_outputs_list.append(outputs.cpu())
+                all_labels_list.append(labels.cpu())
+            else:
+                _, predicted = outputs.max(1)
+                total += labels.size(0)
+                correct += predicted.eq(labels).sum().item()
 
     avg_loss = total_loss / len(dataloader)
-    accuracy = 100. * correct / total
+    if multilabel:
+        metric = _compute_map(torch.cat(all_outputs_list), torch.cat(all_labels_list))
+    else:
+        metric = 100. * correct / total
 
-    return avg_loss, accuracy
+    return avg_loss, metric
 
 
 # ==================== MAE Helper Functions ====================
@@ -304,7 +345,8 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                                    modality, phase_name="Training",
                                    use_wandb=False, wandb_prefix=None, clip_norm=10,
                                    hallucinate_modality=False, pseudo_modalities=None,
-                                   intermediate_projectors=None):
+                                   intermediate_projectors=None,
+                                   multilabel=False, label_key='label'):
     """
     Simple training loop for single-modality EVAN training (Stage 0).
 
@@ -313,7 +355,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         train_loader: Training dataloader
         test_loader: Test dataloader
         device: torch device
-        modality_bands_dict: Dict mapping modality name to band tuple
+        modality_bands_dict: Dict mapping modality name to band tuple or slice
         criterion: Loss function
         optimizer: Optimizer
         num_epochs: Number of epochs to train
@@ -324,16 +366,20 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         clip_norm: Max gradient norm for clipping
         hallucinate_modality: If True, use pseudo-modality inference
         pseudo_modalities: List of modalities to hallucinate (required if hallucinate_modality=True)
-        intermediate_projectors: Trained sequence projectors for pseudo-modality (required if hallucinate_modality=True)
+        intermediate_projectors: Trained sequence projectors (required if hallucinate_modality=True)
+        multilabel: If True, report mAP instead of top-1 accuracy and accumulate train outputs
+        label_key: Key for labels in batch dict ('label' or 'mask')
 
     Returns:
-        Tuple of (train_acc, test_acc, best_test_acc, best_epoch)
+        Tuple of (train_metric, test_metric, best_test_metric, best_epoch)
+        where metric is top-1 accuracy (%) for classification or mAP (%) for multilabel
     """
     mod_str = modality.upper()
+    metric_name = "mAP" if multilabel else "Acc"
     global_step = 0
-    best_test_acc = 0
+    best_test_metric = 0
     best_epoch = 0
-    scheduler = ReduceLROnPlateau(optimizer,factor=0.5,patience=0,min_lr=1e-6)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=0, min_lr=1e-6)
 
     # Validate hallucinate_modality requirements
     if hallucinate_modality:
@@ -346,12 +392,17 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         if intermediate_projectors is not None:
             intermediate_projectors.train()
         train_loss = 0.0
+        # For classification: accumulate correct/total; for multilabel: accumulate outputs/labels
         train_correct = 0
         train_total = 0
+        train_outputs_list = []
+        train_labels_list = []
 
         pbar = tqdm(train_loader, desc=f"{phase_name} Epoch {epoch+1}/{num_epochs} [{mod_str}]")
         for batch in pbar:
-            labels = batch['label'].to(device)
+            labels = batch[label_key].to(device)
+            if multilabel:
+                labels = labels.float()
 
             modal_input = create_multimodal_batch(
                 batch, modality_bands_dict=modality_bands_dict, modalities=(modality,)
@@ -374,16 +425,20 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
             optimizer.step()
 
             train_loss += loss.item()
-            _, predicted = outputs.max(1)
-            train_total += labels.size(0)
-            train_correct += predicted.eq(labels).sum().item()
+            if multilabel:
+                train_outputs_list.append(outputs.detach().cpu())
+                train_labels_list.append(labels.detach().cpu())
+                pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'})
+            else:
+                _, predicted = outputs.max(1)
+                train_total += labels.size(0)
+                train_correct += predicted.eq(labels).sum().item()
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'acc': f'{100.*train_correct/train_total:.2f}%',
+                    'grad_norm': f'{grad_norm:.4f}'
+                })
             global_step += 1
-
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'acc': f'{100.*train_correct/train_total:.2f}%',
-                'grad_norm': f'{grad_norm:.4f}'
-            })
 
             if use_wandb and wandb_prefix:
                 wandb.log({
@@ -393,39 +448,46 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                 })
 
         train_loss /= len(train_loader)
-        train_acc = 100. * train_correct / train_total
+        if multilabel:
+            train_metric = _compute_map(torch.cat(train_outputs_list), torch.cat(train_labels_list))
+        else:
+            train_metric = 100. * train_correct / train_total
 
         # Evaluate on same modality (with pseudo-modality if enabled)
+        eval_kwargs = dict(
+            modality_bands_dict=modality_bands_dict,
+            modalities_to_use=(modality,),
+            multilabel=multilabel,
+            label_key=label_key,
+        )
         if hallucinate_modality:
-            test_loss, test_acc = evaluate(
+            test_loss, test_metric = evaluate(
                 model, test_loader, criterion, device,
-                modality_bands_dict, modalities_to_use=(modality,),
-                pseudo_modalities=pseudo_modalities, intermediate_projectors=intermediate_projectors
+                pseudo_modalities=pseudo_modalities, intermediate_projectors=intermediate_projectors,
+                **eval_kwargs,
             )
         else:
-            test_loss, test_acc = evaluate(
-                model, test_loader, criterion, device,
-                modality_bands_dict, modalities_to_use=(modality,)
-            )
+            test_loss, test_metric = evaluate(model, test_loader, criterion, device, **eval_kwargs)
+
         scheduler.step(train_loss)
-        if (epoch%8==1) or (epoch+1==num_epochs):
-            print(f"  Train ({mod_str}): Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
-            print(f"  Test ({mod_str}):  Loss: {test_loss:.4f}, Acc: {test_acc:.2f}% (epoch {epoch+1}/{num_epochs})")
-        if test_acc > best_test_acc:
-            print(f"    New record: {test_acc:.2f} > previous {best_test_acc:.2f} at epoch {epoch+1}")
-            best_test_acc=test_acc
-            best_epoch=epoch+1
+        if (epoch % 8 == 1) or (epoch + 1 == num_epochs):
+            print(f"  Train ({mod_str}): Loss: {train_loss:.4f}, {metric_name}: {train_metric:.2f}%")
+            print(f"  Test ({mod_str}):  Loss: {test_loss:.4f}, {metric_name}: {test_metric:.2f}% (epoch {epoch+1}/{num_epochs})")
+        if test_metric > best_test_metric:
+            print(f"    New record: {test_metric:.2f} > previous {best_test_metric:.2f} at epoch {epoch+1}")
+            best_test_metric = test_metric
+            best_epoch = epoch + 1
         if use_wandb and wandb_prefix:
             wandb.log({
                 f'{wandb_prefix}/train_loss_epoch': train_loss,
-                f'{wandb_prefix}/train_acc': train_acc,
+                f'{wandb_prefix}/train_{metric_name.lower()}': train_metric,
                 f'{wandb_prefix}/eval_loss': test_loss,
-                f'{wandb_prefix}/eval_acc': test_acc,
+                f'{wandb_prefix}/eval_{metric_name.lower()}': test_metric,
                 f'{wandb_prefix}/epoch': epoch + 1,
                 f'{wandb_prefix}/lr': optimizer.param_groups[0]['lr'],
             })
 
-    return train_acc, test_acc, best_test_acc, best_epoch
+    return train_metric, test_metric, best_test_metric, best_epoch
 
 
 def supervised_training_loop(model, train_loader, test_loader_full, device,
@@ -1029,7 +1091,8 @@ def _delulu_stage2_train_classifier(
 def _delulu_stage3_test(
     model, evan, test_loader, device, modality_bands_dict,
     unlabeled_modalities, labeled_modalities, all_modalities,
-    intermediate_projectors, objective="transfer", use_mfla=False
+    intermediate_projectors, objective="transfer", use_mfla=False,
+    multilabel=False, label_key='label',
 ):
     """Stage 3: Test with modalities based on objective.
 
@@ -1039,6 +1102,7 @@ def _delulu_stage3_test(
     For objective="peeking": test on labeled only, hallucinate unlabeled
 
     If use_mfla is True, MFLAs are applied only to hallucinated modalities.
+    If multilabel is True, reports mAP instead of top-1 accuracy.
     """
     # Determine test configuration based on objective
     if objective == "transfer":
@@ -1055,16 +1119,16 @@ def _delulu_stage3_test(
 
     model.eval()
     intermediate_projectors.eval()
-    softvote_correct = 0
     total = 0
-    per_mod_correct = {mod: 0 for mod in all_modalities}
-    # Track ensemble of peeking + transfer for addition objective
-    peeking_transfer_ensemble_correct = 0
-    # Track pairwise disagreement for diversity measurement
     all_mods_list = list(all_modalities)
+
+    # Accumulators — classification path
+    softvote_correct = 0
+    per_mod_correct = {mod: 0 for mod in all_modalities}
+    peeking_transfer_ensemble_correct = 0
     pairwise_disagreement = {}
     pairwise_oracle = {}
-    pairwise_wins = {}  # pairwise_wins[(mod_i, mod_j)] = wins for mod_i when disagreeing with mod_j
+    pairwise_wins = {}
     for i, mod_i in enumerate(all_mods_list):
         for j, mod_j in enumerate(all_mods_list):
             if i < j:
@@ -1073,11 +1137,18 @@ def _delulu_stage3_test(
                 pairwise_wins[(mod_i, mod_j)] = 0
                 pairwise_wins[(mod_j, mod_i)] = 0
 
+    # Accumulators — multilabel path
+    all_softvote_logits_list = []
+    all_labels_list = []
+    all_ens_logits_list = []  # for addition ensemble
+
     with torch.no_grad():
         pbar = tqdm(test_loader, desc="Testing")
 
         for batch in pbar:
-            labels = batch["label"].to(device)
+            labels = batch[label_key].to(device)
+            if multilabel:
+                labels = labels.float()
             test_input = create_multimodal_batch(
                 batch, modality_bands_dict=modality_bands_dict,
                 modalities=test_modalities
@@ -1088,7 +1159,6 @@ def _delulu_stage3_test(
 
             # Build fusion input based on objective
             if objective == "transfer":
-                # Real unlabeled + hallucinated labeled
                 hallucinated_intermediate = hallucinate_intermediate_features(
                     test_intermediate, unlabeled_modalities, labeled_modalities,
                     intermediate_projectors
@@ -1097,14 +1167,11 @@ def _delulu_stage3_test(
                     test_intermediate, hallucinated_intermediate,
                     unlabeled_modalities, labeled_modalities
                 )
-                # Transfer: labeled modalities are hallucinated
                 hallucinated_mods = set(labeled_modalities) if use_mfla else None
             elif objective == "addition":
-                # Both modalities are real, no hallucination needed
                 fusion_input = test_intermediate
-                hallucinated_mods = None  # All real
+                hallucinated_mods = None
             elif objective == "peeking":
-                # Real labeled + hallucinated unlabeled
                 hallucinated_intermediate = hallucinate_intermediate_features(
                     test_intermediate, labeled_modalities, unlabeled_modalities,
                     intermediate_projectors
@@ -1113,7 +1180,6 @@ def _delulu_stage3_test(
                     test_intermediate, hallucinated_intermediate,
                     labeled_modalities, unlabeled_modalities
                 )
-                # Peeking: unlabeled modalities are hallucinated
                 hallucinated_mods = set(unlabeled_modalities) if use_mfla else None
 
             fused_output = evan.forward_fusion_from_modality_features(
@@ -1125,7 +1191,6 @@ def _delulu_stage3_test(
             peeking_logits = None
             transfer_logits = None
             if objective == "addition":
-                # Peeking path: real labeled + hallucinated unlabeled
                 peeking_hal = hallucinate_intermediate_features(
                     test_intermediate, labeled_modalities, unlabeled_modalities,
                     intermediate_projectors
@@ -1145,7 +1210,6 @@ def _delulu_stage3_test(
                     peeking_logits_list.append(model.modality_classifiers[mod](fused_cls))
                 peeking_logits = torch.stack(peeking_logits_list).mean(dim=0)
 
-                # Transfer path: real unlabeled + hallucinated labeled
                 transfer_hal = hallucinate_intermediate_features(
                     test_intermediate, unlabeled_modalities, labeled_modalities,
                     intermediate_projectors
@@ -1169,55 +1233,64 @@ def _delulu_stage3_test(
             all_logits = []
             for mod in all_mods_list:
                 fused_cls = fused_output[mod]['x_norm_clstoken']
-                prediction = model.modality_classifiers[mod](fused_cls)
-                all_logits.append(prediction)
-
-            # Get predictions for each modality
-            all_preds = []
-            for i, mod in enumerate(all_mods_list):
-                _, predicted_mod = torch.max(all_logits[i], 1)
-                all_preds.append(predicted_mod)
-                per_mod_correct[mod] += (predicted_mod == labels).sum().item()
+                all_logits.append(model.modality_classifiers[mod](fused_cls))
 
             softvote_logits = torch.stack(all_logits).mean(dim=0)
-            _, softvote_predicted = torch.max(softvote_logits, 1)
 
-            # Compute pairwise disagreement, oracle accuracy, and win rates
-            all_preds_stack = torch.stack(all_preds)  # [num_mods, B]
-            for i, mod_i in enumerate(all_mods_list):
-                for j, mod_j in enumerate(all_mods_list):
-                    if i < j:
-                        pair_key = f"{mod_i}_{mod_j}"
-                        disagree_mask = (all_preds_stack[i] != all_preds_stack[j])
-                        pairwise_disagreement[pair_key] += disagree_mask.sum().item()
-                        # Oracle: either head got it right
-                        either_correct = (all_preds_stack[i] == labels) | (all_preds_stack[j] == labels)
-                        pairwise_oracle[pair_key] += either_correct.sum().item()
-                        # Win rates: when disagreeing, whose prediction matched the ensemble decision?
-                        i_dominated = (disagree_mask & (all_preds_stack[i] == softvote_predicted)).sum().item()
-                        j_dominated = (disagree_mask & (all_preds_stack[j] == softvote_predicted)).sum().item()
-                        pairwise_wins[(mod_i, mod_j)] += i_dominated
-                        pairwise_wins[(mod_j, mod_i)] += j_dominated
-            softvote_correct += (softvote_predicted == labels).sum().item()
+            if multilabel:
+                all_softvote_logits_list.append(softvote_logits.cpu())
+                all_labels_list.append(labels.cpu())
+                if objective == "addition" and peeking_logits is not None and transfer_logits is not None:
+                    all_ens_logits_list.append(((peeking_logits + transfer_logits) / 2).cpu())
+                pbar.set_postfix({'batches': total // labels.size(0)})
+            else:
+                # Classification: argmax accuracy tracking
+                all_preds = []
+                for i, mod in enumerate(all_mods_list):
+                    _, predicted_mod = torch.max(all_logits[i], 1)
+                    all_preds.append(predicted_mod)
+                    per_mod_correct[mod] += (predicted_mod == labels).sum().item()
 
-            # Compute peeking + transfer ensemble accuracy for addition objective
-            if objective == "addition" and peeking_logits is not None and transfer_logits is not None:
-                ensemble_logits = (peeking_logits + transfer_logits) / 2
-                _, ensemble_predicted = torch.max(ensemble_logits, 1)
-                peeking_transfer_ensemble_correct += (ensemble_predicted == labels).sum().item()
+                _, softvote_predicted = torch.max(softvote_logits, 1)
 
-            pbar.set_postfix({'acc': f'{100 * softvote_correct / total:.2f}%'})
+                all_preds_stack = torch.stack(all_preds)
+                for i, mod_i in enumerate(all_mods_list):
+                    for j, mod_j in enumerate(all_mods_list):
+                        if i < j:
+                            pair_key = f"{mod_i}_{mod_j}"
+                            disagree_mask = (all_preds_stack[i] != all_preds_stack[j])
+                            pairwise_disagreement[pair_key] += disagree_mask.sum().item()
+                            either_correct = (all_preds_stack[i] == labels) | (all_preds_stack[j] == labels)
+                            pairwise_oracle[pair_key] += either_correct.sum().item()
+                            i_dominated = (disagree_mask & (all_preds_stack[i] == softvote_predicted)).sum().item()
+                            j_dominated = (disagree_mask & (all_preds_stack[j] == softvote_predicted)).sum().item()
+                            pairwise_wins[(mod_i, mod_j)] += i_dominated
+                            pairwise_wins[(mod_j, mod_i)] += j_dominated
+                softvote_correct += (softvote_predicted == labels).sum().item()
 
-    softvote_test_acc = 100 * softvote_correct / total
-    # print(f"  Test Accuracy (softvote): {softvote_test_acc:.2f}%")
+                if objective == "addition" and peeking_logits is not None and transfer_logits is not None:
+                    ensemble_logits = (peeking_logits + transfer_logits) / 2
+                    _, ensemble_predicted = torch.max(ensemble_logits, 1)
+                    peeking_transfer_ensemble_correct += (ensemble_predicted == labels).sum().item()
 
-    # Report peeking + transfer ensemble for addition objective
-    peeking_transfer_acc = None
-    if objective == "addition":
-        peeking_transfer_acc = 100 * peeking_transfer_ensemble_correct / total
-        print(f"  Test Accuracy (peeking+transfer ensemble): {peeking_transfer_acc:.2f}%")
+                pbar.set_postfix({'acc': f'{100 * softvote_correct / total:.2f}%'})
 
-    return softvote_test_acc, peeking_transfer_acc
+    if multilabel:
+        all_sv_logits = torch.cat(all_softvote_logits_list)
+        all_lbls = torch.cat(all_labels_list)
+        softvote_test_metric = _compute_map(all_sv_logits, all_lbls)
+        ens_metric = None
+        if objective == "addition" and all_ens_logits_list:
+            ens_metric = _compute_map(torch.cat(all_ens_logits_list), all_lbls)
+            print(f"  Test mAP (peeking+transfer ensemble): {ens_metric:.2f}%")
+        return softvote_test_metric, ens_metric
+    else:
+        softvote_test_metric = 100 * softvote_correct / total
+        peeking_transfer_acc = None
+        if objective == "addition":
+            peeking_transfer_acc = 100 * peeking_transfer_ensemble_correct / total
+            print(f"  Test Accuracy (peeking+transfer ensemble): {peeking_transfer_acc:.2f}%")
+        return softvote_test_metric, peeking_transfer_acc
 
 
 def delulu_supervision(

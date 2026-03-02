@@ -60,3 +60,13 @@ evan_small,swir,fft,32,fft,0.0001,22109194,64,84.89,85.06,48,checkpoints/swir_ra
 evan_small,nir,fft,32,fft,0.0001,22109194,64,77.81,77.89,35,checkpoints/nir_dinoinit_fft.pt,clstoken
 evan_small,swir,fft,32,fft,0.0001,22207498,64,83.89,84.28,18,checkpoints/swir_randinit_fft.pt,clstoken
 evan_small,swir,fft,32,fft,0.0001,22207498,64,89.19,89.19,61,checkpoints/swir_dinoinit_fft.pt,clstoken
+benv2,evan_small,s2,emb+probe,32,fft,0.0001,1800595,2,15.91,15.91,1,mAP,checkpoints/benv2_s2_s0.pt,clstoken
+benv2,evan_small,s2,fft,32,fft,0.0001,23106067,2,55.07,55.07,2,mAP,checkpoints/benv2_s2_s0.pt,clstoken
+benv2,evan_small,s2,fft,32,fft,0.0001,23106067,2,55.79,55.79,2,mAP,checkpoints/benv2_s2_s0.pt,clstoken
+benv2,evan_small,s2,fft,32,fft,0.0001,23106067,8,58.88,58.88,8,mAP,checkpoints/benv2_s2_s0.pt,clstoken
+benv2,evan_small,s1,fft,32,fft,0.0001,22123027,8,40.84,45.16,2,mAP,checkpoints/benv2_s2_s0.pt,clstoken
+benv2,evan_small,s2,fft,32,fft,0.0001,23106067,16,54.99,59.24,7,mAP,checkpoints/benv2_s2_s0.pt,clstoken
+benv2,evan_small,s1,fft,32,fft,0.0001,22123027,16,38.29,44.87,3,mAP,checkpoints/benv2_s1_s0.pt,clstoken
+benv2,evan_small,s2,fft,32,fft,0.0001,23106067,4,58.38,58.86,3,mAP,checkpoints/benv2_s2_s0.pt,clstoken
+benv2,evan_small,s2,fft,32,fft,0.0001,23106067,8,59.15,60.07,4,mAP,checkpoints/benv2_s2_s0.pt,clstoken
+benv2,evan_small,s1,fft,32,fft,0.0001,22123027,8,43.21,46.31,3,mAP,checkpoints/benv2_s1_s0.pt,clstoken

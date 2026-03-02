@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Subset
 
@@ -78,10 +79,12 @@ class StackedModalityDataset(Dataset):
         dataset,
         modality_stack_order: list[str],
         merge_modalities: dict[str, list[str]] | None = None,
+        target_size: int | None = None,
     ):
         self.dataset = dataset
         self.modality_stack_order = modality_stack_order
         self.merge_modalities = merge_modalities or {}
+        self.target_size = target_size
 
         # Determine output modality names and their slices.
         # After merging, the effective modality list may differ from stack_order.
@@ -181,6 +184,11 @@ class StackedModalityDataset(Dataset):
         parts = [p for p in parts if p is not None]
         image = torch.cat(parts, dim=0)  # [C_total, H, W]
 
+        if self.target_size is not None and image.shape[-1] != self.target_size:
+            image = F.interpolate(
+                image.unsqueeze(0), size=(self.target_size, self.target_size), mode='bilinear', align_corners=False
+            ).squeeze(0)
+
         result = {'image': image}
 
         if 'label' in sample:
@@ -232,99 +240,97 @@ def get_benv2_loaders(
     num_workers: int = 8,
     data_root: str = 'datasets/geoben2/benv2',
     seed: int = 42,
+    starting_modality: str = 's2',
 ) -> tuple:
     """
     Create 5 dataloaders for BEN-v2 matching the SHOT interface.
 
+    All loaders expose the full S2+S1 stacked image tensor. Modality selection
+    is done at training time via create_multimodal_batch() using modality_slices,
+    matching the EuroSAT pattern where all bands are always loaded.
+
+    train1/val1 cover a different sample split from train2/val2 (same indices as
+    train2/val2 but drawn from the same full dataset), so the caller can use
+    train1 for starting-modality supervised training and train2 for SSL.
+
+    Args:
+        starting_modality: Which modality is the starting modality ('s2' or 's1').
+            Recorded in task_config; does not affect which channels are loaded.
+
     Returns:
-        train1_loader: S2-only, labeled (for CE loss / stage0)
-        val1_loader:   S2-only, labeled (for peeking accuracy validation)
-        train2_loader: S2+S1, labeled (labels not used in SHOT; for distill/MAE)
-        val2_loader:   S2+S1, labeled (for teacher-agreement validation)
+        train1_loader: S2+S1, labeled (train split, for stage 0 / CE loss)
+        val1_loader:   S2+S1, labeled (first half of val split)
+        train2_loader: S2+S1, labeled (train split, for distill/MAE — same samples as train1)
+        val2_loader:   S2+S1, labeled (second half of val split)
         test_loader:   S2+S1, labeled (for evaluation)
         task_config:   TaskConfig describing this dataset/task
     """
+    assert starting_modality in ('s2', 's1'), f"starting_modality must be 's2' or 's1', got {starting_modality!r}"
     root = Path(data_root)
 
-    # --- S2-only datasets (train1, val1) ---
-    train_s2 = GeoBenchBENV2(
-        root=root,
-        split='train',
-        band_order={'s2': list(BENV2_S2_BANDS)},
+    band_orders = {'s2': list(BENV2_S2_BANDS), 's1': list(BENV2_S1_BANDS)}
+    full_band_order = {'s2': list(BENV2_S2_BANDS), 's1': list(BENV2_S1_BANDS)}
+
+    # Always load full S2+S1 for all splits
+    train_full = GeoBenchBENV2(
+        root=root, split='train',
+        band_order=full_band_order,
         data_normalizer=ZScoreNormalizer,
     )
-    val_full_s2 = GeoBenchBENV2(
-        root=root,
-        split='val',
-        band_order={'s2': list(BENV2_S2_BANDS)},
+    val_full = GeoBenchBENV2(
+        root=root, split='val',
+        band_order=full_band_order,
+        data_normalizer=ZScoreNormalizer,
+    )
+    test_full = GeoBenchBENV2(
+        root=root, split='test',
+        band_order=full_band_order,
         data_normalizer=ZScoreNormalizer,
     )
 
-    # --- S2+S1 datasets (train2, val2, test) ---
-    train_s2s1 = GeoBenchBENV2(
-        root=root,
-        split='train',
-        band_order={'s2': list(BENV2_S2_BANDS), 's1': list(BENV2_S1_BANDS)},
-        data_normalizer=ZScoreNormalizer,
-    )
-    val_full_s2s1 = GeoBenchBENV2(
-        root=root,
-        split='val',
-        band_order={'s2': list(BENV2_S2_BANDS), 's1': list(BENV2_S1_BANDS)},
-        data_normalizer=ZScoreNormalizer,
-    )
-    test_s2s1 = GeoBenchBENV2(
-        root=root,
-        split='test',
-        band_order={'s2': list(BENV2_S2_BANDS), 's1': list(BENV2_S1_BANDS)},
-        data_normalizer=ZScoreNormalizer,
-    )
+    train_ds   = StackedModalityDataset(train_full, modality_stack_order=['s2', 's1'], target_size=128)
+    test_ds    = StackedModalityDataset(test_full,  modality_stack_order=['s2', 's1'], target_size=128)
 
-    # Wrap in StackedModalityDataset
-    train1_ds = StackedModalityDataset(train_s2, modality_stack_order=['s2'])
-    train2_ds = StackedModalityDataset(train_s2s1, modality_stack_order=['s2', 's1'])
-    test_ds = StackedModalityDataset(test_s2s1, modality_stack_order=['s2', 's1'])
-
-    # Split validation set 50/50 into val1 (S2-only) and val2 (S2+S1)
+    # Split validation 50/50 into val1 and val2
     rng = random.Random(seed)
-    val_indices = list(range(len(val_full_s2)))
+    val_indices = list(range(len(val_full)))
     rng.shuffle(val_indices)
     val1_indices = val_indices[:len(val_indices) // 2]
     val2_indices = val_indices[len(val_indices) // 2:]
 
-    val1_ds = StackedModalityDataset(
-        Subset(val_full_s2, val1_indices), modality_stack_order=['s2']
-    )
-    val2_ds = StackedModalityDataset(
-        Subset(val_full_s2s1, val2_indices), modality_stack_order=['s2', 's1']
-    )
+    val1_ds = StackedModalityDataset(Subset(val_full, val1_indices), modality_stack_order=['s2', 's1'], target_size=128)
+    val2_ds = StackedModalityDataset(Subset(val_full, val2_indices), modality_stack_order=['s2', 's1'], target_size=128)
 
-    print(f"BEN-v2 — Train: {len(train1_ds)} (S2-only), {len(train2_ds)} (S2+S1)")
-    print(f"BEN-v2 — Val1: {len(val1_ds)} (S2-only), Val2: {len(val2_ds)} (S2+S1)")
-    print(f"BEN-v2 — Test: {len(test_ds)} (S2+S1)")
+    new_modality = 's1' if starting_modality == 's2' else 's2'
+    print(f"BEN-v2 — Train: {len(train_ds)} (S2+S1), Test: {len(test_ds)} (S2+S1)")
+    print(f"BEN-v2 — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
 
-    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    # train1 and train2 use the same underlying dataset/samples; the caller
+    # selects which modality to use via create_multimodal_batch at runtime.
+    train1_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    val1_loader   = DataLoader(val1_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train2_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    val2_loader   = DataLoader(val2_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_loader   = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     # Build modality_slices from a sample (trigger lazy init)
-    _ = train2_ds[0]
-    modality_slices = train2_ds.modality_slices  # {'s2': slice(0,12), 's1': slice(12,14)}
+    _ = train_ds[0]
+    modality_slices = train_ds.modality_slices  # {'s2': slice(0,12), 's1': slice(12,14)}
 
+    start_channels = len(band_orders[starting_modality])
+    new_channels   = len(band_orders[new_modality])
     task_config = TaskConfig(
         dataset_name='benv2',
         task_type='multilabel',
-        modality_a='s2',
-        modality_b='s1',
-        modality_a_channels=len(BENV2_S2_BANDS),
-        modality_b_channels=len(BENV2_S1_BANDS),
+        modality_a=starting_modality,
+        modality_b=new_modality,
+        modality_a_channels=start_channels,
+        modality_b_channels=new_channels,
         num_classes=GeoBenchBENV2.num_classes,
         multilabel=True,
         label_key='label',
         modality_slices=modality_slices,
-        img_size=120,
+        img_size=128,
     )
 
     return train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config
@@ -347,6 +353,7 @@ def get_pastis_loaders(
     data_root: str = 'datasets/geoben2/pastis',
     seed: int = 42,
     temporal_aggregation: str = 'mean',
+    starting_modality: str = 's2',
 ) -> tuple:
     """
     Create 5 dataloaders for PASTIS (semantic segmentation) matching the SHOT interface.
@@ -356,17 +363,28 @@ def get_pastis_loaders(
 
     Args:
         temporal_aggregation: How to collapse time dimension. 'mean' or 'median'.
-            Using 'mean' keeps things simple; revisit for temporal modeling later.
+        starting_modality: Which modality is available at stage 0 ('s2' or 's1').
+            train1/val1 will contain only this modality; train2/val2/test contain both.
 
     Returns:
-        train1_loader: S2-only, with semantic segmentation masks
-        val1_loader:   S2-only, with masks
+        train1_loader: starting_modality-only, with semantic segmentation masks
+        val1_loader:   starting_modality-only, with masks
         train2_loader: S2+S1, with masks
         val2_loader:   S2+S1, with masks
         test_loader:   S2+S1, with masks
         task_config:   TaskConfig describing this dataset/task
     """
+    assert starting_modality in ('s2', 's1'), f"starting_modality must be 's2' or 's1', got {starting_modality!r}"
     root = Path(data_root)
+
+    n_s1 = len(PASTIS_S1_ASC_BANDS) + len(PASTIS_S1_DESC_BANDS)
+    s1_merge = {'s1': ['s1_asc', 's1_desc']}
+    full_stack_order = ['s2', 's1_asc', 's1_desc']
+    full_band_order = {
+        's2':      list(PASTIS_S2_BANDS),
+        's1_asc':  list(PASTIS_S1_ASC_BANDS),
+        's1_desc': list(PASTIS_S1_DESC_BANDS),
+    }
 
     common_kwargs = dict(
         temporal_aggregation=temporal_aggregation,
@@ -374,94 +392,53 @@ def get_pastis_loaders(
         data_normalizer=ZScoreNormalizer,
     )
 
-    # --- S2-only datasets (train1, val1) ---
-    train_s2 = GeoBenchPASTIS(
-        root=root, split='train',
-        band_order={'s2': list(PASTIS_S2_BANDS)},
-        **common_kwargs,
-    )
-    val_full_s2 = GeoBenchPASTIS(
-        root=root, split='val',
-        band_order={'s2': list(PASTIS_S2_BANDS)},
-        **common_kwargs,
-    )
+    # Always load full S2+S1 for all splits
+    train_full    = GeoBenchPASTIS(root=root, split='train', band_order=full_band_order, **common_kwargs)
+    val_full      = GeoBenchPASTIS(root=root, split='val',   band_order=full_band_order, **common_kwargs)
+    test_full     = GeoBenchPASTIS(root=root, split='test',  band_order=full_band_order, **common_kwargs)
 
-    # --- S2+S1 datasets (train2, val2, test) ---
-    s2s1_band_order = {
-        's2':     list(PASTIS_S2_BANDS),
-        's1_asc': list(PASTIS_S1_ASC_BANDS),
-        's1_desc': list(PASTIS_S1_DESC_BANDS),
-    }
-    train_s2s1 = GeoBenchPASTIS(
-        root=root, split='train',
-        band_order=s2s1_band_order,
-        **common_kwargs,
-    )
-    val_full_s2s1 = GeoBenchPASTIS(
-        root=root, split='val',
-        band_order=s2s1_band_order,
-        **common_kwargs,
-    )
-    test_s2s1 = GeoBenchPASTIS(
-        root=root, split='test',
-        band_order=s2s1_band_order,
-        **common_kwargs,
-    )
-
-    # Merge s1_asc + s1_desc → 's1' in StackedModalityDataset
-    s1_merge = {'s1': ['s1_asc', 's1_desc']}
-
-    train1_ds = StackedModalityDataset(train_s2, modality_stack_order=['s2'])
-    train2_ds = StackedModalityDataset(
-        train_s2s1,
-        modality_stack_order=['s2', 's1_asc', 's1_desc'],
-        merge_modalities=s1_merge,
-    )
-    test_ds = StackedModalityDataset(
-        test_s2s1,
-        modality_stack_order=['s2', 's1_asc', 's1_desc'],
-        merge_modalities=s1_merge,
-    )
+    train_ds = StackedModalityDataset(train_full, modality_stack_order=full_stack_order, merge_modalities=s1_merge)
+    test_ds  = StackedModalityDataset(test_full,  modality_stack_order=full_stack_order, merge_modalities=s1_merge)
 
     # Split validation 50/50
     rng = random.Random(seed)
-    val_indices = list(range(len(val_full_s2)))
+    val_indices = list(range(len(val_full)))
     rng.shuffle(val_indices)
     val1_indices = val_indices[:len(val_indices) // 2]
     val2_indices = val_indices[len(val_indices) // 2:]
 
     val1_ds = StackedModalityDataset(
-        Subset(val_full_s2, val1_indices),
-        modality_stack_order=['s2'],
+        Subset(val_full, val1_indices), modality_stack_order=full_stack_order, merge_modalities=s1_merge,
     )
     val2_ds = StackedModalityDataset(
-        Subset(val_full_s2s1, val2_indices),
-        modality_stack_order=['s2', 's1_asc', 's1_desc'],
-        merge_modalities=s1_merge,
+        Subset(val_full, val2_indices), modality_stack_order=full_stack_order, merge_modalities=s1_merge,
     )
 
-    print(f"PASTIS — Train: {len(train1_ds)} (S2-only), {len(train2_ds)} (S2+S1)")
-    print(f"PASTIS — Val1: {len(val1_ds)} (S2-only), Val2: {len(val2_ds)} (S2+S1)")
-    print(f"PASTIS — Test: {len(test_ds)} (S2+S1)")
+    new_modality = 's1' if starting_modality == 's2' else 's2'
+    print(f"PASTIS — Train: {len(train_ds)} (S2+S1), Test: {len(test_ds)} (S2+S1)")
+    print(f"PASTIS — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
 
-    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    # train1 and train2 use the same underlying dataset; modality selection happens
+    # at runtime via create_multimodal_batch using modality_slices.
+    train1_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    val1_loader   = DataLoader(val1_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train2_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    val2_loader   = DataLoader(val2_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_loader   = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-    # Build modality_slices from a sample
-    _ = train2_ds[0]
-    modality_slices = train2_ds.modality_slices  # {'s2': slice(0,10), 's1': slice(10,16)}
+    # Build modality_slices from a sample (trigger lazy init)
+    _ = train_ds[0]
+    modality_slices = train_ds.modality_slices  # {'s2': slice(0,10), 's1': slice(10,16)}
 
-    n_s1 = len(PASTIS_S1_ASC_BANDS) + len(PASTIS_S1_DESC_BANDS)
+    start_channels = len(PASTIS_S2_BANDS) if starting_modality == 's2' else n_s1
+    new_channels   = n_s1 if starting_modality == 's2' else len(PASTIS_S2_BANDS)
     task_config = TaskConfig(
         dataset_name='pastis',
         task_type='segmentation',
-        modality_a='s2',
-        modality_b='s1',
-        modality_a_channels=len(PASTIS_S2_BANDS),
-        modality_b_channels=n_s1,
+        modality_a=starting_modality,
+        modality_b=new_modality,
+        modality_a_channels=start_channels,
+        modality_b_channels=new_channels,
         num_classes=GeoBenchPASTIS.num_classes,
         multilabel=False,
         label_key='mask',
