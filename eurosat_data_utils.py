@@ -283,6 +283,16 @@ def create_multimodal_batch(
     Returns:
         Dict with requested modality keys
     """
+    # GeoBench datasets pre-normalize and stack all channels into a single 'image'
+    # tensor. The caller passes modality_bands_dict with slice values instead of
+    # band-name tuples (e.g. {'s2': slice(0, 10), 's1': slice(10, 16)}).
+    # Detect this case and bypass the band-index lookup path.
+    if modality_bands_dict is not None and any(
+        isinstance(v, slice) for v in modality_bands_dict.values()
+    ):
+        image = batch['image']  # [B, C_total, H, W] — already normalized
+        return {mod: image[:, modality_bands_dict[mod], :, :] for mod in modalities}
+
     image = batch['image']  # [B, 13, H, W]
     result = {}
 

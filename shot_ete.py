@@ -45,18 +45,12 @@ def main():
                         help='Path to results CSV file')
 
     # UNIMPORTANT
-    parser.add_argument('--batch_size', type=int, default=64,
-                        help='Batch size for training (default: 64)')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of dataloader workers (default: 4)')
-    parser.add_argument('--epochs', type=int, default=4,
-                        help='Epochs for fusion MAE training (default: 4)')
-    parser.add_argument('--eval_every_n_epochs', type=int, default=4,
-                        help='Evaluate every N epochs during training (default: None, only eval at end)')
-    parser.add_argument('--ssl_lr', type=float, default=1e-4,
-                        help='Learning rate for fusion MAE training (default: 1e-4)')
-    parser.add_argument('--weight_decay', type=float, default=0.01,
-                        help='Weight decay for AdamW optimizer (default: 0.01)')
+    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--num_workers', type=int, default=8)
+    parser.add_argument('--epochs', type=int, default=4)
+    parser.add_argument('--eval_every_n_epochs', type=int, default=4)
+    parser.add_argument('--ssl_lr', type=float, default=1e-4)
+    parser.add_argument('--weight_decay', type=float, default=0.001)
     parser.add_argument('--wandb_project', type=str, default='delulu-e2e-lossablate')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--checkpoint_name', type=str, default=None)

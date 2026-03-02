@@ -222,3 +222,5 @@ res/full/
 .DS_Store
 ds_ers
 *.yaml
+GEO-Bench-2
+*.png

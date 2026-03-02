@@ -11,3 +11,4 @@ torchvision
 accelerate
 torchgeo
 seaborn
+geobenchv2
