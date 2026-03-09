@@ -47,6 +47,7 @@ class TaskConfig:
     label_key: str          # 'label' or 'mask'
     modality_slices: dict   # {modality_name: slice} into the stacked image tensor
     img_size: int           # spatial size after any resizing
+    ignore_index: int = -100  # label value to ignore in loss/metric (e.g. 19 for PASTIS void_label)
 
 
 # ---------------------------------------------------------------------------
@@ -288,34 +289,39 @@ def get_benv2_loaders(
         data_normalizer=ZScoreNormalizer,
     )
 
-    train_ds   = StackedModalityDataset(train_full, modality_stack_order=['s2', 's1'], target_size=128)
-    test_ds    = StackedModalityDataset(test_full,  modality_stack_order=['s2', 's1'], target_size=128)
+    test_ds = StackedModalityDataset(test_full, modality_stack_order=['s2', 's1'], target_size=128)
 
-    # Split validation 50/50 into val1 and val2
+    # Split train and val 50/50 (no overlap, deterministic)
     rng = random.Random(seed)
+
+    train_indices = list(range(len(train_full)))
+    rng.shuffle(train_indices)
+    train1_indices = train_indices[:len(train_indices) // 2]
+    train2_indices = train_indices[len(train_indices) // 2:]
+
     val_indices = list(range(len(val_full)))
     rng.shuffle(val_indices)
     val1_indices = val_indices[:len(val_indices) // 2]
     val2_indices = val_indices[len(val_indices) // 2:]
 
-    val1_ds = StackedModalityDataset(Subset(val_full, val1_indices), modality_stack_order=['s2', 's1'], target_size=128)
-    val2_ds = StackedModalityDataset(Subset(val_full, val2_indices), modality_stack_order=['s2', 's1'], target_size=128)
+    train1_ds = StackedModalityDataset(Subset(train_full, train1_indices), modality_stack_order=['s2', 's1'], target_size=128)
+    train2_ds = StackedModalityDataset(Subset(train_full, train2_indices), modality_stack_order=['s2', 's1'], target_size=128)
+    val1_ds   = StackedModalityDataset(Subset(val_full, val1_indices),   modality_stack_order=['s2', 's1'], target_size=128)
+    val2_ds   = StackedModalityDataset(Subset(val_full, val2_indices),   modality_stack_order=['s2', 's1'], target_size=128)
 
     new_modality = 's1' if starting_modality == 's2' else 's2'
-    print(f"BEN-v2 — Train: {len(train_ds)} (S2+S1), Test: {len(test_ds)} (S2+S1)")
+    print(f"BEN-v2 — Train1: {len(train1_ds)}, Train2: {len(train2_ds)}, Test: {len(test_ds)} (S2+S1)")
     print(f"BEN-v2 — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
 
-    # train1 and train2 use the same underlying dataset/samples; the caller
-    # selects which modality to use via create_multimodal_batch at runtime.
-    train1_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
-    val1_loader   = DataLoader(val1_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    train2_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
-    val2_loader   = DataLoader(val2_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader   = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     # Build modality_slices from a sample (trigger lazy init)
-    _ = train_ds[0]
-    modality_slices = train_ds.modality_slices  # {'s2': slice(0,12), 's1': slice(12,14)}
+    _ = train1_ds[0]
+    modality_slices = train1_ds.modality_slices  # {'s2': slice(0,12), 's1': slice(12,14)}
 
     start_channels = len(band_orders[starting_modality])
     new_channels   = len(band_orders[new_modality])
@@ -352,7 +358,7 @@ def get_pastis_loaders(
     num_workers: int = 8,
     data_root: str = 'datasets/geoben2/pastis',
     seed: int = 42,
-    temporal_aggregation: str = 'mean',
+    temporal_aggregation: str = 'median',
     starting_modality: str = 's2',
 ) -> tuple:
     """
@@ -397,16 +403,27 @@ def get_pastis_loaders(
     val_full      = GeoBenchPASTIS(root=root, split='val',   band_order=full_band_order, **common_kwargs)
     test_full     = GeoBenchPASTIS(root=root, split='test',  band_order=full_band_order, **common_kwargs)
 
-    train_ds = StackedModalityDataset(train_full, modality_stack_order=full_stack_order, merge_modalities=s1_merge)
-    test_ds  = StackedModalityDataset(test_full,  modality_stack_order=full_stack_order, merge_modalities=s1_merge)
+    test_ds = StackedModalityDataset(test_full, modality_stack_order=full_stack_order, merge_modalities=s1_merge)
 
-    # Split validation 50/50
+    # Split train and val 50/50 (no overlap, deterministic)
     rng = random.Random(seed)
+
+    train_indices = list(range(len(train_full)))
+    rng.shuffle(train_indices)
+    train1_indices = train_indices[:len(train_indices) // 2]
+    train2_indices = train_indices[len(train_indices) // 2:]
+
     val_indices = list(range(len(val_full)))
     rng.shuffle(val_indices)
     val1_indices = val_indices[:len(val_indices) // 2]
     val2_indices = val_indices[len(val_indices) // 2:]
 
+    train1_ds = StackedModalityDataset(
+        Subset(train_full, train1_indices), modality_stack_order=full_stack_order, merge_modalities=s1_merge,
+    )
+    train2_ds = StackedModalityDataset(
+        Subset(train_full, train2_indices), modality_stack_order=full_stack_order, merge_modalities=s1_merge,
+    )
     val1_ds = StackedModalityDataset(
         Subset(val_full, val1_indices), modality_stack_order=full_stack_order, merge_modalities=s1_merge,
     )
@@ -415,20 +432,18 @@ def get_pastis_loaders(
     )
 
     new_modality = 's1' if starting_modality == 's2' else 's2'
-    print(f"PASTIS — Train: {len(train_ds)} (S2+S1), Test: {len(test_ds)} (S2+S1)")
+    print(f"PASTIS — Train1: {len(train1_ds)}, Train2: {len(train2_ds)}, Test: {len(test_ds)} (S2+S1)")
     print(f"PASTIS — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
 
-    # train1 and train2 use the same underlying dataset; modality selection happens
-    # at runtime via create_multimodal_batch using modality_slices.
-    train1_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
-    val1_loader   = DataLoader(val1_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    train2_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
-    val2_loader   = DataLoader(val2_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader   = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     # Build modality_slices from a sample (trigger lazy init)
-    _ = train_ds[0]
-    modality_slices = train_ds.modality_slices  # {'s2': slice(0,10), 's1': slice(10,16)}
+    _ = train1_ds[0]
+    modality_slices = train1_ds.modality_slices  # {'s2': slice(0,10), 's1': slice(10,16)}
 
     start_channels = len(PASTIS_S2_BANDS) if starting_modality == 's2' else n_s1
     new_channels   = n_s1 if starting_modality == 's2' else len(PASTIS_S2_BANDS)
@@ -444,6 +459,7 @@ def get_pastis_loaders(
         label_key='mask',
         modality_slices=modality_slices,
         img_size=128,
+        ignore_index=19,  # void_label: parcels mostly outside their patch
     )
 
     return train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config

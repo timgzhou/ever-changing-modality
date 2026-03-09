@@ -185,12 +185,13 @@ def _compute_map(all_outputs, all_labels):
 
 def evaluate(model, dataloader, criterion, device, modality_bands_dict,
              modalities_to_use=('rgb',), pseudo_modalities=None, intermediate_projectors=None,
-             multilabel=False, label_key='label'):
+             multilabel=False, label_key='label', segmentation=False, num_classes=None,
+             ignore_index=-100):
     """
     Evaluate model on a dataloader.
 
     Args:
-        model: EVAN classifier
+        model: EVAN classifier or EvanSegmenter
         dataloader: DataLoader
         criterion: Loss function
         device: torch device
@@ -200,6 +201,9 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
         intermediate_projectors: Required if pseudo_modalities is provided
         multilabel: If True, report mAP instead of top-1 accuracy (for BEN-v2 etc.)
         label_key: Key for labels in batch dict ('label' or 'mask')
+        segmentation: If True, compute mIoU over [B,H,W] predictions (for PASTIS etc.)
+        num_classes: Required when segmentation=True.
+        ignore_index: Label value excluded from mIoU (e.g. 19 for PASTIS void_label).
     """
     model.eval()
     if intermediate_projectors is not None:
@@ -209,6 +213,8 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
     total = 0
     all_outputs_list = []
     all_labels_list = []
+    all_seg_preds = []
+    all_seg_labels = []
 
     with torch.no_grad():
         for batch in dataloader:
@@ -230,7 +236,11 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
             loss = criterion(outputs, labels)
             total_loss += loss.item()
 
-            if multilabel:
+            if segmentation:
+                # outputs: [B, C, H, W]; labels: [B, H, W]
+                all_seg_preds.append(outputs.argmax(dim=1).cpu())
+                all_seg_labels.append(labels.cpu())
+            elif multilabel:
                 all_outputs_list.append(outputs.cpu())
                 all_labels_list.append(labels.cpu())
             else:
@@ -239,7 +249,9 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
                 correct += predicted.eq(labels).sum().item()
 
     avg_loss = total_loss / len(dataloader)
-    if multilabel:
+    if segmentation:
+        metric = compute_miou(torch.cat(all_seg_preds), torch.cat(all_seg_labels), num_classes, ignore_index=ignore_index)
+    elif multilabel:
         metric = _compute_map(torch.cat(all_outputs_list), torch.cat(all_labels_list))
     else:
         metric = 100. * correct / total
@@ -346,12 +358,15 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                                    use_wandb=False, wandb_prefix=None, clip_norm=10,
                                    hallucinate_modality=False, pseudo_modalities=None,
                                    intermediate_projectors=None,
-                                   multilabel=False, label_key='label'):
+                                   multilabel=False, label_key='label',
+                                   segmentation=False, num_classes=None,
+                                   ignore_index=-100,
+                                   val_loader=None, best_checkpoint_path=None):
     """
     Simple training loop for single-modality EVAN training (Stage 0).
 
     Args:
-        model: EVAN classifier
+        model: EVANClassifier or EvanSegmenter
         train_loader: Training dataloader
         test_loader: Test dataloader
         device: torch device
@@ -369,16 +384,30 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         intermediate_projectors: Trained sequence projectors (required if hallucinate_modality=True)
         multilabel: If True, report mAP instead of top-1 accuracy and accumulate train outputs
         label_key: Key for labels in batch dict ('label' or 'mask')
+        segmentation: If True, report mIoU; model outputs [B, C, H, W], labels are [B, H, W]
+        num_classes: Required when segmentation=True.
+        val_loader: Optional val1 dataloader; if provided, best checkpoint is kept by val metric.
+        best_checkpoint_path: Path to save the best checkpoint (required when val_loader is set).
 
     Returns:
-        Tuple of (train_metric, test_metric, best_test_metric, best_epoch)
-        where metric is top-1 accuracy (%) for classification or mAP (%) for multilabel
+        Tuple of (train_metric, test_metric, best_test_metric, best_epoch, best_val_metric)
+        where metric is Acc (%), mAP (%), or mIoU (%) depending on task.
+        best_val_metric is None when val_loader is not provided.
     """
     mod_str = modality.upper()
-    metric_name = "mAP" if multilabel else "Acc"
+    if segmentation:
+        metric_name = "mIoU"
+    elif multilabel:
+        metric_name = "mAP"
+    else:
+        metric_name = "Acc"
     global_step = 0
     best_test_metric = 0
     best_epoch = 0
+    best_val_metric = None
+    if val_loader is not None:
+        best_val_metric = 0
+        assert best_checkpoint_path is not None, "best_checkpoint_path required when val_loader is provided"
     scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=0, min_lr=1e-6)
 
     # Validate hallucinate_modality requirements
@@ -392,11 +421,12 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         if intermediate_projectors is not None:
             intermediate_projectors.train()
         train_loss = 0.0
-        # For classification: accumulate correct/total; for multilabel: accumulate outputs/labels
         train_correct = 0
         train_total = 0
         train_outputs_list = []
         train_labels_list = []
+        train_seg_preds = []
+        train_seg_labels = []
 
         pbar = tqdm(train_loader, desc=f"{phase_name} Epoch {epoch+1}/{num_epochs} [{mod_str}]")
         for batch in pbar:
@@ -425,7 +455,11 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
             optimizer.step()
 
             train_loss += loss.item()
-            if multilabel:
+            if segmentation:
+                train_seg_preds.append(outputs.detach().argmax(dim=1).cpu())
+                train_seg_labels.append(labels.detach().cpu())
+                pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'})
+            elif multilabel:
                 train_outputs_list.append(outputs.detach().cpu())
                 train_labels_list.append(labels.detach().cpu())
                 pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'})
@@ -448,17 +482,25 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                 })
 
         train_loss /= len(train_loader)
-        if multilabel:
+        if segmentation:
+            train_metric = compute_miou(
+                torch.cat(train_seg_preds), torch.cat(train_seg_labels), num_classes,
+                ignore_index=ignore_index
+            )
+        elif multilabel:
             train_metric = _compute_map(torch.cat(train_outputs_list), torch.cat(train_labels_list))
         else:
             train_metric = 100. * train_correct / train_total
 
-        # Evaluate on same modality (with pseudo-modality if enabled)
+        # Evaluate on same modality
         eval_kwargs = dict(
             modality_bands_dict=modality_bands_dict,
             modalities_to_use=(modality,),
             multilabel=multilabel,
             label_key=label_key,
+            segmentation=segmentation,
+            num_classes=num_classes,
+            ignore_index=ignore_index,
         )
         if hallucinate_modality:
             test_loss, test_metric = evaluate(
@@ -469,25 +511,41 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         else:
             test_loss, test_metric = evaluate(model, test_loader, criterion, device, **eval_kwargs)
 
+        # Val evaluation for best-checkpoint tracking
+        if val_loader is not None:
+            val_loss, val_metric = evaluate(model, val_loader, criterion, device, **eval_kwargs)
+        else:
+            val_loss, val_metric = None, None
+
         scheduler.step(train_loss)
         if (epoch % 8 == 1) or (epoch + 1 == num_epochs):
             print(f"  Train ({mod_str}): Loss: {train_loss:.4f}, {metric_name}: {train_metric:.2f}%")
             print(f"  Test ({mod_str}):  Loss: {test_loss:.4f}, {metric_name}: {test_metric:.2f}% (epoch {epoch+1}/{num_epochs})")
+            if val_metric is not None:
+                print(f"  Val  ({mod_str}):  Loss: {val_loss:.4f}, {metric_name}: {val_metric:.2f}%")
         if test_metric > best_test_metric:
-            print(f"    New record: {test_metric:.2f} > previous {best_test_metric:.2f} at epoch {epoch+1}")
+            print(f"    New test record: {test_metric:.2f} > previous {best_test_metric:.2f} at epoch {epoch+1}")
             best_test_metric = test_metric
             best_epoch = epoch + 1
+        if val_metric is not None and val_metric > best_val_metric:
+            print(f"    New val record: {val_metric:.2f} > previous {best_val_metric:.2f} at epoch {epoch+1} — saving checkpoint")
+            best_val_metric = val_metric
+            model.save_checkpoint(best_checkpoint_path)
         if use_wandb and wandb_prefix:
-            wandb.log({
+            log_dict = {
                 f'{wandb_prefix}/train_loss_epoch': train_loss,
                 f'{wandb_prefix}/train_{metric_name.lower()}': train_metric,
                 f'{wandb_prefix}/eval_loss': test_loss,
                 f'{wandb_prefix}/eval_{metric_name.lower()}': test_metric,
                 f'{wandb_prefix}/epoch': epoch + 1,
                 f'{wandb_prefix}/lr': optimizer.param_groups[0]['lr'],
-            })
+            }
+            if val_metric is not None:
+                log_dict[f'{wandb_prefix}/val_loss'] = val_loss
+                log_dict[f'{wandb_prefix}/val_{metric_name.lower()}'] = val_metric
+            wandb.log(log_dict)
 
-    return train_metric, test_metric, best_test_metric, best_epoch
+    return train_metric, test_metric, best_test_metric, best_epoch, best_val_metric
 
 
 def supervised_training_loop(model, train_loader, test_loader_full, device,
@@ -1291,6 +1349,170 @@ def _delulu_stage3_test(
             peeking_transfer_acc = 100 * peeking_transfer_ensemble_correct / total
             print(f"  Test Accuracy (peeking+transfer ensemble): {peeking_transfer_acc:.2f}%")
         return softvote_test_metric, peeking_transfer_acc
+
+
+def compute_miou(preds: torch.Tensor, labels: torch.Tensor, num_classes: int, ignore_index: int = 255) -> float:
+    """
+    Compute mean Intersection-over-Union over present classes.
+
+    Args:
+        preds:  [B, H, W] long — argmax predictions.
+        labels: [B, H, W] long — ground truth class indices.
+        num_classes: Number of classes.
+        ignore_index: Label value to exclude (default 255).
+
+    Returns:
+        mIoU as a percentage (0–100).
+    """
+    valid = labels != ignore_index
+    preds = preds[valid]
+    labels = labels[valid]
+
+    ious = []
+    for cls in range(num_classes):
+        pred_mask = preds == cls
+        gt_mask = labels == cls
+        intersection = (pred_mask & gt_mask).sum().item()
+        union = (pred_mask | gt_mask).sum().item()
+        if union > 0:
+            ious.append(intersection / union)
+
+    return 100.0 * (sum(ious) / len(ious)) if ious else 0.0
+
+
+def _delulu_stage3_test_segmentation(
+    model, evan, test_loader, device, modality_bands_dict,
+    unlabeled_modalities, labeled_modalities, all_modalities,
+    intermediate_projectors, num_classes: int,
+    objective: str = "transfer", use_mfla: bool = False,
+    label_key: str = 'mask', ignore_index: int = -100,
+):
+    """
+    Segmentation equivalent of _delulu_stage3_test.
+
+    Uses model.segment_from_features() instead of model.modality_classifiers,
+    computes mIoU instead of accuracy. Same (metric, ens_metric) return shape.
+
+    Args:
+        model: EvanSegmenter.
+        evan: model.evan (EVAN backbone).
+        test_loader: DataLoader yielding batches with label_key key.
+        device: torch device.
+        modality_bands_dict: {modality: slice} for create_multimodal_batch.
+        unlabeled_modalities: Modalities without labeled data at test time.
+        labeled_modalities: Modalities with labeled data at test time.
+        all_modalities: All modalities (labeled + unlabeled).
+        intermediate_projectors: Trained sequence projectors.
+        num_classes: Number of segmentation classes.
+        objective: 'transfer', 'peeking', or 'addition'.
+        use_mfla: Whether to apply MFLA for hallucinated modalities.
+        label_key: Batch key for the segmentation mask (default 'mask').
+
+    Returns:
+        (softvote_miou, ens_miou_or_None) — both as percentages.
+    """
+    if objective == "transfer":
+        test_modalities = (*unlabeled_modalities,)
+    elif objective == "addition":
+        test_modalities = (*labeled_modalities, *unlabeled_modalities)
+    elif objective == "peeking":
+        test_modalities = (*labeled_modalities,)
+    else:
+        raise ValueError(f"Unknown objective: {objective}")
+
+    model.eval()
+    intermediate_projectors.eval()
+
+    all_sv_preds = []
+    all_labels = []
+    all_ens_preds = []
+
+    with torch.no_grad():
+        pbar = tqdm(test_loader, desc="Testing (seg)")
+
+        for batch in pbar:
+            labels = batch[label_key].to(device)  # [B, H, W] long
+
+            test_input = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=test_modalities
+            )
+            test_input = {k: v.to(device) for k, v in test_input.items()}
+
+            test_intermediate = evan.forward_modality_specific_features(test_input)
+
+            if objective == "transfer":
+                hallucinated_intermediate = hallucinate_intermediate_features(
+                    test_intermediate, unlabeled_modalities, labeled_modalities,
+                    intermediate_projectors
+                )
+                fusion_input = merge_intermediate_features(
+                    test_intermediate, hallucinated_intermediate,
+                    unlabeled_modalities, labeled_modalities
+                )
+                hallucinated_mods = set(labeled_modalities) if use_mfla else None
+            elif objective == "addition":
+                fusion_input = test_intermediate
+                hallucinated_mods = None
+            elif objective == "peeking":
+                hallucinated_intermediate = hallucinate_intermediate_features(
+                    test_intermediate, labeled_modalities, unlabeled_modalities,
+                    intermediate_projectors
+                )
+                fusion_input = merge_intermediate_features(
+                    test_intermediate, hallucinated_intermediate,
+                    labeled_modalities, unlabeled_modalities
+                )
+                hallucinated_mods = set(unlabeled_modalities) if use_mfla else None
+
+            fused_output = evan.forward_fusion_from_modality_features(
+                fusion_input, hallucinated_modalities=hallucinated_mods
+            )
+
+            sv_logits = model.segment_from_features(fused_output)   # [B, C, H, W]
+            sv_preds = sv_logits.argmax(dim=1)                       # [B, H, W]
+            all_sv_preds.append(sv_preds.cpu())
+            all_labels.append(labels.cpu())
+
+            # Addition: also compute peeking+transfer ensemble
+            if objective == "addition":
+                peeking_hal = hallucinate_intermediate_features(
+                    test_intermediate, labeled_modalities, unlabeled_modalities,
+                    intermediate_projectors
+                )
+                peeking_fused = evan.forward_fusion_from_modality_features(
+                    merge_intermediate_features(
+                        test_intermediate, peeking_hal, labeled_modalities, unlabeled_modalities
+                    ),
+                    hallucinated_modalities=set(unlabeled_modalities) if use_mfla else None
+                )
+                transfer_hal = hallucinate_intermediate_features(
+                    test_intermediate, unlabeled_modalities, labeled_modalities,
+                    intermediate_projectors
+                )
+                transfer_fused = evan.forward_fusion_from_modality_features(
+                    merge_intermediate_features(
+                        test_intermediate, transfer_hal, unlabeled_modalities, labeled_modalities
+                    ),
+                    hallucinated_modalities=set(labeled_modalities) if use_mfla else None
+                )
+                ens_logits = (
+                    model.segment_from_features(peeking_fused) +
+                    model.segment_from_features(transfer_fused)
+                ) / 2
+                all_ens_preds.append(ens_logits.argmax(dim=1).cpu())
+
+    all_sv_preds = torch.cat(all_sv_preds)
+    all_labels = torch.cat(all_labels)
+    softvote_miou = compute_miou(all_sv_preds, all_labels, num_classes, ignore_index=ignore_index)
+
+    ens_miou = None
+    if objective == "addition" and all_ens_preds:
+        all_ens_preds = torch.cat(all_ens_preds)
+        ens_miou = compute_miou(all_ens_preds, all_labels, num_classes, ignore_index=ignore_index)
+        print(f"  Test mIoU (peeking+transfer ensemble): {ens_miou:.2f}%")
+
+    return softvote_miou, ens_miou
 
 
 def delulu_supervision(

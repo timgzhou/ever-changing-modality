@@ -1,6 +1,7 @@
 """Training utilities for EVAN on EuroSAT."""
 
 import copy
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -589,6 +590,7 @@ def train_shot(
     # Dataset options
     multilabel: bool = False,           # Use BCEWithLogitsLoss instead of CrossEntropyLoss
     label_key: str = 'label',           # Batch key for labels
+    segmentation: bool = False,         # Use pixel-level CE; model outputs [B,C,H,W], labels [B,H,W]
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -718,6 +720,7 @@ def train_shot(
     # Training loop
     global_step = 0
     for epoch in range(args.epochs):
+        epoch_start = time.time()
         model.train()
         evan.train()
         mae_decoders.train()
@@ -822,7 +825,22 @@ def train_shot(
                     ce_loss = torch.tensor(0.0, device=device)
                     ce_count = 0
                     for mod in student_fused.keys():
-                        if mod in model.modality_classifiers:
+                        if segmentation and model.modality_decoders is not None and mod in model.modality_decoders:
+                            patch_tokens = student_fused[mod]['x_norm_patchtokens']
+                            mod_logits = model.modality_decoders[mod](patch_tokens)  # [B, C, H, W]
+                            ce_loss = ce_loss + ce_fn(mod_logits, labels)
+                            ce_count += 1
+                        elif segmentation and model.decoder is not None:
+                            # mean strategy: only add once (break after first mod)
+                            avg_patches = torch.stack([
+                                student_fused[m]['x_norm_patchtokens']
+                                for m in sorted(student_fused.keys())
+                            ]).mean(dim=0)
+                            mod_logits = model.decoder(avg_patches)  # [B, C, H, W]
+                            ce_loss = ce_loss + ce_fn(mod_logits, labels)
+                            ce_count += 1
+                            break
+                        elif not segmentation and mod in model.modality_classifiers:
                             cls_token = student_fused[mod]['x_norm_clstoken']
                             mod_logits = model.modality_classifiers[mod](cls_token)
                             ce_loss = ce_loss + ce_fn(mod_logits, labels)
@@ -832,7 +850,7 @@ def train_shot(
                     total_loss = total_loss + ce_loss
                     batch_ce_loss = ce_loss.item()
 
-                # No MAE, pre-fusion, or distillation loss for labeled batches
+                # No MAE, pre-fusion, or distillation loss for labeled batches 
                 batch_mae_loss = 0.0
                 batch_pre_fusion_loss = 0.0
                 batch_distill_loss = 0.0
@@ -986,20 +1004,21 @@ def train_shot(
                 'L/U': f'{labeled_count}/{unlabeled_count}'
             })
 
-            # Log to wandb every step
-            wandb.log({
-                'train_loss': total_loss.item(),
-                'mae_loss': batch_mae_loss,
-                'latent_loss': batch_latent_loss,
-                'pre_fusion': batch_pre_fusion_loss,
-                'distill_loss': batch_distill_loss,
-                'ce_loss': batch_ce_loss,
-                'is_labeled': 1 if is_labeled else 0,
-                'effective_labeled_freq': effective_labeled_freq,
-                'grad_norm': grad_norm.item(),
-                'epoch': epoch + 1,
-                'lr': optimizer.param_groups[0]['lr']
-            })
+            # Log to wandb every 20 steps (per-step logging causes wandb buffer bloat)
+            if global_step % 20 == 0:
+                wandb.log({
+                    'train_loss': total_loss.item(),
+                    'mae_loss': batch_mae_loss,
+                    'latent_loss': batch_latent_loss,
+                    'pre_fusion': batch_pre_fusion_loss,
+                    'distill_loss': batch_distill_loss,
+                    'ce_loss': batch_ce_loss,
+                    'is_labeled': 1 if is_labeled else 0,
+                    'effective_labeled_freq': effective_labeled_freq,
+                    'grad_norm': grad_norm.item(),
+                    'epoch': epoch + 1,
+                    'lr': optimizer.param_groups[0]['lr']
+                })
 
         # Epoch summary
         train_loss /= train_count
@@ -1012,7 +1031,8 @@ def train_shot(
 
         scheduler.step(train_loss)
 
-        print(f"\nEpoch {epoch+1}/{args.epochs}:")
+        epoch_time = time.time() - epoch_start
+        print(f"\nEpoch {epoch+1}/{args.epochs} ({epoch_time:.1f}s):")
         print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}, Pre-fusion: {train_pre_fusion_loss:.4f}, Distill: {train_distill_loss:.4f}, CE: {train_ce_loss:.4f}")
         print(f"  Batches - Labeled: {labeled_count}, Unlabeled: {unlabeled_count}, Ratio: {labeled_ratio:.2f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
 

@@ -9,7 +9,7 @@ from datetime import datetime
 import wandb
 import csv
 
-from evan_main import evan_small, evan_base, evan_large, EVANClassifier
+from evan_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
 from train_utils import single_modality_training_loop
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
@@ -21,14 +21,14 @@ PASTIS_MODALITIES  = ['s2', 's1']
 
 def get_task_config_and_loaders(dataset, modality, batch_size, num_workers):
     """
-    Return (train1_loader, test_loader, task_config, modality_bands_dict).
+    Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict).
 
     modality_bands_dict maps modality name → band tuple (EuroSAT) or slice (GeoBench).
     For GeoBench datasets this is task_config.modality_slices filtered to {modality: ...}.
     """
     if dataset == 'eurosat':
-        from eurosat_data_utils import get_loaders, get_modality_bands_dict
-        train1_loader, _, test_loader = get_loaders(batch_size, num_workers)
+        from eurosat_data_utils import get_loaders_with_val, get_modality_bands_dict
+        train1_loader, val1_loader, _, _, test_loader = get_loaders_with_val(batch_size, num_workers)
         modality_bands_dict = get_modality_bands_dict(modality)
 
         from types import SimpleNamespace
@@ -42,23 +42,23 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers):
             modality_slices=None,
             img_size=224,
         )
-        return train1_loader, test_loader, task_config, modality_bands_dict
+        return train1_loader, val1_loader, test_loader, task_config, modality_bands_dict
 
     elif dataset == 'benv2':
         from geobench_data_utils import get_benv2_loaders
-        train1_loader, _, _, _, test_loader, task_config = get_benv2_loaders(
+        train1_loader, val1_loader, _, _, test_loader, task_config = get_benv2_loaders(
             batch_size=batch_size, num_workers=num_workers, starting_modality=modality
         )
         modality_bands_dict = {modality: task_config.modality_slices[modality]}
-        return train1_loader, test_loader, task_config, modality_bands_dict
+        return train1_loader, val1_loader, test_loader, task_config, modality_bands_dict
 
     elif dataset == 'pastis':
         from geobench_data_utils import get_pastis_loaders
-        train1_loader, _, _, _, test_loader, task_config = get_pastis_loaders(
+        train1_loader, val1_loader, _, _, test_loader, task_config = get_pastis_loaders(
             batch_size=batch_size, num_workers=num_workers, starting_modality=modality
         )
         modality_bands_dict = {modality: task_config.modality_slices[modality]}
-        return train1_loader, test_loader, task_config, modality_bands_dict
+        return train1_loader, val1_loader, test_loader, task_config, modality_bands_dict
 
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
@@ -76,6 +76,7 @@ def main():
     parser.add_argument('--use_dino_weights', action='store_true')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--tz_fusion_time', type=int, default=3,
@@ -109,7 +110,7 @@ def main():
 
     # Data
     print("\n=== Creating datasets ===")
-    train1_loader, test_loader, task_config, modality_bands_dict = get_task_config_and_loaders(
+    train1_loader, val1_loader, test_loader, task_config, modality_bands_dict = get_task_config_and_loaders(
         args.dataset, args.modality, args.batch_size, args.num_workers
     )
 
@@ -128,44 +129,68 @@ def main():
         device=device,
     )
 
-    model = EVANClassifier(
-        evan,
-        num_classes=task_config.num_classes,
-        classifier_strategy="mean",
-        global_rep=args.global_rep,
-        device=device,
-    )
+    is_segmentation = (task_config.task_type == 'segmentation')
+
+    if is_segmentation:
+        model = EvanSegmenter(
+            evan,
+            num_classes=task_config.num_classes,
+            decoder_strategy="mean",
+            device=device,
+        )
+    else:
+        model = EVANClassifier(
+            evan,
+            num_classes=task_config.num_classes,
+            classifier_strategy="mean",
+            global_rep=args.global_rep,
+            device=device,
+        )
     model = model.to(device)
 
     # Freeze / unfreeze according to train_mode
+    # 'classifier' kwarg → 'decoder' kwarg for EvanSegmenter
     model.freeze_all()
     if args.train_mode == 'fft':
         model.set_requires_grad('backbone', blocks=True, norm=True)
-        model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, classifier=True)
-        print("Mode=fft: training full backbone layers + classifier.")
+        if is_segmentation:
+            model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, decoder=True)
+        else:
+            model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, classifier=True)
+        print("Mode=fft: training full backbone layers + head.")
     elif args.train_mode == 'adaptor':
-        model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, classifier=True)
-        print("Mode=adaptor: training embedder, LoRA/FFT adaptors + classifier.")
+        if is_segmentation:
+            model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, decoder=True)
+        else:
+            model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, classifier=True)
+        print("Mode=adaptor: training embedder, LoRA/FFT adaptors + head.")
     elif args.train_mode == 'probe':
-        model.set_requires_grad(args.modality, classifier=True)
-        print("Mode=probe: training classifier only.")
+        if is_segmentation:
+            model.set_requires_grad(args.modality, decoder=True)
+        else:
+            model.set_requires_grad(args.modality, classifier=True)
+        print("Mode=probe: training head only.")
     elif args.train_mode == 'emb+probe':
-        model.set_requires_grad(args.modality, patch_embedders=True, classifier=True)
-        print("Mode=emb+probe: training embedder + classifier.")
+        if is_segmentation:
+            model.set_requires_grad(args.modality, patch_embedders=True, decoder=True)
+        else:
+            model.set_requires_grad(args.modality, patch_embedders=True, classifier=True)
+        print("Mode=emb+probe: training embedder + head.")
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Trainable: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
 
     # Loss
+    ignore_index = getattr(task_config, 'ignore_index', -100)
     if task_config.multilabel:
         criterion = nn.BCEWithLogitsLoss()
         print("Loss: BCEWithLogitsLoss (multilabel)")
     else:
-        criterion = nn.CrossEntropyLoss()
-        print("Loss: CrossEntropyLoss (classification)")
+        criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        print(f"Loss: CrossEntropyLoss (ignore_index={ignore_index})")
 
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
 
     if args.wandb_project:
         wandb.init(
@@ -175,24 +200,14 @@ def main():
         )
 
     print(f"\n=== Training for {args.epochs} epochs ===")
-    metric_name = "mAP" if task_config.multilabel else "Acc"
+    if is_segmentation:
+        metric_name = "mIoU"
+    elif task_config.multilabel:
+        metric_name = "mAP"
+    else:
+        metric_name = "Acc"
 
-    train_metric, test_metric, best_test_metric, best_epoch = single_modality_training_loop(
-        model, train1_loader, test_loader, device,
-        modality_bands_dict, criterion, optimizer, args.epochs,
-        modality=args.modality,
-        phase_name="Stage 0",
-        use_wandb=bool(args.wandb_project),
-        wandb_prefix='stage0',
-        multilabel=task_config.multilabel,
-        label_key=task_config.label_key,
-    )
-
-    print(f"\n=== Stage 0 Training complete ===")
-    print(f"  Train {metric_name}: {train_metric:.2f}%")
-    print(f"  Test  {metric_name}: {test_metric:.2f}%")
-
-    # Save checkpoint
+    # Determine checkpoint path before training so best-val checkpoint can be saved mid-run
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     if args.checkpoint_name:
@@ -201,18 +216,37 @@ def main():
         checkpoint_path = os.path.join(args.checkpoint_dir,
                                        f'evan_{args.dataset}_stage0_{args.modality}_{timestamp}.pt')
 
-    model.save_checkpoint(checkpoint_path)
-    print(f"Checkpoint saved: {checkpoint_path}")
+    train_metric, test_metric, best_test_metric, best_epoch, best_val_metric = single_modality_training_loop(
+        model, train1_loader, test_loader, device,
+        modality_bands_dict, criterion, optimizer, args.epochs,
+        modality=args.modality,
+        phase_name="Stage 0",
+        use_wandb=bool(args.wandb_project),
+        wandb_prefix='stage0',
+        multilabel=task_config.multilabel,
+        label_key=task_config.label_key,
+        segmentation=is_segmentation,
+        num_classes=task_config.num_classes if is_segmentation else None,
+        ignore_index=ignore_index if is_segmentation else -100,
+        val_loader=val1_loader,
+        best_checkpoint_path=checkpoint_path,
+    )
+
+    print(f"\n=== Stage 0 Training complete ===")
+    print(f"  Train {metric_name}: {train_metric:.2f}%")
+    print(f"  Test  {metric_name}: {test_metric:.2f}%")
+    if best_val_metric is not None:
+        print(f"  Best val {metric_name}: {best_val_metric:.2f}% — checkpoint: {checkpoint_path}")
 
     # CSV logging
-    filename = "res/train_stage0.csv"
+    filename = f"res/train_stage0_{args.dataset}.csv"
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "dataset", "model_type", "modality", "train_mode",
         "tz_lora_rank", "tz_modality_specific_layer_augmenter",
         "learning_rate", "trainable_params", "epoch",
         "test_metric", "best_test_metric(oracle)", "best_epoch",
-        "metric_name", "saved_checkpoint", "global_rep",
+        "best_val_metric", "metric_name", "saved_checkpoint", "global_rep",
     ]
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
@@ -223,6 +257,7 @@ def main():
             args.tz_lora_rank, args.tz_modality_specific_layer_augmenter,
             args.lr, trainable_params, args.epochs,
             f"{test_metric:.2f}", f"{best_test_metric:.2f}", best_epoch,
+            f"{best_val_metric:.2f}" if best_val_metric is not None else "",
             metric_name, checkpoint_path, args.global_rep,
         ])
 
@@ -247,5 +282,5 @@ python -u train_stage0.py --dataset benv2 --modality s2 --epochs 2 --checkpoint_
 python -u train_stage0.py --dataset benv2 --modality s1 --epochs 2 --checkpoint_name benv2_s1_s0 --train_mode fft
 
 # PASTIS S2
-python -u train_stage0.py --dataset pastis --modality s2 --epochs 2 --batch_size 16 --checkpoint_name pastis_s2_s0
+python -u train_stage0.py --dataset pastis --modality s2 --epochs 2 --batch_size 16 --checkpoint_name pastis_s2_s0 --train_mode fft --num_workers 8
 """

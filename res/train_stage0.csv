@@ -70,3 +70,11 @@ benv2,evan_small,s1,fft,32,fft,0.0001,22123027,16,38.29,44.87,3,mAP,checkpoints/
 benv2,evan_small,s2,fft,32,fft,0.0001,23106067,4,58.38,58.86,3,mAP,checkpoints/benv2_s2_s0.pt,clstoken
 benv2,evan_small,s2,fft,32,fft,0.0001,23106067,8,59.15,60.07,4,mAP,checkpoints/benv2_s2_s0.pt,clstoken
 benv2,evan_small,s1,fft,32,fft,0.0001,22123027,8,43.21,46.31,3,mAP,checkpoints/benv2_s1_s0.pt,clstoken
+pastis,evan_small,s2,emb+probe,32,fft,0.0001,2551724,2,3.66,3.94,1,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,23857196,2,5.41,5.41,2,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,23857196,32,8.58,8.58,32,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,23857196,2,5.19,5.19,2,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.01,23857196,2,2.49,2.67,1,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.001,23857196,2,5.43,5.43,2,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,23857196,128,9.78,10.12,84,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+benv2,evan_small,s2,fft,32,fft,0.0001,23106067,8,55.74,56.68,5,mAP,checkpoints/benv2_s2_s0.pt,clstoken

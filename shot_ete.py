@@ -8,8 +8,8 @@ import csv
 from datetime import datetime
 import wandb
 
-from evan_main import EVANClassifier
-from train_utils import _delulu_stage3_test
+from evan_main import EVANClassifier, EvanSegmenter
+from train_utils import _delulu_stage3_test, _delulu_stage3_test_segmentation
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 VALID_NEW_MODS = {
@@ -92,7 +92,7 @@ def main():
     parser.add_argument('--eval_every_n_epochs', type=int, default=4)
     parser.add_argument('--ssl_lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=0.001)
-    parser.add_argument('--wandb_project', type=str, default='delulu-e2e-lossablate')
+    parser.add_argument('--wandb_project', type=str, default='delulu-reBEN')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--checkpoint_name', type=str, default=None)
     args = parser.parse_args()
@@ -103,12 +103,15 @@ def main():
         parser.error(f"--new_mod_group {args.new_mod_group!r} is not valid for --dataset {args.dataset}. "
                      f"Valid choices: {valid_new_mods}")
 
-    # Load stage 0 checkpoint
+    # Load stage 0 checkpoint — dispatch to EvanSegmenter for segmentation tasks
     print(f"\n=== Loading Stage 0 checkpoint from: {args.stage0_checkpoint} ===")
     checkpoint = torch.load(args.stage0_checkpoint, map_location='cpu')
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = EVANClassifier.from_checkpoint(args.stage0_checkpoint, device)
     config = checkpoint['config']
+    if 'decoder_strategy' in config:
+        model = EvanSegmenter.from_checkpoint(args.stage0_checkpoint, device)
+    else:
+        model = EVANClassifier.from_checkpoint(args.stage0_checkpoint, device)
     evan_config = config['evan_config']
     starting_modality = evan_config['starting_modality']
 
@@ -187,13 +190,19 @@ def main():
         mfla_warmup_epochs=args.mfla_warmup_epochs,
         multilabel=task_config.multilabel,
         label_key=task_config.label_key,
+        segmentation=(task_config.task_type == 'segmentation'),
     )
 
     # ========================================= EVALUATION =====================================
     print("\n=== Evaluating trained model ===")
 
     all_modalities = [starting_modality, newmod]
-    metric_name = "mAP" if task_config.multilabel else "Acc"
+    if task_config.task_type == 'segmentation':
+        metric_name = "mIoU"
+    elif task_config.multilabel:
+        metric_name = "mAP"
+    else:
+        metric_name = "Acc"
 
     objectives = {
         "transfer": {"desc": f"Using only {newmod}, hallucinating {starting_modality}"},
@@ -207,21 +216,39 @@ def main():
         print(f"\n--- Evaluating: {objective.capitalize()} objective ---")
         print(f"    {info['desc']}")
 
-        metric, ens_metric = _delulu_stage3_test(
-            model=model,
-            evan=model.evan,
-            test_loader=test_loader,
-            device=device,
-            modality_bands_dict=modality_bands_dict,
-            unlabeled_modalities=[newmod],
-            labeled_modalities=[starting_modality],
-            all_modalities=all_modalities,
-            intermediate_projectors=intermediate_projectors,
-            objective=objective,
-            use_mfla=args.use_mfla,
-            multilabel=task_config.multilabel,
-            label_key=task_config.label_key,
-        )
+        if task_config.task_type == 'segmentation':
+            metric, ens_metric = _delulu_stage3_test_segmentation(
+                model=model,
+                evan=model.evan,
+                test_loader=test_loader,
+                device=device,
+                modality_bands_dict=modality_bands_dict,
+                unlabeled_modalities=[newmod],
+                labeled_modalities=[starting_modality],
+                all_modalities=all_modalities,
+                intermediate_projectors=intermediate_projectors,
+                num_classes=task_config.num_classes,
+                objective=objective,
+                use_mfla=args.use_mfla,
+                label_key=task_config.label_key,
+                ignore_index=getattr(task_config, 'ignore_index', -100),
+            )
+        else:
+            metric, ens_metric = _delulu_stage3_test(
+                model=model,
+                evan=model.evan,
+                test_loader=test_loader,
+                device=device,
+                modality_bands_dict=modality_bands_dict,
+                unlabeled_modalities=[newmod],
+                labeled_modalities=[starting_modality],
+                all_modalities=all_modalities,
+                intermediate_projectors=intermediate_projectors,
+                objective=objective,
+                use_mfla=args.use_mfla,
+                multilabel=task_config.multilabel,
+                label_key=task_config.label_key,
+            )
 
         metrics[objective] = metric
         if objective == "addition" and ens_metric is not None:

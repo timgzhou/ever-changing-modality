@@ -1380,6 +1380,246 @@ class EVANClassifier(nn.Module):
         return model
 
 
+class UNetDecoder(nn.Module):
+    """
+    UNet-style decoder that upsamples patch tokens to full image resolution.
+
+    Takes patch tokens [B, N, embed_dim], reshapes to a spatial grid, and applies
+    4 ConvTranspose2d stages to upsample back to img_size.
+
+    For PASTIS (img_size=128, patch_size=16): 8×8 → 16 → 32 → 64 → 128.
+    """
+
+    def __init__(self, embed_dim: int, num_classes: int, patch_hw: int):
+        """
+        Args:
+            embed_dim: EVAN embedding dimension (e.g. 768).
+            num_classes: Number of segmentation classes.
+            patch_hw: Spatial size of the patch grid (img_size // patch_size), e.g. 8.
+        """
+        super().__init__()
+        self.patch_hw = patch_hw
+
+        # 4 upsampling stages, each doubles spatial resolution.
+        # kernel=4, stride=2, padding=1 → output = 2 * input exactly.
+        self.up1 = nn.Sequential(
+            nn.ConvTranspose2d(embed_dim, embed_dim // 2, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(embed_dim // 2),
+            nn.ReLU(inplace=True),
+        )
+        self.up2 = nn.Sequential(
+            nn.ConvTranspose2d(embed_dim // 2, embed_dim // 4, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(embed_dim // 4),
+            nn.ReLU(inplace=True),
+        )
+        self.up3 = nn.Sequential(
+            nn.ConvTranspose2d(embed_dim // 4, embed_dim // 8, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(embed_dim // 8),
+            nn.ReLU(inplace=True),
+        )
+        self.up4 = nn.Sequential(
+            nn.ConvTranspose2d(embed_dim // 8, embed_dim // 16, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(embed_dim // 16),
+            nn.ReLU(inplace=True),
+        )
+        self.head = nn.Conv2d(embed_dim // 16, num_classes, kernel_size=1)
+
+    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            patch_tokens: [B, N, embed_dim] patch token sequence.
+        Returns:
+            logits: [B, num_classes, H, W] where H = W = patch_hw * 16.
+        """
+        B, N, D = patch_tokens.shape
+        x = patch_tokens.permute(0, 2, 1).reshape(B, D, self.patch_hw, self.patch_hw)
+        x = self.up1(x)
+        x = self.up2(x)
+        x = self.up3(x)
+        x = self.up4(x)
+        return self.head(x)
+
+
+class EvanSegmenter(nn.Module):
+    """
+    Segmentation head on top of EVAN using a UNet-style decoder.
+
+    Mirrors EVANClassifier's interface so it can be used as a drop-in replacement
+    in shot_ete.py, shot.py, and train_stage0.py when task_type == 'segmentation'.
+    """
+
+    def __init__(
+        self,
+        evan_model,
+        num_classes: int,
+        decoder_strategy: str = 'mean',
+        device: str = 'cuda',
+    ):
+        """
+        Args:
+            evan_model: Pretrained EVAN backbone.
+            num_classes: Number of segmentation classes (e.g. 19 for PASTIS).
+            decoder_strategy: 'mean' (shared decoder on averaged patch tokens) or
+                              'ensemble' (per-modality decoders, average logits).
+            device: Target device.
+        """
+        super().__init__()
+        self.evan = evan_model
+        self.num_classes = num_classes
+        self.decoder_strategy = decoder_strategy
+        self.device = device
+
+        embed_dim = evan_model.embed_dim
+        patch_hw = evan_model.img_size // evan_model.patch_size
+
+        if decoder_strategy == 'mean':
+            self.decoder = UNetDecoder(embed_dim, num_classes, patch_hw)
+            self.modality_decoders = None
+        elif decoder_strategy == 'ensemble':
+            self.decoder = None
+            self.modality_decoders = nn.ModuleDict()
+            self.instantiate_modality_decoder(evan_model.starting_modality)
+        else:
+            raise ValueError(f"Unknown decoder_strategy: {decoder_strategy!r}")
+
+    def instantiate_modality_decoder(self, modality_key: str):
+        """Create and register a UNetDecoder for a new modality (ensemble strategy)."""
+        embed_dim = self.evan.embed_dim
+        patch_hw = self.evan.img_size // self.evan.patch_size
+        self.modality_decoders[modality_key] = UNetDecoder(embed_dim, self.num_classes, patch_hw)
+
+    def segment_from_features(self, features_dict: dict) -> torch.Tensor:
+        """
+        Produce segmentation logits from pre-computed EVAN features.
+
+        Args:
+            features_dict: Output from evan.forward_features() or
+                           evan.forward_fusion_from_modality_features().
+                           Each value has 'x_norm_patchtokens': [B, N, D].
+        Returns:
+            logits: [B, num_classes, H, W]
+        """
+        if self.decoder_strategy == 'mean':
+            patch_maps = [
+                features_dict[mod]['x_norm_patchtokens']
+                for mod in sorted(features_dict.keys())
+            ]
+            avg_patches = torch.stack(patch_maps).mean(dim=0)  # [B, N, D]
+            return self.decoder(avg_patches)
+
+        elif self.decoder_strategy == 'ensemble':
+            all_logits = []
+            for mod in sorted(features_dict.keys()):
+                if mod not in self.modality_decoders:
+                    raise RuntimeError(f"No decoder for modality '{mod}'.")
+                patch_tokens = features_dict[mod]['x_norm_patchtokens']
+                all_logits.append(self.modality_decoders[mod](patch_tokens))
+            return torch.stack(all_logits).mean(dim=0)
+
+    def forward(self, x: dict) -> torch.Tensor:
+        """
+        Args:
+            x: Dict {modality: [B, C, H, W]}.
+        Returns:
+            logits: [B, num_classes, H, W]
+        """
+        features_dict = self.evan.forward_features(x)
+        return self.segment_from_features(features_dict)
+
+    def freeze_all(self):
+        """Freeze all parameters."""
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def set_requires_grad(
+        self,
+        modality: str,
+        *,
+        patch_embedders: bool = False,
+        clsreg: bool = False,
+        msla: bool = False,
+        modality_encoders: bool = False,
+        mfla: bool = False,
+        blocks: bool = False,
+        norm: bool = False,
+        mask_token: bool = False,
+        decoder: bool = False,
+    ):
+        """Mirror of EVANClassifier.set_requires_grad — 'decoder' replaces 'classifier'."""
+        self.evan.set_requires_grad(
+            modality,
+            patch_embedders=patch_embedders,
+            clsreg=clsreg,
+            msla=msla,
+            modality_encoders=modality_encoders,
+            mfla=mfla,
+            blocks=blocks,
+            norm=norm,
+            mask_token=mask_token,
+        )
+        if decoder:
+            if self.decoder is not None:
+                for param in self.decoder.parameters():
+                    param.requires_grad = True
+            if self.modality_decoders is not None:
+                if modality == 'all':
+                    for mod_dec in self.modality_decoders.values():
+                        for param in mod_dec.parameters():
+                            param.requires_grad = True
+                elif modality in self.modality_decoders:
+                    for param in self.modality_decoders[modality].parameters():
+                        param.requires_grad = True
+                else:
+                    raise RuntimeError(f"'{modality}' not in modality_decoders")
+
+    def get_config(self) -> dict:
+        return {
+            'evan_config': self.evan.get_config(),
+            'num_classes': self.num_classes,
+            'decoder_strategy': self.decoder_strategy,
+        }
+
+    def save_checkpoint(self, path: str):
+        torch.save({'model_state_dict': self.state_dict(), 'config': self.get_config()}, path)
+        print(f"EvanSegmenter checkpoint saved to: {path}")
+
+    @classmethod
+    def from_checkpoint(cls, path: str, device=None) -> "EvanSegmenter":
+        checkpoint = torch.load(path, map_location=device or 'cpu')
+        config = checkpoint['config']
+        evan_config = config['evan_config']
+
+        supported_modalities = evan_config.pop('supported_modalities', None)
+        supported_modalities_in_chans = evan_config.pop('supported_modalities_in_chans', None)
+        starting_modality = evan_config.get('starting_modality', 'rgb')
+
+        if 'starting_n_chans' not in evan_config and supported_modalities_in_chans:
+            evan_config['starting_n_chans'] = supported_modalities_in_chans[0]
+
+        evan = EVAN(**evan_config, device=device)
+
+        if supported_modalities and supported_modalities_in_chans:
+            for mod, n_chans in zip(supported_modalities, supported_modalities_in_chans):
+                if mod != starting_modality and mod not in evan.patch_embedders:
+                    evan.create_modality_components(mod, n_chans)
+
+        model = cls(
+            evan_model=evan,
+            num_classes=config['num_classes'],
+            decoder_strategy=config['decoder_strategy'],
+            device=device,
+        )
+
+        if config['decoder_strategy'] == 'ensemble' and supported_modalities:
+            for mod in supported_modalities:
+                if mod not in model.modality_decoders:
+                    model.instantiate_modality_decoder(mod)
+
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        print(f"EvanSegmenter loaded from checkpoint: {path}")
+        return model
+
+
 if __name__ == '__main__':
     print("why are you calling me?")
 
