@@ -313,11 +313,11 @@ def get_benv2_loaders(
     print(f"BEN-v2 — Train1: {len(train1_ds)}, Train2: {len(train2_ds)}, Test: {len(test_ds)} (S2+S1)")
     print(f"BEN-v2 — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
 
-    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
-    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
-    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, timeout=30)
+    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=0, timeout=30)
+    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, timeout=30)
+    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=0, timeout=30)
+    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=0, timeout=30)
 
     # Build modality_slices from a sample (trigger lazy init)
     _ = train1_ds[0]
@@ -435,11 +435,11 @@ def get_pastis_loaders(
     print(f"PASTIS — Train1: {len(train1_ds)}, Train2: {len(train2_ds)}, Test: {len(test_ds)} (S2+S1)")
     print(f"PASTIS — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
 
-    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
-    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
-    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, timeout=30)
+    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, timeout=30)
+    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, timeout=30)
+    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, timeout=30)
+    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, timeout=30)
 
     # Build modality_slices from a sample (trigger lazy init)
     _ = train1_ds[0]

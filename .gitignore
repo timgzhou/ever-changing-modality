@@ -224,3 +224,4 @@ ds_ers
 *.yaml
 GEO-Bench-2
 *.png
+.claude/

@@ -18,7 +18,6 @@ VALID_NEW_MODS = {
     'pastis':  ['s1', 's2'],
 }
 
-
 def get_loaders_and_config(dataset, batch_size, num_workers):
     """Return (train1, val1, train2, val2, test, task_config, modality_bands_dict_full)."""
     if dataset == 'eurosat':
