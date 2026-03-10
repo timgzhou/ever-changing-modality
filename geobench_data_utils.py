@@ -314,10 +314,10 @@ def get_benv2_loaders(
     print(f"BEN-v2 — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
 
     train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, timeout=30)
-    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=0, timeout=30)
+    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
     train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, timeout=30)
-    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=0, timeout=30)
-    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=0, timeout=30)
+    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
+    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
 
     # Build modality_slices from a sample (trigger lazy init)
     _ = train1_ds[0]

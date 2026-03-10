@@ -81,12 +81,22 @@ def main():
                         help='Enable MFLA training for hallucinated modalities')
     parser.add_argument('--mfla_warmup_epochs', type=int, default=0,
                         help='Epochs where backbone + MFLA train together before freezing backbone (default: 0)')
+    parser.add_argument('--miam', action='store_true',
+                        help='Enable MIAM dynamic masking (overrides --modality_dropout and --mae_mask_ratio)')
+    parser.add_argument('--miam_kappa', type=float, default=10.0,
+                        help='MIAM Beta sharpness: higher = more concentrated near corners (default: 10.0)')
+    parser.add_argument('--miam_lambda_s', type=float, default=1.0,
+                        help='MIAM exponent on rho_s (performance ratio) (default: 1.0)')
+    parser.add_argument('--miam_lambda_d', type=float, default=1.0,
+                        help='MIAM exponent on rho_d (learning speed ratio) (default: 1.0)')
+    parser.add_argument('--miam_priority_corners_mass', type=float, default=0.45,
+                        help='MIAM weight on all-zeros and all-ones corners each (default: 0.45)')
     parser.add_argument('--results_csv', type=str, required=True,
                         help='Path to results CSV file')
 
     # UNIMPORTANT
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--num_workers', type=int, default=8)
+    parser.add_argument('--num_workers', type=int, default=2)
     parser.add_argument('--epochs', type=int, default=4)
     parser.add_argument('--eval_every_n_epochs', type=int, default=4)
     parser.add_argument('--ssl_lr', type=float, default=1e-4)
@@ -190,6 +200,11 @@ def main():
         multilabel=task_config.multilabel,
         label_key=task_config.label_key,
         segmentation=(task_config.task_type == 'segmentation'),
+        miam=args.miam,
+        miam_kappa=args.miam_kappa,
+        miam_lambda_s=args.miam_lambda_s,
+        miam_lambda_d=args.miam_lambda_d,
+        miam_priority_corners_mass=args.miam_priority_corners_mass,
     )
 
     # ========================================= EVALUATION =====================================
@@ -355,4 +370,17 @@ python -u shot_ete.py \
     --batch_size 32 \
     --results_csv res/shot_ete_benv2.csv \
     --labeled_frequency 0.3
+    
+# BENv2 s2 to s1
+python -u shot_ete.py \
+    --dataset benv2 \
+    --new_mod_group s1 \
+    --checkpoint_name benv2_s2_to_s1_dryrun \
+    --stage0_checkpoint checkpoints/benv2_s2_s0.pt \
+    --epochs 4 \
+    --eval_every_n_epochs 1 \
+    --batch_size 64 \
+    --results_csv res/shot_ete_dryrun.csv \
+    --labeled_frequency 0.1 \
+    --miam
 """

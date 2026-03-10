@@ -12,6 +12,7 @@ from eurosat_data_utils import create_multimodal_batch
 from train_utils import _delulu_stage3_test, _compute_map, hallucinate_intermediate_features, merge_intermediate_features
 import wandb
 import numpy as np
+from miam_masking import get_mask_prob, get_corner_weights
 
 
 class FullSequenceMAEDecoder(nn.Module):
@@ -199,7 +200,7 @@ def create_fuse_cls_projectors(hidden_dim, mae_modalities, latent_reconstruct_mo
     return fused_cls_projector
 
 # MASKING HELPER FUNCTION
-def mask_input(intermediate_projectors, batch_size, n_storage_tokens, num_patches, mae_mask_ratio, all_modalities, prefusion_features, modality_dropout, device, protected_modalities=None):
+def mask_input(intermediate_projectors, batch_size, n_storage_tokens, num_patches, mae_mask_ratio, all_modalities, prefusion_features, modality_dropout, device, protected_modalities=None, miam_mask_probs=None):
     """
     Apply masking using projected sequences from other modalities.
 
@@ -209,25 +210,43 @@ def mask_input(intermediate_projectors, batch_size, n_storage_tokens, num_patche
     Args:
         protected_modalities: List of modalities that should never be fully dropped.
                              Used to ensure newmod is always present in unlabeled batches.
+        miam_mask_probs: Optional dict {mod: float in [0,1]} from MIAM get_mask_prob().
+                         Each value is used directly as the token mask ratio for that modality.
+                         mask_prob >= 1.0 means all tokens masked = full modality drop.
+                         Overrides modality_dropout and mae_mask_ratio when provided.
     """
-    len_keep = int(num_patches * (1 - mae_mask_ratio))
     modality_masks = {}  # {mod: [B, num_patches] bool tensor, True=masked}
     modality_dropped = {}
 
-    # Determine which modalities to drop (excluding protected modalities)
-    drop_candidates = [
-        mod for mod in all_modalities
-        if np.random.rand() < modality_dropout
-        and (protected_modalities is None or mod not in protected_modalities)
-    ]
-    if len(drop_candidates) == len(all_modalities):
-        # Don't drop all - randomly keep one
-        drop_candidates.pop(np.random.randint(len(drop_candidates)))
+    if miam_mask_probs is not None:
+        # MIAM unified path: mask_prob IS the token mask ratio; 1.0 = full modality drop.
+        effective_probs = dict(miam_mask_probs)
+        # Protect specified modalities by clamping their prob away from 1.0
+        if protected_modalities:
+            for mod in protected_modalities:
+                if mod in effective_probs:
+                    effective_probs[mod] = min(effective_probs[mod], 1.0 - 1.0 / num_patches)
+        # If all modalities would be fully dropped, keep the one with the lowest mask_prob
+        if all(effective_probs[m] >= 1.0 for m in all_modalities):
+            least_masked = min(all_modalities, key=lambda m: effective_probs[m])
+            effective_probs[least_masked] = 1.0 - 1.0 / num_patches
+        drop_candidates = [m for m in all_modalities if effective_probs[m] >= 1.0]
+    else:
+        # Standard path: Bernoulli modality dropout
+        effective_probs = None
+        drop_candidates = [
+            mod for mod in all_modalities
+            if np.random.rand() < modality_dropout
+            and (protected_modalities is None or mod not in protected_modalities)
+        ]
+        if len(drop_candidates) == len(all_modalities):
+            # Don't drop all - randomly keep one
+            drop_candidates.pop(np.random.randint(len(drop_candidates)))
+
     available_modalities = [mod for mod in all_modalities if mod not in drop_candidates]
     has_modality_dropout = len(drop_candidates) > 0
 
     # Generate masks for each modality
-    # Token masking and modality dropout are mutually exclusive to avoid information leakage
     for mod in all_modalities:
         is_dropped = mod in drop_candidates
         modality_dropped[mod] = is_dropped
@@ -235,11 +254,13 @@ def mask_input(intermediate_projectors, batch_size, n_storage_tokens, num_patche
         if is_dropped:
             # Fully mask dropped modalities
             mask = torch.ones(batch_size, num_patches, device=device, dtype=torch.bool)
-        elif has_modality_dropout:
-            # No token masking when simulating missing modalities
+        elif has_modality_dropout and effective_probs is None:
+            # Standard path: no token masking when simulating missing modalities (avoids info leakage)
             mask = torch.zeros(batch_size, num_patches, device=device, dtype=torch.bool)
         else:
-            # Normal MAE token masking when all modalities present
+            # Token masking: MIAM provides per-modality ratio; standard uses fixed mae_mask_ratio
+            ratio = effective_probs[mod] if effective_probs is not None else mae_mask_ratio
+            len_keep = int(num_patches * (1 - ratio))
             noise = torch.rand(batch_size, num_patches, device=device)
             ids_shuffle = torch.argsort(noise, dim=1)
             mask = torch.ones(batch_size, num_patches, device=device, dtype=torch.bool)
@@ -328,6 +349,146 @@ def mixed_batch_iterator(unlabeled_loader, labeled_loader, labeled_freq):
             yield next(labeled_iter), True
         else:
             yield next(unlabeled_iter), False
+
+
+def evaluate_multimodal(
+    model, evan, loader, device, modality_bands_dict,
+    starting_modality, newmod_modalities, intermediate_projectors, all_modalities,
+    teacher=None, use_mfla=False, multilabel=False, label_key='label',
+    with_labels=False, desc="Evaluating",
+):
+    """
+    Single-pass evaluation over a multimodal loader.
+
+    Computes all three paths (peeking, transfer, addition) in one pass per batch:
+      - peeking:  real starting_mod + hallucinated newmod
+      - transfer: real newmod + hallucinated starting_mod
+      - addition: both modalities real
+
+    If teacher is provided, also computes teacher agreement for transfer and addition paths
+    (agreement = student pred matches teacher pred).
+
+    If with_labels is True (loader has ground-truth labels), computes accuracy/mAP for all paths.
+    If with_labels is False, only teacher-agreement metrics are computed (needs teacher).
+
+    Returns dict with keys present based on what was computed:
+      'transfer_acc', 'peeking_acc', 'addition_acc'   (with_labels=True)
+      'transfer_agree', 'addition_agree'               (teacher provided)
+    All values are percentages.
+    """
+    model.eval()
+    if teacher is not None:
+        teacher.eval()
+
+    newmod_modalities = list(newmod_modalities)
+    all_mods = list(all_modalities)
+    hallucinated_newmod = set(newmod_modalities) if use_mfla else None
+    hallucinated_startmod = {starting_modality} if use_mfla else None
+
+    # Label-based accumulators
+    total = 0
+    peeking_correct = 0
+    transfer_correct = 0
+    addition_correct = 0
+    peeking_logits_list, transfer_logits_list, addition_logits_list, labels_list = [], [], [], []
+
+    # Agreement accumulators
+    transfer_agree = 0
+    addition_agree = 0
+
+    with torch.no_grad():
+        for batch in tqdm(loader, desc=desc):
+            mm_batch = create_multimodal_batch(
+                batch, modality_bands_dict=modality_bands_dict,
+                modalities=tuple(all_mods)
+            )
+            mm_batch = {k: v.to(device) for k, v in mm_batch.items()}
+
+            # Single modality-specific forward pass
+            intermediate = evan.forward_modality_specific_features(mm_batch)
+
+            # Teacher predictions (once per batch)
+            teacher_preds = None
+            if teacher is not None:
+                teacher_batch = {starting_modality: mm_batch[starting_modality]}
+                teacher_preds = teacher(teacher_batch).argmax(dim=1)
+
+            # Labels (if available)
+            labels = None
+            if with_labels:
+                labels = batch[label_key].to(device)
+                if multilabel:
+                    labels = labels.float()
+                total += labels.shape[0]
+
+            def _soft_vote(fused):
+                logits = [model.modality_classifiers[m](fused[m]['x_norm_clstoken']) for m in all_mods]
+                return torch.stack(logits).mean(dim=0)
+
+            # --- Peeking path: real starting_mod + hallucinated newmod ---
+            peeking_hal = hallucinate_intermediate_features(
+                intermediate, (starting_modality,), tuple(newmod_modalities), intermediate_projectors
+            )
+            peeking_input = merge_intermediate_features(
+                intermediate, peeking_hal, (starting_modality,), tuple(newmod_modalities)
+            )
+            peeking_fused = evan.forward_fusion_from_modality_features(
+                peeking_input, hallucinated_modalities=hallucinated_newmod
+            )
+            peeking_sv = _soft_vote(peeking_fused)
+
+            # --- Transfer path: real newmod + hallucinated starting_mod ---
+            transfer_hal = hallucinate_intermediate_features(
+                intermediate, tuple(newmod_modalities), (starting_modality,), intermediate_projectors
+            )
+            transfer_input = merge_intermediate_features(
+                intermediate, transfer_hal, tuple(newmod_modalities), (starting_modality,)
+            )
+            transfer_fused = evan.forward_fusion_from_modality_features(
+                transfer_input, hallucinated_modalities=hallucinated_startmod
+            )
+            transfer_sv = _soft_vote(transfer_fused)
+
+            # --- Addition path: both modalities real ---
+            addition_fused = evan.forward_fusion_from_modality_features(
+                intermediate, hallucinated_modalities=None
+            )
+            addition_sv = _soft_vote(addition_fused)
+
+            # Accumulate label-based metrics
+            if with_labels:
+                if multilabel:
+                    peeking_logits_list.append(peeking_sv.cpu())
+                    transfer_logits_list.append(transfer_sv.cpu())
+                    addition_logits_list.append(addition_sv.cpu())
+                    labels_list.append(labels.cpu())
+                else:
+                    peeking_correct += (peeking_sv.argmax(1) == labels).sum().item()
+                    transfer_correct += (transfer_sv.argmax(1) == labels).sum().item()
+                    addition_correct += (addition_sv.argmax(1) == labels).sum().item()
+
+            # Accumulate teacher agreement
+            if teacher_preds is not None:
+                transfer_agree += (transfer_sv.argmax(1) == teacher_preds).sum().item()
+                addition_agree += (addition_sv.argmax(1) == teacher_preds).sum().item()
+                if not with_labels:
+                    total += teacher_preds.shape[0]
+
+    results = {}
+    if with_labels:
+        if multilabel:
+            all_lbls = torch.cat(labels_list)
+            results['peeking_acc'] = _compute_map(torch.cat(peeking_logits_list), all_lbls)
+            results['transfer_acc'] = _compute_map(torch.cat(transfer_logits_list), all_lbls)
+            results['addition_acc'] = _compute_map(torch.cat(addition_logits_list), all_lbls)
+        else:
+            results['peeking_acc'] = 100.0 * peeking_correct / total
+            results['transfer_acc'] = 100.0 * transfer_correct / total
+            results['addition_acc'] = 100.0 * addition_correct / total
+    if teacher is not None:
+        results['transfer_agree'] = 100.0 * transfer_agree / total
+        results['addition_agree'] = 100.0 * addition_agree / total
+    return results
 
 
 def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dict,
@@ -591,6 +752,12 @@ def train_shot(
     multilabel: bool = False,           # Use BCEWithLogitsLoss instead of CrossEntropyLoss
     label_key: str = 'label',           # Batch key for labels
     segmentation: bool = False,         # Use pixel-level CE; model outputs [B,C,H,W], labels [B,H,W]
+    # MIAM dynamic masking options
+    miam: bool = False,                 # Enable MIAM dynamic masking (overrides modality_dropout + mae_mask_ratio)
+    miam_kappa: float = 10.0,           # Beta sharpness: higher = more concentrated near corners
+    miam_lambda_s: float = 1.0,         # Exponent on rho_s (performance ratio)
+    miam_lambda_d: float = 1.0,         # Exponent on rho_d (learning speed ratio)
+    miam_priority_corners_mass: float = 0.45,  # Weight on all-zeros and all-ones corners each
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -717,6 +884,22 @@ def train_shot(
         'best_ens_addition': {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
     }
 
+    # MIAM state (updated each epoch after validation)
+    if miam:
+        if args.modality_dropout > 0:
+            print(f"  WARNING: --miam is enabled; --modality_dropout ({args.modality_dropout}) and "
+                  f"--mae_mask_ratio ({args.mae_mask_ratio}) will be ignored (MIAM controls masking).")
+        M = len(all_modalities)
+        # Use sorted order so rho_s indices are stable across runs
+        miam_modality_order = sorted(all_modalities)
+        corner_weights = get_corner_weights(M, miam_priority_corners_mass)
+        rho_s = torch.ones(M)
+        rho_d = torch.ones(M)
+        miam_metric_history = []  # list of per-epoch metric tensors for rho_d computation
+        print(f"  MIAM enabled: kappa={miam_kappa}, lambda_s={miam_lambda_s}, lambda_d={miam_lambda_d}, "
+              f"priority_corners_mass={miam_priority_corners_mass}")
+        print(f"  MIAM modality order: {miam_modality_order} (index 0={miam_modality_order[0]}, 1={miam_modality_order[1]})")
+
     # Training loop
     global_step = 0
     for epoch in range(args.epochs):
@@ -740,6 +923,14 @@ def train_shot(
         train_count = 0
         labeled_count = 0
         unlabeled_count = 0
+        # Per-epoch masking accumulators (always tracked)
+        train_drop_count = {mod: 0 for mod in all_modalities}        # #batches mod was fully dropped
+        train_token_mask_sum = {mod: 0.0 for mod in all_modalities}  # sum of effective token mask ratios (non-dropped only)
+        train_token_mask_count = {mod: 0 for mod in all_modalities}  # #batches mod was NOT fully dropped
+        # MIAM-only accumulators
+        if miam:
+            train_miam_mask_prob = {mod: 0.0 for mod in all_modalities}
+            miam_batch_mask_probs = None  # holds current batch's mask_probs for wandb logging
 
         # Compute effective labeled_frequency for this epoch based on schedule
         if epoch >= labeled_start_epoch:
@@ -892,12 +1083,40 @@ def train_shot(
                     prefusion_loss = prefusion_loss / pre_fusion_loss_count if pre_fusion_loss_count > 0 else prefusion_loss
                     batch_pre_fusion_loss = prefusion_loss.item()
 
+                # MIAM: sample per-modality mask probabilities for this batch
+                if miam:
+                    mask_prob_vec = get_mask_prob(
+                        method="miam", M=M,
+                        kappa=miam_kappa, lambda_s=miam_lambda_s, lambda_d=miam_lambda_d,
+                        corner_weights=corner_weights, rho_s=rho_s, rho_d=rho_d,
+                    )  # shape (M,), continuous [0,1]
+                    # Invert: MIAM's convention is prob=1 → keep all (no mask), prob=0 → mask all (drop).
+                    # Our mask_input convention is the opposite: 1.0 = full drop, 0.0 = no masking.
+                    miam_batch_mask_probs = {mod: 1.0 - mask_prob_vec[i].item() for i, mod in enumerate(miam_modality_order)}
+                    for mod in all_modalities:
+                        train_miam_mask_prob[mod] += miam_batch_mask_probs[mod]
+                else:
+                    miam_batch_mask_probs = None
+
                 # Masking with protected_modalities to ensure newmod is never dropped (only when batch mixing is active)
                 modality_masks, masked_mod_features, modality_dropped = mask_input(
                     intermediate_projectors, batch_size, evan.n_storage_tokens, num_patches,
                     args.mae_mask_ratio, all_modalities, prefusion_features, args.modality_dropout, device,
-                    protected_modalities=newmod_list if effective_labeled_freq > 0 else None
+                    protected_modalities=newmod_list if effective_labeled_freq > 0 else None,
+                    miam_mask_probs=miam_batch_mask_probs,
                 )
+
+                # Accumulate per-modality masking stats
+                for mod in all_modalities:
+                    if modality_dropped[mod]:
+                        train_drop_count[mod] += 1
+                    else:
+                        # Effective token mask ratio for non-dropped modalities.
+                        # MIAM: use the sampled mask_prob (true to what was applied).
+                        # Standard: use mae_mask_ratio regardless of whether other mods were dropped.
+                        effective_ratio = miam_batch_mask_probs[mod] if miam_batch_mask_probs is not None else args.mae_mask_ratio
+                        train_token_mask_sum[mod] += effective_ratio
+                        train_token_mask_count[mod] += 1
 
                 # Compute hallucinated modalities and toggle gradients if MFLA training is enabled
                 hallucinated_mods = {mod for mod, dropped in modality_dropped.items() if dropped} if use_mfla else set()
@@ -1019,6 +1238,11 @@ def train_shot(
                     'epoch': epoch + 1,
                     'lr': optimizer.param_groups[0]['lr']
                 })
+                if miam and not is_labeled and miam_batch_mask_probs is not None:
+                    wandb.log({
+                        **{f'miam/mask_prob_{mod}': miam_batch_mask_probs[mod] for mod in all_modalities},
+                        'epoch': epoch + 1,
+                    })
 
         # Epoch summary
         train_loss /= train_count
@@ -1035,6 +1259,25 @@ def train_shot(
         print(f"\nEpoch {epoch+1}/{args.epochs} ({epoch_time:.1f}s):")
         print(f"  Train - Total: {train_loss:.4f}, MAE: {train_mae_loss:.4f}, Latent: {train_latent_loss:.4f}, Pre-fusion: {train_pre_fusion_loss:.4f}, Distill: {train_distill_loss:.4f}, CE: {train_ce_loss:.4f}")
         print(f"  Batches - Labeled: {labeled_count}, Unlabeled: {unlabeled_count}, Ratio: {labeled_ratio:.2f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
+        # Masking stats (always logged, MIAM or standard)
+        if unlabeled_count > 0:
+            drop_rates = {mod: train_drop_count[mod] / unlabeled_count for mod in all_modalities}
+            avg_token_ratios = {
+                mod: train_token_mask_sum[mod] / train_token_mask_count[mod] if train_token_mask_count[mod] > 0 else 0.0
+                for mod in all_modalities
+            }
+            print(f"  Masking - drop_rate: { {m: f'{v:.3f}' for m, v in drop_rates.items()} }")
+            print(f"  Masking - avg_token_mask_ratio: { {m: f'{v:.3f}' for m, v in avg_token_ratios.items()} }")
+            mask_log = {
+                **{f'masking/drop_rate_{mod}': drop_rates[mod] for mod in all_modalities},
+                **{f'masking/avg_token_mask_ratio_{mod}': avg_token_ratios[mod] for mod in all_modalities},
+                'epoch': epoch + 1,
+            }
+            if miam:
+                avg_probs = {mod: train_miam_mask_prob[mod] / unlabeled_count for mod in all_modalities}
+                print(f"  MIAM - avg mask_prob: { {m: f'{v:.3f}' for m, v in avg_probs.items()} }")
+                mask_log.update({f'miam/avg_mask_prob_{mod}': avg_probs[mod] for mod in all_modalities})
+            wandb.log(mask_log)
 
         # Periodic evaluation
         if eval_every_n_epochs is not None and test_loader is not None and (epoch + 1) % eval_every_n_epochs == 0:
@@ -1044,88 +1287,69 @@ def train_shot(
             unlabeled_modalities = [mod for mod in mae_modalities if mod not in latent_reconstruct_modalities]
             if not unlabeled_modalities:
                 unlabeled_modalities = mae_modalities[:1]
-            labeled_modalities = latent_reconstruct_modalities
 
-            periodic_test_accs = {}
             metric_label = "mAP" if multilabel else "accuracy"
-            for objective in ["transfer", "peeking", "addition"]:
-                accuracy, ens_acc = _delulu_stage3_test(
-                    model=model,
-                    evan=evan,
-                    test_loader=test_loader,
-                    device=device,
-                    modality_bands_dict=modality_bands_dict,
-                    unlabeled_modalities=unlabeled_modalities,
-                    labeled_modalities=labeled_modalities,
-                    all_modalities=all_modalities,
-                    intermediate_projectors=intermediate_projectors,
-                    objective=objective,
-                    use_mfla=use_mfla,
-                    multilabel=multilabel,
-                    label_key=label_key,
-                )
-                periodic_test_accs[objective] = accuracy
-                print(f"  {objective.capitalize()} {metric_label}: {accuracy:.2f}%")
-                wandb.log({f"test/{objective}_{metric_label}": accuracy, "epoch": epoch + 1})
-                if objective == "addition" and ens_acc is not None:
-                    periodic_test_accs['addition_ens'] = ens_acc
-                    wandb.log({f"test/addition_ens_{metric_label}": ens_acc, "epoch": epoch + 1})
+
+            # Single pass over test_loader for all 3 objectives
+            test_results = evaluate_multimodal(
+                model=model, evan=evan, loader=test_loader, device=device,
+                modality_bands_dict=modality_bands_dict,
+                starting_modality=starting_modality,
+                newmod_modalities=newmod_list,
+                intermediate_projectors=intermediate_projectors,
+                all_modalities=all_modalities,
+                use_mfla=use_mfla, multilabel=multilabel, label_key=label_key,
+                with_labels=True, desc="Testing",
+            )
+            periodic_test_accs = {
+                'transfer': test_results['transfer_acc'],
+                'peeking':  test_results['peeking_acc'],
+                'addition': test_results['addition_acc'],
+            }
+            print(f"  Transfer {metric_label}: {test_results['transfer_acc']:.2f}%")
+            print(f"  Peeking {metric_label}:  {test_results['peeking_acc']:.2f}%")
+            print(f"  Addition {metric_label}: {test_results['addition_acc']:.2f}%")
+            wandb.log({
+                f"test/transfer_{metric_label}": test_results['transfer_acc'],
+                f"test/peeking_{metric_label}":  test_results['peeking_acc'],
+                f"test/addition_{metric_label}": test_results['addition_acc'],
+                "epoch": epoch + 1,
+            })
 
             # Validation-based checkpoint selection (same eval frequency)
             if val_loader is not None or val_labeled_loader is not None:
                 print(f"--- Validation Metrics at Epoch {epoch+1} ---")
                 val_metrics = {}
 
-                # 1. Teacher agreement on val2 (unlabeled, multimodal) - transfer path
+                # Single pass over val_loader (multimodal): transfer + addition agreement
                 if val_loader is not None:
-                    teacher_agreement = compute_teacher_agreement(
-                        model=model,
-                        teacher=teacher_classifier,
-                        evan=evan,
-                        val_loader=val_loader,
-                        device=device,
+                    val_mm_results = evaluate_multimodal(
+                        model=model, evan=evan, loader=val_loader, device=device,
                         modality_bands_dict=modality_bands_dict,
                         starting_modality=starting_modality,
                         newmod_modalities=newmod_list,
                         intermediate_projectors=intermediate_projectors,
                         all_modalities=all_modalities,
-                        use_mfla=use_mfla,
+                        teacher=teacher_classifier,
+                        use_mfla=use_mfla, with_labels=False, desc="Val (multimodal)",
                     )
-                    val_metrics['teacher_agreement'] = teacher_agreement
-                    print(f"  Val transfer agreement: {teacher_agreement:.2f}%")
-                    
-                # 2. Peeking accuracy on val1 (labeled, monomodal)
+                    val_metrics['teacher_agreement'] = val_mm_results['transfer_agree']
+                    val_metrics['addition'] = val_mm_results['addition_agree']
+                    print(f"  Val transfer agreement: {val_metrics['teacher_agreement']:.2f}%")
+                    print(f"  Val addition agreement: {val_metrics['addition']:.2f}%")
+
+                # val_labeled_loader has starting_mod only — use dedicated peeking function
                 if val_labeled_loader is not None:
                     peeking_acc = compute_peeking_accuracy(
-                        model=model,
-                        evan=evan,
-                        val_loader=val_labeled_loader,
-                        device=device,
+                        model=model, evan=evan, val_loader=val_labeled_loader, device=device,
                         modality_bands_dict=modality_bands_dict,
                         starting_modality=starting_modality,
                         intermediate_projectors=intermediate_projectors,
                         all_modalities=all_modalities,
-                        use_mfla=use_mfla,
-                        multilabel=multilabel,
-                        label_key=label_key,
+                        use_mfla=use_mfla, multilabel=multilabel, label_key=label_key,
                     )
                     val_metrics['peeking'] = peeking_acc
                     print(f"  Val peeking accuracy: {peeking_acc:.2f}%")
-                    
-                # 3. Addition agreement on val2 (unlabeled, multimodal, both real)
-                if val_loader is not None:
-                    addition_agreement = compute_addition_agreement(
-                        model=model,
-                        teacher=teacher_classifier,
-                        evan=evan,
-                        val_loader=val_loader,
-                        device=device,
-                        modality_bands_dict=modality_bands_dict,
-                        starting_modality=starting_modality,
-                        all_modalities=all_modalities,
-                    )
-                    val_metrics['addition'] = addition_agreement
-                    print(f"  Val addition agreement: {addition_agreement:.2f}%")
 
                 # 4. Compute ensemble addition proxy: (peeking + teacher_agreement) / 2
                 if 'peeking' in val_metrics and 'teacher_agreement' in val_metrics:
@@ -1174,7 +1398,7 @@ def train_shot(
                             f'best/{ckpt_name}_test_transfer': periodic_test_accs['transfer'],
                             f'best/{ckpt_name}_test_peeking': periodic_test_accs['peeking'],
                             f'best/{ckpt_name}_test_addition': periodic_test_accs['addition'],
-                            f'best/{ckpt_name}_test_addition_ens': periodic_test_accs.get('addition_ens', 0),
+                            f'best/{ckpt_name}_test_addition_ens': periodic_test_accs.get('addition_ens', periodic_test_accs.get('addition', 0)),
                             f'best/{ckpt_name}_epoch': epoch + 1,
                             'epoch': epoch + 1,
                         })
@@ -1193,6 +1417,31 @@ def train_shot(
                     'val/combined': sum(val_weights.get(k, 0) * val_metrics.get(k, 0) for k in val_weights),
                     'epoch': epoch + 1
                 })
+
+                # MIAM: update rho_s and rho_d using per-modality val metrics
+                if miam and 'peeking' in val_metrics and 'teacher_agreement' in val_metrics:
+                    # miam_modality_order is sorted; map metrics by role:
+                    #   starting_modality → peeking_acc, newmod → teacher_agreement
+                    per_mod_metrics = torch.tensor([
+                        val_metrics['peeking'] if mod == starting_modality else val_metrics['teacher_agreement']
+                        for mod in miam_modality_order
+                    ])
+                    miam_metric_history.append(per_mod_metrics)
+
+                    geo_mean_s = torch.exp(torch.mean(torch.log(per_mod_metrics + 1e-8)))
+                    rho_s = per_mod_metrics / geo_mean_s
+
+                    if len(miam_metric_history) >= 2:
+                        derivatives = torch.abs(miam_metric_history[-1] - miam_metric_history[-2])
+                        geo_mean_d = torch.exp(torch.mean(torch.log(derivatives + 1e-8)))
+                        rho_d = derivatives / geo_mean_d
+
+                    rho_log = {f'miam/rho_s_{mod}': rho_s[i].item() for i, mod in enumerate(miam_modality_order)}
+                    rho_log.update({f'miam/rho_d_{mod}': rho_d[i].item() for i, mod in enumerate(miam_modality_order)})
+                    rho_log['epoch'] = epoch + 1
+                    wandb.log(rho_log)
+                    print(f"  MIAM rho_s: { {m: f'{rho_s[i].item():.3f}' for i, m in enumerate(miam_modality_order)} }"
+                          f"  rho_d: { {m: f'{rho_d[i].item():.3f}' for i, m in enumerate(miam_modality_order)} }")
 
             model.train()
             intermediate_projectors.train()
