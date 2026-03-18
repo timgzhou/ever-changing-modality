@@ -18,7 +18,7 @@ VALID_NEW_MODS = {
     'pastis':  ['s1', 's2'],
 }
 
-def get_loaders_and_config(dataset, batch_size, num_workers):
+def get_loaders_and_config(dataset, batch_size, num_workers, data_normalizer=None):
     """Return (train1, val1, train2, val2, test, task_config, modality_bands_dict_full)."""
     if dataset == 'eurosat':
         from eurosat_data_utils import ALL_BAND_NAMES, get_loaders_with_val
@@ -47,7 +47,7 @@ def get_loaders_and_config(dataset, batch_size, num_workers):
     elif dataset == 'pastis':
         from geobench_data_utils import get_pastis_loaders
         train1, val1, train2, val2, test, task_config = get_pastis_loaders(
-            batch_size=batch_size, num_workers=num_workers
+            batch_size=batch_size, num_workers=num_workers, data_normalizer=data_normalizer
         )
         return train1, val1, train2, val2, test, task_config
 
@@ -81,16 +81,8 @@ def main():
                         help='Enable MFLA training for hallucinated modalities')
     parser.add_argument('--mfla_warmup_epochs', type=int, default=0,
                         help='Epochs where backbone + MFLA train together before freezing backbone (default: 0)')
-    parser.add_argument('--miam', action='store_true',
-                        help='Enable MIAM dynamic masking (overrides --modality_dropout and --mae_mask_ratio)')
-    parser.add_argument('--miam_kappa', type=float, default=10.0,
-                        help='MIAM Beta sharpness: higher = more concentrated near corners (default: 10.0)')
-    parser.add_argument('--miam_lambda_s', type=float, default=1.0,
-                        help='MIAM exponent on rho_s (performance ratio) (default: 1.0)')
-    parser.add_argument('--miam_lambda_d', type=float, default=1.0,
-                        help='MIAM exponent on rho_d (learning speed ratio) (default: 1.0)')
-    parser.add_argument('--miam_priority_corners_mass', type=float, default=0.45,
-                        help='MIAM weight on all-zeros and all-ones corners each (default: 0.45)')
+    parser.add_argument('--replace_teacher_w_peek', action='store_true',
+                        help='When student peeking surpasses teacher, replace teacher and use peeking mode for distillation')
     parser.add_argument('--results_csv', type=str, required=True,
                         help='Path to results CSV file')
 
@@ -145,13 +137,19 @@ def main():
     wandb.init(
         project=args.wandb_project,
         config={**config, **vars(args)},
-        name=f"{args.dataset}_{starting_modality}+={newmod}--mae{args.mae_modalities}_lf{args.labeled_frequency}"
+        name=f"{args.dataset}_{starting_modality}+={newmod}"
     )
 
-    # Create datasets
+    # Create datasets — use the same normalizer that was used during stage 0 training
     print("\n=== Creating datasets ===")
+    data_normalizer = None
+    normalization = config.get('normalization', 'zscore')
+    if normalization == 'div10000':
+        from geobench_data_utils import make_div10000_normalizer
+        data_normalizer = make_div10000_normalizer()
+        print(f"Using div10000 normalizer (from stage0 checkpoint config)")
     train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = \
-        get_loaders_and_config(args.dataset, args.batch_size, args.num_workers)
+        get_loaders_and_config(args.dataset, args.batch_size, args.num_workers, data_normalizer=data_normalizer)
 
     if args.dataset != 'eurosat':
         modality_bands_dict = task_config.modality_slices
@@ -193,18 +191,16 @@ def main():
         labeled_start_fraction=args.labeled_start_fraction,
         active_losses=args.active_losses,
         weight_decay=args.weight_decay,
-        val_loader=val2_loader,
+        val_unlabeled_loader=val2_loader,
         val_labeled_loader=val1_loader,
         use_mfla=args.use_mfla,
         mfla_warmup_epochs=args.mfla_warmup_epochs,
         multilabel=task_config.multilabel,
         label_key=task_config.label_key,
         segmentation=(task_config.task_type == 'segmentation'),
-        miam=args.miam,
-        miam_kappa=args.miam_kappa,
-        miam_lambda_s=args.miam_lambda_s,
-        miam_lambda_d=args.miam_lambda_d,
-        miam_priority_corners_mass=args.miam_priority_corners_mass,
+        num_classes=task_config.num_classes,
+        ignore_index=getattr(task_config, 'ignore_index', -100),
+        replace_teacher_w_peek=args.replace_teacher_w_peek,
     )
 
     # ========================================= EVALUATION =====================================
@@ -381,6 +377,17 @@ python -u shot_ete.py \
     --eval_every_n_epochs 1 \
     --batch_size 64 \
     --results_csv res/shot_ete_dryrun.csv \
-    --labeled_frequency 0.1 \
-    --miam
+    --labeled_frequency 0.3
+    
+# PASTIS s2 to s1
+python -u shot_ete.py \
+    --dataset pastis \
+    --new_mod_group s1 \
+    --checkpoint_name pastis_s2_to_s1_dryrun \
+    --stage0_checkpoint checkpoints/pastis_s2_s0.pt \
+    --epochs 4 \
+    --eval_every_n_epochs 1 \
+    --batch_size 32 \
+    --results_csv res/shot_ete_dryrun.csv \
+    --labeled_frequency 0.3
 """

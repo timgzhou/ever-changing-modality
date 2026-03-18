@@ -361,7 +361,8 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                                    multilabel=False, label_key='label',
                                    segmentation=False, num_classes=None,
                                    ignore_index=-100,
-                                   val_loader=None, best_checkpoint_path=None):
+                                   val_loader=None, best_checkpoint_path=None,
+                                   val_per_epoch=1):
     """
     Simple training loop for single-modality EVAN training (Stage 0).
 
@@ -492,54 +493,57 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         else:
             train_metric = 100. * train_correct / train_total
 
-        # Evaluate on same modality
-        eval_kwargs = dict(
-            modality_bands_dict=modality_bands_dict,
-            modalities_to_use=(modality,),
-            multilabel=multilabel,
-            label_key=label_key,
-            segmentation=segmentation,
-            num_classes=num_classes,
-            ignore_index=ignore_index,
-        )
-        if hallucinate_modality:
-            test_loss, test_metric = evaluate(
-                model, test_loader, criterion, device,
-                pseudo_modalities=pseudo_modalities, intermediate_projectors=intermediate_projectors,
-                **eval_kwargs,
-            )
-        else:
-            test_loss, test_metric = evaluate(model, test_loader, criterion, device, **eval_kwargs)
-
-        # Val evaluation for best-checkpoint tracking
-        if val_loader is not None:
-            val_loss, val_metric = evaluate(model, val_loader, criterion, device, **eval_kwargs)
-        else:
-            val_loss, val_metric = None, None
-
         scheduler.step(train_loss)
-        if (epoch % 8 == 1) or (epoch + 1 == num_epochs):
+
+        do_eval = ((epoch + 1) % val_per_epoch == 0) or (epoch + 1 == num_epochs)
+
+        test_loss, test_metric = None, None
+        val_loss, val_metric = None, None
+        if do_eval:
+            eval_kwargs = dict(
+                modality_bands_dict=modality_bands_dict,
+                modalities_to_use=(modality,),
+                multilabel=multilabel,
+                label_key=label_key,
+                segmentation=segmentation,
+                num_classes=num_classes,
+                ignore_index=ignore_index,
+            )
+            if hallucinate_modality:
+                test_loss, test_metric = evaluate(
+                    model, test_loader, criterion, device,
+                    pseudo_modalities=pseudo_modalities, intermediate_projectors=intermediate_projectors,
+                    **eval_kwargs,
+                )
+            else:
+                test_loss, test_metric = evaluate(model, test_loader, criterion, device, **eval_kwargs)
+
+            if val_loader is not None:
+                val_loss, val_metric = evaluate(model, val_loader, criterion, device, **eval_kwargs)
+
             print(f"  Train ({mod_str}): Loss: {train_loss:.4f}, {metric_name}: {train_metric:.2f}%")
             print(f"  Test ({mod_str}):  Loss: {test_loss:.4f}, {metric_name}: {test_metric:.2f}% (epoch {epoch+1}/{num_epochs})")
             if val_metric is not None:
                 print(f"  Val  ({mod_str}):  Loss: {val_loss:.4f}, {metric_name}: {val_metric:.2f}%")
-        if test_metric > best_test_metric:
-            print(f"    New test record: {test_metric:.2f} > previous {best_test_metric:.2f} at epoch {epoch+1}")
-            best_test_metric = test_metric
-            best_epoch = epoch + 1
-        if val_metric is not None and val_metric > best_val_metric:
-            print(f"    New val record: {val_metric:.2f} > previous {best_val_metric:.2f} at epoch {epoch+1} — saving checkpoint")
-            best_val_metric = val_metric
-            model.save_checkpoint(best_checkpoint_path)
+            if test_metric > best_test_metric:
+                print(f"    New test record: {test_metric:.2f} > previous {best_test_metric:.2f} at epoch {epoch+1}")
+                best_test_metric = test_metric
+                best_epoch = epoch + 1
+            if val_metric is not None and val_metric > best_val_metric:
+                print(f"    New val record: {val_metric:.2f} > previous {best_val_metric:.2f} at epoch {epoch+1} — saving checkpoint")
+                best_val_metric = val_metric
+                model.save_checkpoint(best_checkpoint_path)
+
         if use_wandb and wandb_prefix:
             log_dict = {
                 f'{wandb_prefix}/train_loss_epoch': train_loss,
                 f'{wandb_prefix}/train_{metric_name.lower()}': train_metric,
-                f'{wandb_prefix}/eval_loss': test_loss,
-                f'{wandb_prefix}/eval_{metric_name.lower()}': test_metric,
                 f'{wandb_prefix}/epoch': epoch + 1,
                 f'{wandb_prefix}/lr': optimizer.param_groups[0]['lr'],
             }
+            if test_metric is not None:
+                log_dict[f'{wandb_prefix}/eval_loss'] = test_loss
+                log_dict[f'{wandb_prefix}/eval_{metric_name.lower()}'] = test_metric
             if val_metric is not None:
                 log_dict[f'{wandb_prefix}/val_loss'] = val_loss
                 log_dict[f'{wandb_prefix}/val_{metric_name.lower()}'] = val_metric

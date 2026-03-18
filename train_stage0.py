@@ -9,7 +9,7 @@ from datetime import datetime
 import wandb
 import csv
 
-from evan_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
+from evan_main import evan_small, evan_base, evan_large, evan_small_s2, BENV2_BAND_INDICES, PASTIS_BAND_INDICES, EVANClassifier, EvanSegmenter
 from train_utils import single_modality_training_loop
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
@@ -19,7 +19,7 @@ BENV2_MODALITIES   = ['s2', 's1']
 PASTIS_MODALITIES  = ['s2', 's1']
 
 
-def get_task_config_and_loaders(dataset, modality, batch_size, num_workers):
+def get_task_config_and_loaders(dataset, modality, batch_size, num_workers, data_normalizer=None, num_time_steps=10):
     """
     Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict).
 
@@ -55,7 +55,8 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers):
     elif dataset == 'pastis':
         from geobench_data_utils import get_pastis_loaders
         train1_loader, val1_loader, _, _, test_loader, task_config = get_pastis_loaders(
-            batch_size=batch_size, num_workers=num_workers, starting_modality=modality
+            batch_size=batch_size, num_workers=num_workers, starting_modality=modality,
+            data_normalizer=data_normalizer, num_time_steps=num_time_steps,
         )
         modality_bands_dict = {modality: task_config.modality_slices[modality]}
         return train1_loader, val1_loader, test_loader, task_config, modality_bands_dict
@@ -74,6 +75,9 @@ def main():
                              'EuroSAT: rgb/vre/nir/swir/aw. GeoBench: s2/s1.')
     parser.add_argument('--model', type=str, default='evan_small', choices=['evan_small', 'evan_base', 'evan_large'])
     parser.add_argument('--use_dino_weights', action='store_true')
+    parser.add_argument('--use_s2dino_weights', action='store_true',
+                        help='Init from torchgeo S2-DINO ViT-Small (SSL4EO-S12). '
+                             'Only valid with --model evan_small and GeoBench datasets.')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
@@ -84,13 +88,17 @@ def main():
     parser.add_argument('--tz_lora_rank', type=int, default=32,
                         help='rank of lora adaptors')
     parser.add_argument('--tz_modality_specific_layer_augmenter', type=str, default='fft',
-                        choices=['lora', 'fft'])
+                        choices=['fft'])
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--wandb_project', type=str, default=None)
     parser.add_argument('--global_rep', type=str, default='clstoken', choices=['clstoken', 'mean_patch'])
     parser.add_argument('--train_mode', type=str, default='emb+probe',
                         choices=['probe', 'adaptor', 'fft', 'emb+probe'])
     parser.add_argument('--checkpoint_name', type=str, default=None)
+    parser.add_argument('--num_time_steps', type=int, default=10,
+                        help='Number of timestamps to sample per PASTIS image before temporal aggregation.')
+    parser.add_argument('--val_per_epoch', type=int, default=1,
+                        help='Run validation every N epochs (and always on the last epoch).')
     args = parser.parse_args()
 
     # Validate modality against dataset
@@ -110,15 +118,21 @@ def main():
 
     # Data
     print("\n=== Creating datasets ===")
+    data_normalizer = None
+    normalization = 'zscore'
+    if args.use_s2dino_weights and args.dataset == 'pastis':
+        from geobench_data_utils import make_div10000_normalizer
+        data_normalizer = make_div10000_normalizer()
+        normalization = 'div10000'
+        print("Using /10000 normalizer to match torchgeo DINO pretraining.")
     train1_loader, val1_loader, test_loader, task_config, modality_bands_dict = get_task_config_and_loaders(
-        args.dataset, args.modality, args.batch_size, args.num_workers
+        args.dataset, args.modality, args.batch_size, args.num_workers, data_normalizer=data_normalizer,
+        num_time_steps=args.num_time_steps,
     )
 
     # Model
     print("\n=== Creating EVAN model ===")
-    model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
-    evan = model_fn(
-        load_weights=args.use_dino_weights,
+    common_kwargs = dict(
         tz_fusion_time=args.tz_fusion_time,
         tz_lora_rank=args.tz_lora_rank,
         tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
@@ -128,6 +142,23 @@ def main():
         img_size=task_config.img_size,
         device=device,
     )
+    if args.use_s2dino_weights:
+        if args.model != 'evan_small':
+            parser.error('--use_s2dino_weights is only supported with --model evan_small')
+        if args.modality != 's2':
+            parser.error('--use_s2dino_weights requires --modality s2 (teacher is an S2 model)')
+        if args.dataset == 'eurosat':
+            parser.error('--use_s2dino_weights is not compatible with --dataset eurosat')
+        from torchgeo.models import ViTSmall16_Weights
+        band_indices = {'benv2': BENV2_BAND_INDICES, 'pastis': PASTIS_BAND_INDICES}.get(args.dataset)
+        evan = evan_small_s2(
+            weights=ViTSmall16_Weights.SENTINEL2_ALL_DINO,
+            band_indices=band_indices,
+            **common_kwargs,
+        )
+    else:
+        model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
+        evan = model_fn(load_weights=args.use_dino_weights, **common_kwargs)
 
     is_segmentation = (task_config.task_type == 'segmentation')
 
@@ -230,7 +261,13 @@ def main():
         ignore_index=ignore_index if is_segmentation else -100,
         val_loader=val1_loader,
         best_checkpoint_path=checkpoint_path,
+        val_per_epoch=args.val_per_epoch,
     )
+
+    # Patch normalization into checkpoint config so shot_ete.py can read it back
+    ckpt = torch.load(checkpoint_path, map_location='cpu')
+    ckpt['config']['normalization'] = normalization
+    torch.save(ckpt, checkpoint_path)
 
     print(f"\n=== Stage 0 Training complete ===")
     print(f"  Train {metric_name}: {train_metric:.2f}%")
@@ -275,12 +312,16 @@ if __name__ == '__main__':
 # EuroSAT RGB (original behaviour)
 python -u train_stage0.py --dataset eurosat --modality rgb --epochs 5 --checkpoint_name eurosat_rgb_s0
 
-# BEN-v2 S2
+# BEN-v2 S2 (random init)
 python -u train_stage0.py --dataset benv2 --modality s2 --epochs 2 --checkpoint_name benv2_s2_s0 --train_mode fft
+
+# BEN-v2 S2 (init from torchgeo S2-DINO)
+python -u train_stage0.py --dataset benv2 --modality s2 --epochs 2 --checkpoint_name benv2_s2dino_s0 --train_mode fft --use_s2dino_weights
 
 # BEN-v2 S1 (start from S1 instead)
 python -u train_stage0.py --dataset benv2 --modality s1 --epochs 2 --checkpoint_name benv2_s1_s0 --train_mode fft
 
 # PASTIS S2
-python -u train_stage0.py --dataset pastis --modality s2 --epochs 2 --batch_size 16 --checkpoint_name pastis_s2_s0 --train_mode fft --num_workers 8
+python -u train_stage0.py --dataset pastis --modality s2 --epochs 2 --batch_size 16 --checkpoint_name pastis_s2_s0 --train_mode fft --num_workers 4 --use_dino_weights 
+python -u train_stage0.py --dataset pastis --modality s2 --epochs 16 --batch_size 16 --checkpoint_name pastis_s2_s0 --train_mode fft --num_workers 4  --use_s2dino_weights
 """

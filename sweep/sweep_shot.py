@@ -172,7 +172,7 @@ def main():
         labeled_start_fraction=labeled_start_fraction,
         active_losses=active_losses,
         weight_decay=weight_decay,
-        val_loader=val2_loader,
+        val_unlabeled_loader=val2_loader,
         val_labeled_loader=val1_loader,
     )
 

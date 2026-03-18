@@ -24,9 +24,53 @@ from torch.utils.data import DataLoader, Dataset, Subset
 # Add GEO-Bench-2 to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'GEO-Bench-2'))
 
+import h5py
+
 from geobench_v2.datasets.benv2 import GeoBenchBENV2
 from geobench_v2.datasets.pastis import GeoBenchPASTIS
 from geobench_v2.datasets.normalization import ZScoreNormalizer
+
+
+class GeoBenchPASTISRandom(GeoBenchPASTIS):
+    """GeoBenchPASTIS with random temporal subsampling instead of uniform."""
+
+    def _load_image(self, path):
+        with h5py.File(self._return_byte_stream(path), "r") as f:
+            tensor = torch.from_numpy(f["data"][:]).float()
+
+        T = tensor.shape[0]
+        if T < self.num_time_steps:
+            padding = torch.zeros(self.num_time_steps - T, *tensor.shape[1:])
+            tensor = torch.cat((padding, tensor), dim=0)
+        else:
+            indexes = sorted(random.sample(range(T), self.num_time_steps))
+            tensor = tensor[indexes]
+
+        if self.temporal_aggregation is not None:
+            if self.temporal_aggregation == "mean":
+                tensor = torch.mean(tensor, 0)
+            if self.temporal_aggregation == "median":
+                tensor = torch.median(tensor, 0).values
+
+        if self.num_time_steps == 1:
+            tensor = tensor.squeeze(0)
+
+        return tensor.float()
+
+
+class GeoBenchPASTISMedianAll(GeoBenchPASTIS):
+    """GeoBenchPASTIS that aggregates over ALL timestamps (no subsampling).
+
+    Used for val/test to get a deterministic, maximally-informed median.
+    """
+
+    def _load_image(self, path):
+        with h5py.File(self._return_byte_stream(path), "r") as f:
+            tensor = torch.from_numpy(f["data"][:]).float()
+
+        # Always use all T timestamps — no subsampling
+        tensor = torch.median(tensor, 0).values  # (C, H, W)
+        return tensor.float()
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +396,25 @@ PASTIS_S2_BANDS = ('B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B11'
 PASTIS_S1_ASC_BANDS = ('VV_asc', 'VH_asc', 'VV/VH_asc')
 PASTIS_S1_DESC_BANDS = ('VV_desc', 'VH_desc', 'VV/VH_desc')
 
+def make_div10000_normalizer():
+    """Return a ZScoreNormalizer instance with mean=0, std=10000 for all PASTIS bands.
+    This matches the torchgeo DINO pretraining normalization (divide by 10000).
+    Passed as a pre-initialized instance so GeoBench uses it directly.
+    """
+    all_bands = (
+        list(PASTIS_S2_BANDS) + list(PASTIS_S1_ASC_BANDS) + list(PASTIS_S1_DESC_BANDS)
+    )
+    full_band_order = {
+        's2':      list(PASTIS_S2_BANDS),
+        's1_asc':  list(PASTIS_S1_ASC_BANDS),
+        's1_desc': list(PASTIS_S1_DESC_BANDS),
+    }
+    stats = {
+        'means': {b: 0.0     for b in all_bands},
+        'stds':  {b: 10000.0 for b in all_bands},
+    }
+    return ZScoreNormalizer(stats=stats, band_order=full_band_order)
+
 
 def get_pastis_loaders(
     batch_size: int = 32,
@@ -359,7 +422,9 @@ def get_pastis_loaders(
     data_root: str = 'datasets/geoben2/pastis',
     seed: int = 42,
     temporal_aggregation: str = 'median',
+    num_time_steps: int = 10,
     starting_modality: str = 's2',
+    data_normalizer=None,
 ) -> tuple:
     """
     Create 5 dataloaders for PASTIS (semantic segmentation) matching the SHOT interface.
@@ -369,6 +434,8 @@ def get_pastis_loaders(
 
     Args:
         temporal_aggregation: How to collapse time dimension. 'mean' or 'median'.
+        num_time_steps: Number of timestamps to sample before aggregation. Train uses
+            random sampling; val/test use uniform sampling.
         starting_modality: Which modality is available at stage 0 ('s2' or 's1').
             train1/val1 will contain only this modality; train2/val2/test contain both.
 
@@ -392,16 +459,22 @@ def get_pastis_loaders(
         's1_desc': list(PASTIS_S1_DESC_BANDS),
     }
 
-    common_kwargs = dict(
+    train_kwargs = dict(
         temporal_aggregation=temporal_aggregation,
+        num_time_steps=num_time_steps,
         label_type='semantic_seg',
-        data_normalizer=ZScoreNormalizer,
+        data_normalizer=data_normalizer or ZScoreNormalizer,
+    )
+    eval_kwargs = dict(
+        label_type='semantic_seg',
+        data_normalizer=data_normalizer or ZScoreNormalizer,
     )
 
-    # Always load full S2+S1 for all splits
-    train_full    = GeoBenchPASTIS(root=root, split='train', band_order=full_band_order, **common_kwargs)
-    val_full      = GeoBenchPASTIS(root=root, split='val',   band_order=full_band_order, **common_kwargs)
-    test_full     = GeoBenchPASTIS(root=root, split='test',  band_order=full_band_order, **common_kwargs)
+    # Train: random temporal subsampling → aggregation
+    # Val/test: median over ALL timestamps (deterministic, no subsampling)
+    train_full = GeoBenchPASTISRandom(root=root, split='train', band_order=full_band_order, **train_kwargs)
+    val_full   = GeoBenchPASTISMedianAll(root=root, split='val',  band_order=full_band_order, **eval_kwargs)
+    test_full  = GeoBenchPASTISMedianAll(root=root, split='test', band_order=full_band_order, **eval_kwargs)
 
     test_ds = StackedModalityDataset(test_full, modality_stack_order=full_stack_order, merge_modalities=s1_merge)
 
@@ -435,15 +508,27 @@ def get_pastis_loaders(
     print(f"PASTIS — Train1: {len(train1_ds)}, Train2: {len(train2_ds)}, Test: {len(test_ds)} (S2+S1)")
     print(f"PASTIS — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
 
-    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, timeout=30)
-    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, timeout=30)
-    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, timeout=30)
-    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, timeout=30)
-    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, timeout=30)
+    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=True, timeout=30)
+    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=True, timeout=30)
+    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
     # Build modality_slices from a sample (trigger lazy init)
     _ = train1_ds[0]
     modality_slices = train1_ds.modality_slices  # {'s2': slice(0,10), 's1': slice(10,16)}
+
+    # Diagnostics: check normalization of first batch
+    sample = train1_ds[0]
+    img = sample['image']  # [C, H, W]
+    print(f"\nPASTIS normalization diagnostics (single sample, image shape={tuple(img.shape)}):")
+    for mod, sl in modality_slices.items():
+        x = img[sl]  # [C_mod, H, W]
+        print(f"  {mod}: mean={x.mean():.3f}  std={x.std():.3f}  min={x.min():.3f}  max={x.max():.3f}")
+    if 'mask' in sample:
+        mask = sample['mask']
+        unique = mask.unique().tolist()
+        print(f"  mask: shape={tuple(mask.shape)}  dtype={mask.dtype}  unique classes={unique[:20]}{'...' if len(unique)>20 else ''}")
 
     start_channels = len(PASTIS_S2_BANDS) if starting_modality == 's2' else n_s1
     new_channels   = n_s1 if starting_modality == 's2' else len(PASTIS_S2_BANDS)
@@ -463,3 +548,5 @@ def get_pastis_loaders(
     )
 
     return train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config
+
+# python -u finetune_geotorch_model.py --train_mode fft --epochs 10 --batch_size 16 --num_workers 4 --checkpoint_name pastis_geotorch_fft

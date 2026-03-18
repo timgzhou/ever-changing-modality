@@ -12,3 +12,4 @@ accelerate
 torchgeo
 seaborn
 geobenchv2
+torchinfo

@@ -423,6 +423,127 @@ class EVAN(nn.Module):
         print("\nWeights loaded successfully!")
         print("=== DINO weight loading complete ===\n")
 
+    def load_pretrained_torchgeo(self, weights, load_weights: bool = True, band_indices: list | None = None):
+        """
+        Load pretrained weights from a torchgeo ViT (timm-style) into EVAN.
+
+        The torchgeo checkpoint uses timm key naming (blocks.*, patch_embed.proj.*,
+        cls_token, mask_token) and has pre-merged qkv. pos_embed is dropped since
+        EVAN uses RoPE. storage_tokens are left randomly initialized (torchgeo ViTs
+        have no register tokens).
+
+        Args:
+            weights: torchgeo Weights enum (e.g. ViTSmall16_Weights.SENTINEL2_ALL_DINO),
+                     or a state_dict directly, or None.
+            load_weights: If False, skip loading and return immediately.
+            band_indices: Optional list of channel indices to select from the teacher's
+                          patch_embed.proj.weight (shape [D, 13, 16, 16]). Use this when
+                          your dataset has fewer bands than the teacher (e.g. BEN-v2 drops
+                          B10 → [0,1,2,3,4,5,6,7,8,9,11,12], PASTIS drops B1/B9/B10 →
+                          [1,2,3,4,5,6,7,8,11,12]). Must match starting_n_chans.
+        """
+        if not load_weights or weights is None:
+            print("pretrained=False or weights=None, not loading weights and returning directly.")
+            return
+
+        print(f"\n=== Loading pretrained torchgeo weights ===")
+
+        # Accept either a Weights enum or a raw state_dict
+        if isinstance(weights, dict):
+            tg_checkpoint = weights
+        else:
+            tg_checkpoint = weights.get_state_dict(progress=True)
+
+        original_params = sum(p.numel() for p in tg_checkpoint.values())
+        print(f"  Original checkpoint parameters: {original_params:,}")
+
+        # Keys to silently drop (not applicable to EVAN)
+        drop_prefixes = ('pos_embed', 'head.', 'fc_norm.')
+
+        checkpoint = {}
+        for key, value in tg_checkpoint.items():
+            if any(key.startswith(p) for p in drop_prefixes):
+                continue
+
+            new_key = key
+            # cls_token → cls_tokens.<starting_modality>  (unsqueeze if needed)
+            if new_key == 'cls_token':
+                new_key = f'cls_tokens.{self.starting_modality}'
+                if value.ndim == 2:
+                    value = value.unsqueeze(1)
+            # mask_token: shape is (1, 1, D) in timm, EVAN wants (1, D)
+            elif new_key == 'mask_token':
+                if value.ndim == 3:
+                    value = value.squeeze(1)
+            # patch_embed.proj.* → patch_embedders.<starting_modality>.proj.*
+            elif new_key.startswith('patch_embed.'):
+                new_key = new_key.replace('patch_embed.', f'patch_embedders.{self.starting_modality}.')
+
+            checkpoint[new_key] = value
+
+        # Slice patch embedder to match dataset band count
+        if band_indices is not None:
+            patch_embed_key = f'patch_embedders.{self.starting_modality}.proj.weight'
+            if patch_embed_key in checkpoint:
+                checkpoint[patch_embed_key] = checkpoint[patch_embed_key][:, band_indices, :, :]
+                print(f"  Sliced patch_embed channels: {len(band_indices)}/13 bands (indices {band_indices})")
+
+        transferred_params = sum(p.numel() for p in checkpoint.values())
+        dropped_params = original_params - transferred_params
+        print(f"  Transferred parameters: {transferred_params:,}")
+        print(f"  Dropped (pos_embed, head): {dropped_params:,}")
+
+        # FFT mode: copy block weights into modality-specific / fusion adaptors
+        if self.tz_modality_specific_layer_augmenter == "fft":
+            print(f"\n  FFT mode: Copying first {self.tz_fusion_time} blocks to {self.starting_modality} modality-specific layers...")
+            for i in range(self.tz_fusion_time):
+                for key, value in list(checkpoint.items()):
+                    if key.startswith(f'blocks.{i}.'):
+                        mod_key = key.replace(f'blocks.{i}.', f'modality_specific_layer_adaptors.{self.starting_modality}.{i}.')
+                        checkpoint[mod_key] = value.clone()
+
+        if self.tz_modality_fusion_layer_augmenter == "fft":
+            print(f"\n  FFT mode: Copying blocks {self.tz_fusion_time}-{self.n_blocks-1} to {self.starting_modality} fusion layers...")
+            for i in range(self.tz_fusion_time, self.n_blocks):
+                for key, value in list(checkpoint.items()):
+                    if key.startswith(f'blocks.{i}.'):
+                        mod_key = key.replace(f'blocks.{i}.', f'modality_fusion_lora_adaptors.{self.starting_modality}.{i - self.tz_fusion_time}.')
+                        checkpoint[mod_key] = value.clone()
+
+        result = self.load_state_dict(checkpoint, strict=False)
+
+        def is_expected_missing(key):
+            if key == 'rope_embed.periods':
+                return True
+            if key.startswith('storage_tokens.'):  # no reg tokens in torchgeo ViT
+                return True
+            if self.tz_modality_specific_layer_augmenter == "lora":
+                if 'modality_specific_layer_adaptors' in key:
+                    return True
+            if any(p in key for p in ['modality_encoders', 'modality_fusion_lora_adaptors']):
+                return True
+            return False
+
+        unexpected_missing = [k for k in result.missing_keys if not is_expected_missing(k)]
+        if unexpected_missing:
+            unexpected_missing_params = sum(
+                self.state_dict()[k].numel() for k in unexpected_missing if k in self.state_dict()
+            )
+            print(f"  !!  Unexpected missing keys: {len(unexpected_missing)}")
+            print(f"    Keys: {unexpected_missing}")
+            print(f"    Parameters: {unexpected_missing_params:,}")
+
+        if result.unexpected_keys:
+            untransferred_params = sum(
+                checkpoint[k].numel() for k in result.unexpected_keys if k in checkpoint
+            )
+            print(f"  !!  Unexpected keys (in checkpoint but not in EVAN): {len(result.unexpected_keys)}")
+            print(f"    First 10 keys: {result.unexpected_keys[:10]}")
+            print(f"    Untransferred parameters: {untransferred_params:,}")
+
+        print("\nWeights loaded successfully!")
+        print("=== torchgeo weight loading complete ===\n")
+
     def create_modality_components(self, modality_key: str, in_chans: int):
         """
         Add all needed components to EVAN.
@@ -1101,6 +1222,55 @@ def evan_large(pretrained: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", loa
     return model
 
 
+def evan_small_s2(weights=None, load_weights: bool = True, band_indices: list | None = None, **kwargs):
+    """
+    Create EVAN-Small initialised from a torchgeo Sentinel-2 ViT-Small checkpoint.
+
+    Uses RoPE (EVAN default) rather than the teacher's absolute pos_embed — the
+    positional structure is recovered through distillation. No LayerScale (the
+    torchgeo DINO v1/v2 checkpoint has none).
+
+    Example:
+        from torchgeo.models import ViTSmall16_Weights
+        # Full 13-band
+        evan = evan_small_s2(weights=ViTSmall16_Weights.SENTINEL2_ALL_DINO)
+        # BEN-v2 (12 bands, drop B10)
+        evan = evan_small_s2(weights=..., band_indices=BENV2_BAND_INDICES, starting_n_chans=12)
+        # PASTIS (10 bands, drop B1/B9/B10)
+        evan = evan_small_s2(weights=..., band_indices=PASTIS_BAND_INDICES, starting_n_chans=10)
+
+    Args:
+        weights: torchgeo Weights enum or raw state_dict. None = random init.
+        load_weights: If False, skip weight loading.
+        band_indices: Channel indices into the teacher's 13-band patch embedder.
+            Must match starting_n_chans if both are provided.
+            BENV2_BAND_INDICES  = [0,1,2,3,4,5,6,7,8,9,11,12]   # drop B10
+            PASTIS_BAND_INDICES = [1,2,3,4,5,6,7,8,11,12]        # drop B1,B9,B10
+        **kwargs: Forwarded to EVAN (device, tz_fusion_time, tz_lora_rank,
+                  starting_n_chans, etc.)
+    """
+    starting_n_chans = kwargs.pop('starting_n_chans', len(band_indices) if band_indices is not None else 13)
+    kwargs.setdefault('starting_modality', 's2')
+    model = EVAN(
+        patch_size=16,
+        embed_dim=384,
+        depth=12,
+        num_heads=6,
+        ffn_ratio=4,
+        layerscale_init=None,   # torchgeo ViT has no LayerScale
+        starting_n_chans=starting_n_chans,
+        **kwargs,
+    )
+    model.load_pretrained_torchgeo(weights, load_weights=load_weights, band_indices=band_indices)
+    return model
+
+
+# Convenience band index constants for torchgeo 13-band S2 checkpoints
+# torchgeo order: B1,B2,B3,B4,B5,B6,B7,B8,B8a,B9,B10,B11,B12
+BENV2_BAND_INDICES  = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12]   # drop B10 (index 10)
+PASTIS_BAND_INDICES = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]          # drop B1 (0), B9 (9), B10 (10)
+
+
 class EVANClassifier(nn.Module):
     """Classifier head on top of EVAN for EuroSAT."""
 
@@ -1442,10 +1612,13 @@ class UNetDecoder(nn.Module):
 
 class EvanSegmenter(nn.Module):
     """
-    Segmentation head on top of EVAN using a UNet-style decoder.
+    Segmentation head on top of EVAN.
 
     Mirrors EVANClassifier's interface so it can be used as a drop-in replacement
     in shot_ete.py, shot.py, and train_stage0.py when task_type == 'segmentation'.
+
+    decoder_type='linear' (default): 1×1 Conv2d on patch tokens + bilinear upsample.
+    decoder_type='unet': 4-stage ConvTranspose2d UNetDecoder.
     """
 
     def __init__(
@@ -1453,6 +1626,7 @@ class EvanSegmenter(nn.Module):
         evan_model,
         num_classes: int,
         decoder_strategy: str = 'mean',
+        decoder_type: str = 'linear',
         device: str = 'cuda',
     ):
         """
@@ -1461,19 +1635,23 @@ class EvanSegmenter(nn.Module):
             num_classes: Number of segmentation classes (e.g. 19 for PASTIS).
             decoder_strategy: 'mean' (shared decoder on averaged patch tokens) or
                               'ensemble' (per-modality decoders, average logits).
+            decoder_type: 'linear' (1×1 Conv2d + bilinear upsample) or
+                          'unet' (UNetDecoder with 4 ConvTranspose2d stages).
             device: Target device.
         """
         super().__init__()
         self.evan = evan_model
         self.num_classes = num_classes
         self.decoder_strategy = decoder_strategy
+        self.decoder_type = decoder_type
         self.device = device
 
         embed_dim = evan_model.embed_dim
-        patch_hw = evan_model.img_size // evan_model.patch_size
+        self._patch_hw = evan_model.img_size // evan_model.patch_size
+        self._img_size = evan_model.img_size
 
         if decoder_strategy == 'mean':
-            self.decoder = UNetDecoder(embed_dim, num_classes, patch_hw)
+            self.decoder = self._make_decoder(embed_dim)
             self.modality_decoders = None
         elif decoder_strategy == 'ensemble':
             self.decoder = None
@@ -1482,11 +1660,28 @@ class EvanSegmenter(nn.Module):
         else:
             raise ValueError(f"Unknown decoder_strategy: {decoder_strategy!r}")
 
+    def _make_decoder(self, embed_dim: int) -> nn.Module:
+        """Return a decoder head according to decoder_type."""
+        if self.decoder_type == 'unet':
+            return UNetDecoder(embed_dim, self.num_classes, self._patch_hw)
+        else:  # 'linear'
+            return nn.Conv2d(embed_dim, self.num_classes, kernel_size=1)
+
+    def _apply_decoder(self, head: nn.Module, patch_tokens: torch.Tensor) -> torch.Tensor:
+        """Run patch_tokens [B, N, D] through head and return [B, C, H, W]."""
+        if self.decoder_type == 'unet':
+            return head(patch_tokens)
+        # linear: reshape to spatial map, apply 1×1 conv, bilinear upsample
+        B, N, D = patch_tokens.shape
+        feat_map = patch_tokens.permute(0, 2, 1).reshape(B, D, self._patch_hw, self._patch_hw)
+        logits_small = head(feat_map)
+        return F.interpolate(logits_small, size=(self._img_size, self._img_size),
+                             mode='bilinear', align_corners=False)
+
     def instantiate_modality_decoder(self, modality_key: str):
-        """Create and register a UNetDecoder for a new modality (ensemble strategy)."""
+        """Create and register a decoder for a new modality (ensemble strategy)."""
         embed_dim = self.evan.embed_dim
-        patch_hw = self.evan.img_size // self.evan.patch_size
-        self.modality_decoders[modality_key] = UNetDecoder(embed_dim, self.num_classes, patch_hw)
+        self.modality_decoders[modality_key] = self._make_decoder(embed_dim).to(self.device)
 
     def segment_from_features(self, features_dict: dict) -> torch.Tensor:
         """
@@ -1505,7 +1700,7 @@ class EvanSegmenter(nn.Module):
                 for mod in sorted(features_dict.keys())
             ]
             avg_patches = torch.stack(patch_maps).mean(dim=0)  # [B, N, D]
-            return self.decoder(avg_patches)
+            return self._apply_decoder(self.decoder, avg_patches)
 
         elif self.decoder_strategy == 'ensemble':
             all_logits = []
@@ -1513,7 +1708,7 @@ class EvanSegmenter(nn.Module):
                 if mod not in self.modality_decoders:
                     raise RuntimeError(f"No decoder for modality '{mod}'.")
                 patch_tokens = features_dict[mod]['x_norm_patchtokens']
-                all_logits.append(self.modality_decoders[mod](patch_tokens))
+                all_logits.append(self._apply_decoder(self.modality_decoders[mod], patch_tokens))
             return torch.stack(all_logits).mean(dim=0)
 
     def forward(self, x: dict) -> torch.Tensor:

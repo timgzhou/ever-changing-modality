@@ -41,3 +41,12 @@ benv2,s1,s2,0.0001,0.001,80,0.75,0.3,0.0,0.0,48972070,distill+prefusion,False,0,
 benv2,s1,s2,0.0001,0.001,80,0.75,0.3,0.0,0.0,48972070,distill+mae,False,0,mAP,45.83,44.32,44.98,47.86,44.93,44.32,44.98,47.86,checkpoints/benv2_s1_s0.pt,checkpoints/benv2_s1_to_s2_dm.pt
 benv2,s1,s2,0.0001,0.001,80,0.75,0.3,0.0,0.0,48972070,distill+latent,False,0,mAP,45.18,43.08,44.66,46.23,45.18,43.29,47.04,46.23,checkpoints/benv2_s1_s0.pt,checkpoints/benv2_s1_to_s2_dl.pt
 benv2,s1,s2,0.0001,0.001,80,0.75,0.3,0.0,0.0,48972070,distill+prefusion+mae+latent,False,0,mAP,47.94,43.26,44.84,48.21,47.94,43.20,44.10,48.21,checkpoints/benv2_s1_s0.pt,checkpoints/benv2_s1_to_s2_dpml.pt
+benv2,s2,s1,0.0001,0.001,80,0.75,0.3,0.3,0.0,48972070,distill+ce,False,0,mAP,42.66,56.59,57.89,55.78,42.28,57.04,57.89,0.00,checkpoints/benv2_s2_s0.pt,checkpoints/benv2_s2_to_s1_dc.pt
+benv2,s2,s1,0.0001,0.001,80,0.75,0.3,0.3,0.0,48972070,distill+ce+prefusion,False,0,mAP,43.53,57.55,57.72,56.53,40.31,57.14,57.91,0.00,checkpoints/benv2_s2_s0.pt,checkpoints/benv2_s2_to_s1_dcp.pt
+benv2,s2,s1,0.0001,0.001,80,0.75,0.3,0.3,0.0,48972070,distill+ce+mae,False,0,mAP,42.66,58.34,58.98,56.25,42.66,57.88,59.01,0.00,checkpoints/benv2_s2_s0.pt,checkpoints/benv2_s2_to_s1_dcm.pt
+benv2,s2,s1,0.0001,0.001,80,0.75,0.3,0.3,0.0,48972070,distill+ce+latent,False,0,mAP,43.54,57.87,57.36,57.06,43.00,58.84,57.49,0.00,checkpoints/benv2_s2_s0.pt,checkpoints/benv2_s2_to_s1_dcl.pt
+benv2,s2,s1,0.0001,0.001,80,0.75,0.3,0.3,0.0,48972070,distill+ce+prefusion+mae+latent,False,0,mAP,42.88,57.73,58.82,57.45,40.00,57.70,57.49,0.00,checkpoints/benv2_s2_s0.pt,checkpoints/benv2_s2_to_s1_dcpml.pt
+benv2,s1,s2,0.0001,0.001,80,0.75,0.3,0.3,0.0,48972070,distill+ce,False,0,mAP,47.02,43.68,48.72,48.75,45.99,45.98,48.96,0.00,checkpoints/benv2_s1_s0.pt,checkpoints/benv2_s1_to_s2_dc.pt
+benv2,s1,s2,0.0001,0.001,80,0.75,0.3,0.3,0.0,48972070,distill+ce+prefusion,False,0,mAP,43.63,42.49,45.97,45.14,43.63,44.26,45.30,0.00,checkpoints/benv2_s1_s0.pt,checkpoints/benv2_s1_to_s2_dcp.pt
+benv2,s1,s2,0.0001,0.001,80,0.75,0.3,0.3,0.0,48972070,distill+ce+latent,False,0,mAP,47.35,45.72,48.70,48.27,47.10,45.72,49.15,0.00,checkpoints/benv2_s1_s0.pt,checkpoints/benv2_s1_to_s2_dcl.pt
+benv2,s1,s2,0.0001,0.001,80,0.75,0.3,0.3,0.0,48972070,distill+ce+prefusion+mae+latent,False,0,mAP,48.41,44.60,46.23,48.37,48.41,43.98,44.44,0.00,checkpoints/benv2_s1_s0.pt,checkpoints/benv2_s1_to_s2_dcpml.pt

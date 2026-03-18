@@ -1,0 +1,12 @@
+dataset,model_type,modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,test_metric,best_test_metric(oracle),best_epoch,best_val_metric,metric_name,saved_checkpoint,global_rep
+pastis,evan_small,s2,fft,32,fft,0.0001,23857196,2,3.49,3.49,2,3.55,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,23857196,2,4.73,4.73,2,4.84,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,23847980,2,4.87,4.87,2,4.92,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,23847980,16,7.99,7.99,16,7.81,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,23847980,1,3.09,3.09,1,3.16,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,23847980,2,4.24,4.24,2,4.37,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,22287380,16,19.13,19.13,16,18.65,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,22296596,16,11.79,11.79,16,11.78,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,22287380,64,18.79,19.00,48,18.50,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s1,fft,32,fft,0.0001,21903380,64,11.88,12.26,25,12.20,mIoU,checkpoints/pastis_s1_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,22287380,64,19.15,19.28,63,18.40,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
