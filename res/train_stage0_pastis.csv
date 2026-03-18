@@ -10,3 +10,9 @@ pastis,evan_small,s2,fft,32,fft,0.0001,22296596,16,11.79,11.79,16,11.78,mIoU,che
 pastis,evan_small,s2,fft,32,fft,0.0001,22287380,64,18.79,19.00,48,18.50,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
 pastis,evan_small,s1,fft,32,fft,0.0001,21903380,64,11.88,12.26,25,12.20,mIoU,checkpoints/pastis_s1_s0.pt,clstoken
 pastis,evan_small,s2,fft,32,fft,0.0001,22287380,64,19.15,19.28,63,18.40,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,rgb,fft,32,fft,0.0001,21608468,16,12.58,13.23,12,12.44,mIoU,checkpoints/pastis_rgb_s0.pt,clstoken
+pastis,evan_small,rgb,fft,32,fft,0.0001,21830036,2,8.14,8.14,2,7.78,mIoU,checkpoints/pastis_rgb_s0.pt,clstoken
+pastis,evan_small,rgb,fft,32,fft,0.0001,21830036,8,11.44,11.44,8,11.08,mIoU,checkpoints/pastis_rgb_s0.pt,clstoken
+pastis,evan_small,rgb,fft,32,fft,0.0001,21830036,16,13.16,13.72,13,12.63,mIoU,checkpoints/pastis_rgb_s0.pt,clstoken
+pastis,evan_small,s2,fft,32,fft,0.0001,22508948,64,19.77,19.86,16,18.54,mIoU,checkpoints/pastis_s2_s0.pt,clstoken
+pastis,evan_small,s1,fft,32,fft,0.0001,22124948,64,11.82,12.49,30,11.75,mIoU,checkpoints/pastis_s1_s0.pt,clstoken

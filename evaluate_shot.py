@@ -56,7 +56,7 @@ def load_model_and_unfreeze_classifier(checkpoint_path,classifier_strategy,devic
     model=EVANClassifier.from_checkpoint(checkpoint_path,device)
     model.switch_strategy(classifier_strategy)
     model.freeze_all()
-    model.set_requires_grad('all', classifier=True)
+    model.set_requires_grad('all', head=True)
     model = model.to(device)
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)

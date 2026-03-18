@@ -126,8 +126,20 @@ def patchify(imgs, patch_size):
     patches = rearrange(imgs, 'b c (h ph) (w pw) -> b (h w) (ph pw c)', ph=patch_size, pw=patch_size)
     return patches
 
-def distillation_loss(student_logits, teacher_logits, temperature=2.0):
-    """Compute KL divergence loss between student and teacher soft labels."""
+def distillation_loss(student_logits, teacher_logits, temperature=2.0, ignore_index=None, labels=None):
+    """Compute KL divergence loss between student and teacher soft labels.
+
+    For segmentation [B, C, H, W] logits, pass labels [B, H, W] and ignore_index
+    to mask out void/background pixels before computing the KL divergence.
+    """
+    if student_logits.dim() == 4:
+        C = student_logits.shape[1]
+        student_logits = student_logits.permute(0, 2, 3, 1).reshape(-1, C)
+        teacher_logits = teacher_logits.permute(0, 2, 3, 1).reshape(-1, C)
+        if ignore_index is not None and labels is not None:
+            mask = labels.reshape(-1) != ignore_index
+            student_logits = student_logits[mask]
+            teacher_logits = teacher_logits[mask]
     student_soft = F.log_softmax(student_logits / temperature, dim=-1)
     teacher_soft = F.softmax(teacher_logits / temperature, dim=-1)
     return F.kl_div(student_soft, teacher_soft, reduction='batchmean') * (temperature ** 2)
@@ -858,8 +870,10 @@ def _unlabeled_batch_step(
     mae_mask_ratio, modality_dropout, mse_fn,
     distillation_temperature, use_mfla, in_warmup, teacher_is_peeking,
     effective_labeled_freq, patch_size, segmentation, device,
+    label_key='label', ignore_index=-100,
 ):
     """Process one unlabeled (multimodal) batch. Returns (total_loss, loss_dict, masking_info)."""
+    seg_labels = batch[label_key].to(device) if (segmentation and label_key in batch) else None
     full_multimodal_input = create_multimodal_batch(
         batch, modality_bands_dict=modality_bands_dict, modalities=tuple(all_modalities)
     )
@@ -963,11 +977,10 @@ def _unlabeled_batch_step(
             if segmentation and model.modality_decoders is not None and mod in model.modality_decoders:
                 patch_tokens = student_fused[mod]['x_norm_patchtokens']
                 mod_logits = model._apply_decoder(model.modality_decoders[mod], patch_tokens)
-                # reshape [B, C, H, W] -> [B*H*W, C] for KL distillation
-                B, C, H, W = mod_logits.shape
-                mod_logits_flat = mod_logits.permute(0, 2, 3, 1).reshape(-1, C)
-                teach_logits_flat = teacher_logits.permute(0, 2, 3, 1).reshape(-1, C)
-                distill_loss = distill_loss + distillation_loss(mod_logits_flat, teach_logits_flat, distillation_temperature)
+                distill_loss = distill_loss + distillation_loss(
+                    mod_logits, teacher_logits, distillation_temperature,
+                    ignore_index=ignore_index, labels=seg_labels,
+                )
                 distill_count += 1
             elif not segmentation and mod in model.modality_classifiers:
                 cls_token = student_fused[mod]['x_norm_clstoken']
@@ -1217,11 +1230,7 @@ def train_shot(
     if is_segmenter:
         if model.decoder_strategy != 'ensemble':
             print(f"!! Converting decoder from {model.decoder_strategy} to ensemble mode for label distillation")
-            # EvanSegmenter has no switch_strategy; manually convert mean→ensemble
-            model.decoder_strategy = 'ensemble'
-            model.modality_decoders = torch.nn.ModuleDict()
-            model.modality_decoders[model.evan.starting_modality] = model.decoder
-            model.decoder = None
+            model.switch_strategy('ensemble')
         for mod in all_modalities:
             if mod not in model.modality_decoders:
                 model.instantiate_modality_decoder(mod)
@@ -1234,9 +1243,8 @@ def train_shot(
                     model.instantiate_modality_classifier(mod)
 
     model.freeze_all()
-    head_kwarg = {'decoder': True} if is_segmenter else {'classifier': True}
-    model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=use_mfla, msla=True, patch_embedders=True, **head_kwarg)
-    model.set_requires_grad("backbone", mask_token=False, blocks=True, norm=True)
+    model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=use_mfla, msla=True, patch_embedders=True, head=True)
+    model.set_requires_grad("backbone", blocks=True, norm=True)
 
     evan = model.evan
     embed_dim = evan.embed_dim
@@ -1346,6 +1354,7 @@ def train_shot(
                     args.mae_mask_ratio, args.modality_dropout, mse_fn,
                     distillation_temperature, use_mfla, in_warmup, teacher_is_peeking,
                     effective_labeled_freq, patch_size, segmentation, device,
+                    label_key=label_key, ignore_index=ignore_index,
                 )
                 for mod in all_modalities:
                     if masking_info['modality_dropped'][mod]:

@@ -108,7 +108,7 @@ class EVAN(nn.Module):
         else:
             self.local_cls_norm = None
         self.head = nn.Identity()
-        self.mask_token = nn.Parameter(torch.empty(1, embed_dim, device=device))
+
 
         # ============ EVAN-Specific Components ============
         # Initialize multimodal components
@@ -120,7 +120,7 @@ class EVAN(nn.Module):
         self.modality_specific_layer_adaptors = nn.ModuleDict() # shortened as "msla" as followed
         self.modality_encoders = nn.ParameterDict()
         self.modality_fusion_lora_adaptors = nn.ModuleDict()
-        self.modality_specific_mask_tokens = nn.ParameterDict()
+
         # Initialize modality-specific components for starting_modality (starting_n_chans)
         self.add_new_patch_embedders(starting_modality,starting_n_chans)
         self.add_new_cls_token(starting_modality)
@@ -128,7 +128,7 @@ class EVAN(nn.Module):
         self.add_new_msla(starting_modality)
         self.add_modality_encoder(starting_modality)
         self.add_new_mfla(starting_modality)
-        self.add_new_mask_token(starting_modality)
+
 
     # Helper Functions to initialize and add new component as modality comes in.
     def initialize_rope_embed(self):
@@ -147,7 +147,13 @@ class EVAN(nn.Module):
         )
     def initialize_blocks(self):
         logger.info(f"using {self.ffn_layer} layer as FFN")
-        blocks_list = self.create_fft_list(self.n_blocks)
+        # In FFT-MSLA mode the first tz_fusion_time blocks are fully replaced by
+        # per-modality adaptors and are never called in the forward pass.
+        # Only allocate the fusion-stage blocks to avoid dead frozen parameters.
+        if self.tz_modality_specific_layer_augmenter == "fft":
+            blocks_list = self.create_fft_list(self.n_blocks - self.tz_fusion_time)
+        else:
+            blocks_list = self.create_fft_list(self.n_blocks)
         self.chunked_blocks = False
         self.blocks = nn.ModuleList(blocks_list)
     def add_new_patch_embedders(self,modality_name,in_chans):
@@ -182,8 +188,8 @@ class EVAN(nn.Module):
             self.modality_specific_layer_adaptors[modality] = self.create_lora_list(self.tz_fusion_time)
         elif self.tz_modality_specific_layer_augmenter == "fft":
             self.modality_specific_layer_adaptors[modality] = self.create_fft_list(self.tz_fusion_time)
-            if init is not None:
-                self.copy_weights_to_adaptor(self.modality_specific_layer_adaptors[modality], source=init, block_offset=0)
+            # backbone blocks 0..tz_fusion_time-1 are not allocated (initialize_blocks skips them),
+            # so weight init from backbone is deferred to the pretrained weight loaders.
         else:
             raise RuntimeError(f"unrecognized {self.tz_modality_specific_layer_augmenter=}")
     def add_modality_encoder(self,modality_name):
@@ -205,9 +211,10 @@ class EVAN(nn.Module):
         elif self.tz_modality_fusion_layer_augmenter == "fft":
             self.modality_fusion_lora_adaptors[modality] = self.create_fft_list(num_fusion_blocks)
             if init is not None:
-                self.copy_weights_to_adaptor(self.modality_fusion_lora_adaptors[modality], source=init, block_offset=self.tz_fusion_time)
-    def add_new_mask_token(self,modality):
-        self.modality_specific_mask_tokens[modality]=nn.Parameter(torch.randn(self.embed_dim, device=self.device))
+                # self.blocks starts at the first fusion block (offset 0) when MSLA is fft,
+                # or at tz_fusion_time when MSLA is lora (full backbone allocated).
+                block_offset = 0 if self.tz_modality_specific_layer_augmenter == "fft" else self.tz_fusion_time
+                self.copy_weights_to_adaptor(self.modality_fusion_lora_adaptors[modality], source=init, block_offset=block_offset)
     def create_lora_list(self,length):
         return nn.ModuleList([
             LoRALayer(self.embed_dim, rank=self.tz_lora_rank, device=self.device) for _ in range(length)
@@ -356,19 +363,25 @@ class EVAN(nn.Module):
         print(f"    - From HuggingFace checkpoint: {checkpoint_params:,}")
         print(f"    - Created (K bias zeros): {created_params:,}")
 
-        # For FFT mode: Copy first tz_fusion_time blocks to RGB modality-specific layers
+        # For FFT mode: Copy first tz_fusion_time blocks to modality-specific layers
         if self.tz_modality_specific_layer_augmenter == "fft":
             print(f"\n  FFT mode: Copying first {self.tz_fusion_time} DINO blocks to {self.starting_modality} modality-specific layers...")
             fft_params_copied = 0
             for i in range(self.tz_fusion_time):
-                # Copy all weights from blocks[i] to modality_specific_layer_adaptors.rgb[i]
                 for key, value in list(checkpoint.items()):
                     if key.startswith(f'blocks.{i}.'):
-                        # Create corresponding key for RGB modality-specific layer
-                        rgb_key = key.replace(f'blocks.{i}.', f'modality_specific_layer_adaptors.{self.starting_modality}.{i}.')
-                        checkpoint[rgb_key] = value.clone()
+                        msla_key = key.replace(f'blocks.{i}.', f'modality_specific_layer_adaptors.{self.starting_modality}.{i}.')
+                        checkpoint[msla_key] = value.clone()
                         fft_params_copied += value.numel()
             print(f"    Copied {fft_params_copied:,} parameters for {self.starting_modality} FFT blocks")
+            # Remap remaining blocks.{tz_fusion_time+j} → blocks.{j} so they land in the
+            # trimmed self.blocks (which starts at the first fusion block).
+            for j in range(self.n_blocks - self.tz_fusion_time):
+                src_idx = self.tz_fusion_time + j
+                for key in list(checkpoint.keys()):
+                    if key.startswith(f'blocks.{src_idx}.'):
+                        new_key = key.replace(f'blocks.{src_idx}.', f'blocks.{j}.')
+                        checkpoint[new_key] = checkpoint.pop(key)
         
         if self.tz_modality_fusion_layer_augmenter == "fft":
             print(f"\n  FFT mode: Copying last {self.n_blocks} - {self.tz_fusion_time} DINO blocks to {self.starting_modality} modality-fusion layers...")
@@ -410,14 +423,17 @@ class EVAN(nn.Module):
             print(f"    Parameters: {unexpected_missing_params:,}")
 
         # Report unexpected keys (in DINO checkpoint but not in EVAN)
-        if len(result.unexpected_keys) > 0:
+        # mask_token was removed from EVAN — expected to be missing from the model side
+        expected_missing = {'mask_token'}
+        unexpected_missing = [k for k in result.unexpected_keys if k not in expected_missing]
+        if len(unexpected_missing) > 0:
             untransferred_params = sum(
                 checkpoint[k].numel()
-                for k in result.unexpected_keys
+                for k in unexpected_missing
                 if k in checkpoint
             )
-            print(f"  !!  Unexpected keys (in DINO but not loaded into EVAN): {len(result.unexpected_keys)}")
-            print(f"    First 10 keys: {result.unexpected_keys[:10]}")
+            print(f"  !!  Unexpected keys (in DINO but not loaded into EVAN): {len(unexpected_missing)}")
+            print(f"    First 10 keys: {unexpected_missing[:10]}")
             print(f"    Untransferred parameters: {untransferred_params:,}")
 
         print("\nWeights loaded successfully!")
@@ -501,6 +517,13 @@ class EVAN(nn.Module):
                     if key.startswith(f'blocks.{i}.'):
                         mod_key = key.replace(f'blocks.{i}.', f'modality_specific_layer_adaptors.{self.starting_modality}.{i}.')
                         checkpoint[mod_key] = value.clone()
+            # Remap remaining blocks.{tz_fusion_time+j} → blocks.{j} for trimmed self.blocks.
+            for j in range(self.n_blocks - self.tz_fusion_time):
+                src_idx = self.tz_fusion_time + j
+                for key in list(checkpoint.keys()):
+                    if key.startswith(f'blocks.{src_idx}.'):
+                        new_key = key.replace(f'blocks.{src_idx}.', f'blocks.{j}.')
+                        checkpoint[new_key] = checkpoint.pop(key)
 
         if self.tz_modality_fusion_layer_augmenter == "fft":
             print(f"\n  FFT mode: Copying blocks {self.tz_fusion_time}-{self.n_blocks-1} to {self.starting_modality} fusion layers...")
@@ -533,12 +556,14 @@ class EVAN(nn.Module):
             print(f"    Keys: {unexpected_missing}")
             print(f"    Parameters: {unexpected_missing_params:,}")
 
-        if result.unexpected_keys:
+        expected_missing = {'mask_token'}
+        unexpected_missing = [k for k in result.unexpected_keys if k not in expected_missing]
+        if unexpected_missing:
             untransferred_params = sum(
-                checkpoint[k].numel() for k in result.unexpected_keys if k in checkpoint
+                checkpoint[k].numel() for k in unexpected_missing if k in checkpoint
             )
-            print(f"  !!  Unexpected keys (in checkpoint but not in EVAN): {len(result.unexpected_keys)}")
-            print(f"    First 10 keys: {result.unexpected_keys[:10]}")
+            print(f"  !!  Unexpected keys (in checkpoint but not in EVAN): {len(unexpected_missing)}")
+            print(f"    First 10 keys: {unexpected_missing[:10]}")
             print(f"    Untransferred parameters: {untransferred_params:,}")
 
         print("\nWeights loaded successfully!")
@@ -559,7 +584,7 @@ class EVAN(nn.Module):
         self.add_new_cls_token(modality_key, init_modality=self.starting_modality)
         self.add_new_storage_tokens(modality_key)
         self.add_modality_encoder(modality_key)
-        self.add_new_mask_token(modality_key)
+
         params_after = sum(p.numel() for p in self.parameters())
         new_params = params_after - params_before
         self.supported_modalities.append(modality_key)
@@ -587,14 +612,13 @@ class EVAN(nn.Module):
         logger.info(f"   - Total new parameters: {new_params:,}")
         logger.info(f"   - Currently supported modalities: {self.supported_modalities}")
 
-    def prepare_tokens_with_masks(self, x: Tensor, modality_key: str, masks=None) -> Tuple[Tensor, Tuple[int]]:
+    def prepare_tokens_with_masks(self, x: Tensor, modality_key: str) -> Tuple[Tensor, Tuple[int, int]]:
         """
-        Prepare tokens with optional masks and modality-specific embedder.
+        Prepare tokens with modality-specific embedder.
 
         Args:
             x: Input tensor
             modality_key: Key identifying which modality's embedder and CLS/storage tokens to use
-            masks: Optional mask tensor
 
         Returns:
             Tuple of (tokens with CLS and storage prepended, (H, W) spatial dimensions)
@@ -604,11 +628,7 @@ class EVAN(nn.Module):
         B, H, W, _ = x.shape
         x = x.flatten(1, 2)
 
-        if masks is not None:
-            x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
-            cls_token = self.cls_tokens[modality_key]
-        else:
-            cls_token = self.cls_tokens[modality_key] + 0 * self.mask_token
+        cls_token = self.cls_tokens[modality_key]
         if self.n_storage_tokens > 0:
             storage_tokens = self.storage_tokens[modality_key]
         else:
@@ -631,13 +651,12 @@ class EVAN(nn.Module):
 
         return x, (H, W)
 
-    def forward_features(self, x: Dict[str, Tensor] | List[Tensor], masks: Optional[Tensor] = None) -> Dict[str, Tensor]:
+    def forward_features(self, x: Dict[str, Tensor] | List[Tensor]) -> Dict[str, Tensor]:
         """
         Forward features with multi-modality support.
 
         Args:
-            x: Input tensor, dict of tensors (modality: tensor), or list of tensors
-            masks: Optional mask tensor
+            x: Dict of modality tensors {modality: [B, C, H, W]}
 
         Returns:
             Dictionary with normalized features
@@ -652,7 +671,7 @@ class EVAN(nn.Module):
             raise ValueError(f"Batch sizes must match across modalities, got {batch_sizes}")
 
         # Step 1 & 2: Process through modality-specific layers
-        embedded_modalities = self.forward_modality_specific_features(x, masks)
+        embedded_modalities = self.forward_modality_specific_features(x)
 
         # Step 3: Concatenate patches for fusion (allow cross-modal attention)
         # Store metadata to split back later
@@ -699,22 +718,23 @@ class EVAN(nn.Module):
 
         # Step 4: Process through fusion blocks with cross-modal attention
         # All patches from all modalities attend to each other here!
-        for i in range(self.tz_fusion_time, len(self.blocks)):
+        # self.blocks holds only the fusion-stage blocks (indices 0..n_fusion-1) when
+        # tz_modality_specific_layer_augmenter=="fft", so index with lora_idx directly.
+        for lora_idx in range(len(self.blocks)):
             if self.rope_embed is not None:
                 rope_sincos = self.rope_embed(H=H, W=W)
             else:
                 rope_sincos = None
 
             if self.tz_modality_fusion_layer_augmenter=="lora":
-                x_fused = self.blocks[i](x_fused, rope_sincos)
-                lora_idx = i - self.tz_fusion_time
+                x_fused = self.blocks[lora_idx](x_fused, rope_sincos)
                 lora_output = 0
                 for modality_key in embedded_modalities.keys():
                     lora = self.modality_fusion_lora_adaptors[modality_key][lora_idx]
                     lora_output = lora_output + lora(x_fused)
                 x_fused = x_fused + lora_output
             elif self.tz_modality_fusion_layer_augmenter=="fft":
-                x_fused = self.modality_fusion_lora_adaptors[i](x_fused, rope_sincos)
+                x_fused = self.modality_fusion_lora_adaptors[lora_idx](x_fused, rope_sincos)
 
         # Step 5: Split fused representation back into modality-specific outputs
         # Total CLS/storage tokens = n_modalities * (1 + n_storage_tokens)
@@ -754,12 +774,11 @@ class EVAN(nn.Module):
                 "x_storage_tokens": x_norm_cls_reg[:, 1:],
                 "x_norm_patchtokens": x_norm_patch,
                 "x_prenorm": x_mod,
-                "masks": masks,
             }
 
         return output_dict
 
-    def forward_modality_specific_features(self, x: Dict[str, Tensor], masks: Optional[Tensor] = None) -> Dict[str, Tensor]:
+    def forward_modality_specific_features(self, x: Dict[str, Tensor]) -> Dict[str, Tensor]:
         """
         Extract features after modality-specific layers (first tz_fusion_time blocks).
         This is useful for MAE training where you want features before fusion.
@@ -779,7 +798,7 @@ class EVAN(nn.Module):
         hw_tuples = {}
 
         for modality_key, modality_tensor in x.items():
-            x_mod, (H, W) = self.prepare_tokens_with_masks(modality_tensor, modality_key, masks=masks)
+            x_mod, (H, W) = self.prepare_tokens_with_masks(modality_tensor, modality_key)
             embedded_modalities[modality_key] = x_mod
             hw_tuples[modality_key] = (H, W)
 
@@ -879,18 +898,17 @@ class EVAN(nn.Module):
         x_fused = torch.cat([x_cls_storage_concat, x_patches_concat], dim=1)
 
         # Step 2: Process through fusion blocks with cross-modal attention
-        for i in range(self.tz_fusion_time, len(self.blocks)):
+        for lora_idx in range(len(self.blocks)):
             if self.rope_embed is not None:
                 rope_sincos = self.rope_embed(H=H, W=W)
             else:
                 rope_sincos = None
 
             # Shared block forward on concatenated representation
-            x_fused = self.blocks[i](x_fused, rope_sincos)
+            x_fused = self.blocks[lora_idx](x_fused, rope_sincos)
 
             # Add fusion LoRA only for hallucinated modalities (if specified)
             if hallucinated_modalities:
-                lora_idx = i - self.tz_fusion_time
                 lora_output = 0
                 for modality_key in hallucinated_modalities:
                     if modality_key in self.modality_fusion_lora_adaptors:
@@ -993,7 +1011,6 @@ class EVAN(nn.Module):
         mfla: bool = False,
         blocks: bool = False,
         norm: bool = False,
-        mask_token: bool = False,
     ):
         """
         Set requires_grad for specific components of the model.
@@ -1024,8 +1041,6 @@ class EVAN(nn.Module):
                 if self.local_cls_norm is not None:
                     for param in self.local_cls_norm.parameters():
                         param.requires_grad = True
-            if mask_token:
-                self.mask_token.requires_grad = True
         elif modality == 'all':
             # Apply to all modalities
             for mod_key in self.patch_embedders.keys():
@@ -1271,40 +1286,157 @@ BENV2_BAND_INDICES  = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12]   # drop B10 (index
 PASTIS_BAND_INDICES = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]          # drop B1 (0), B9 (9), B10 (10)
 
 
-class EVANClassifier(nn.Module):
+class EvanPredictor(nn.Module):
+    """
+    Base class shared by EVANClassifier and EvanSegmenter.
+
+    Provides common __init__ storage, freeze_all, set_requires_grad,
+    save_checkpoint, and the _reconstruct_evan static helper used by
+    subclass from_checkpoint implementations.
+    """
+
+    def __init__(self, evan_model, num_classes, strategy, device):
+        super().__init__()
+        self.evan = evan_model
+        self.num_classes = num_classes
+        self.strategy = strategy   # 'mean' or 'ensemble'
+        self.device = device
+        self.head = None             # shared mean head (set by subclass)
+        self.modality_heads = None   # shared ensemble heads (set by subclass)
+
+    def freeze_all(self):
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def set_requires_grad(
+        self,
+        modality: str,
+        *,
+        patch_embedders: bool = False,
+        clsreg: bool = False,
+        msla: bool = False,
+        modality_encoders: bool = False,
+        mfla: bool = False,
+        blocks: bool = False,
+        norm: bool = False,
+        head: bool = False,
+    ):
+        """
+        Set requires_grad for specific components of the model (EVAN + head).
+
+        Args:
+            modality: Either a modality key (e.g., 'rgb', 'vre'), 'backbone' for shared weights,
+                      or 'all' to apply to all modalities.
+            patch_embedders: Unfreeze patch embedders for this modality
+            clsreg: Unfreeze CLS and storage (register) tokens for this modality
+            msla: Unfreeze modality-specific layer adaptors (LoRAs or FFT blocks)
+            modality_encoders: Unfreeze modality encodings
+            mfla: Unfreeze modality fusion LoRA adaptors
+            blocks: Unfreeze shared transformer blocks (only when modality='backbone')
+            norm: Unfreeze shared norm layers (only when modality='backbone')
+            mask_token: Unfreeze mask token (only when modality='backbone')
+            head: Unfreeze prediction head(s) (shared mean head or per-modality ensemble heads)
+        """
+        self.evan.set_requires_grad(
+            modality,
+            patch_embedders=patch_embedders,
+            clsreg=clsreg,
+            msla=msla,
+            modality_encoders=modality_encoders,
+            mfla=mfla,
+            blocks=blocks,
+            norm=norm,
+        )
+        if head:
+            if self.head is not None:
+                for param in self.head.parameters():
+                    param.requires_grad = True
+            if self.modality_heads is not None:
+                if modality == 'all':
+                    for h in self.modality_heads.values():
+                        for param in h.parameters():
+                            param.requires_grad = True
+                elif modality in self.modality_heads:
+                    for param in self.modality_heads[modality].parameters():
+                        param.requires_grad = True
+                else:
+                    raise RuntimeError(f"'{modality}' not in modality_heads")
+
+    def save_checkpoint(self, path: str):
+        torch.save({'model_state_dict': self.state_dict(), 'config': self.get_config()}, path)
+        print(f"{self.__class__.__name__} checkpoint saved to: {path}")
+
+    @staticmethod
+    def _reconstruct_evan(evan_config, device):
+        """Reconstruct an EVAN model from a (possibly mutated) evan_config dict."""
+        supported_modalities = evan_config.pop('supported_modalities', None)
+        supported_modalities_in_chans = evan_config.pop('supported_modalities_in_chans', None)
+        starting_modality = evan_config.get('starting_modality', 'rgb')
+        if 'starting_n_chans' not in evan_config and supported_modalities_in_chans:
+            evan_config['starting_n_chans'] = supported_modalities_in_chans[0]
+        evan = EVAN(**evan_config, device=device)
+        if supported_modalities and supported_modalities_in_chans:
+            for mod, n_chans in zip(supported_modalities, supported_modalities_in_chans):
+                if mod != starting_modality and mod not in evan.patch_embedders:
+                    evan.create_modality_components(mod, n_chans)
+        return evan, supported_modalities
+
+
+class EVANClassifier(EvanPredictor):
     """Classifier head on top of EVAN for EuroSAT."""
 
     def __init__(self, evan_model, num_classes=10, classifier_strategy='mean', factor=4, global_rep="clstoken", device = "cuda"):
-        super().__init__()
-        self.evan = evan_model
-        self.classifier_strategy = classifier_strategy
-        self.num_classes = num_classes
+        super().__init__(evan_model, num_classes, classifier_strategy, device)
         self.factor = factor
-        self.global_rep=global_rep
+        self.global_rep = global_rep
         embed_dim = self.evan.embed_dim
         hidden_dim = embed_dim * factor
         self.hidden_dim = hidden_dim
-        self.device = device
 
         if classifier_strategy == 'mean':
             # Average CLS tokens from all modalities, then classify
-            self.classifier = nn.Sequential(
+            self.head = nn.Sequential(
                 nn.Linear(embed_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, num_classes)
             )
-            self.modality_classifiers = None
+            self.modality_heads = None
         elif classifier_strategy == 'ensemble':
             # Per-modality classifiers that get ensembled
-            self.classifier = None
-            self.modality_classifiers = nn.ModuleDict()
-            self.instantiate_modality_classifier(evan_model.starting_modality)
+            self.head = None
+            self.modality_heads = nn.ModuleDict()
+            self.instantiate_modality_head(evan_model.starting_modality)
         else:
             raise ValueError(f"Unknown fusion strategy: {classifier_strategy}")
 
-    def instantiate_modality_classifier(self, modality_key: str):
+    # --------------- public aliases for backward compatibility ---------------
+    @property
+    def classifier_strategy(self):
+        return self.strategy
+
+    @classifier_strategy.setter
+    def classifier_strategy(self, value):
+        self.strategy = value
+
+    @property
+    def classifier(self):
+        return self.head
+
+    @classifier.setter
+    def classifier(self, value):
+        self.head = value
+
+    @property
+    def modality_classifiers(self):
+        return self.modality_heads
+
+    @modality_classifiers.setter
+    def modality_classifiers(self, value):
+        self.modality_heads = value
+
+    def instantiate_modality_head(self, modality_key: str):
         """
-        Create a new classifier for a specific modality.
+        Create a new classifier head for a specific modality.
 
         Args:
             modality_key: Name of the modality (e.g., 'rgb', 'vre', 'nir', 'swir')
@@ -1318,8 +1450,12 @@ class EVANClassifier(nn.Module):
         )
 
         classifier = classifier.to(self.device)
-        self.modality_classifiers[modality_key] = classifier
+        self.modality_heads[modality_key] = classifier
         print(f"  Created new classifier for modality: {modality_key}")
+
+    # Keep old name as alias so external callers (shot.py) continue to work
+    def instantiate_modality_classifier(self, modality_key: str):
+        return self.instantiate_modality_head(modality_key)
 
     def classify_from_features(self, features_dict):
         """
@@ -1331,7 +1467,7 @@ class EVANClassifier(nn.Module):
         Returns:
             logits: [B, num_classes]
         """
-        if self.classifier_strategy == 'mean':
+        if self.strategy == 'mean':
             cls_tokens = []
             for modality in sorted(features_dict.keys()):
                 if self.global_rep == "clstoken":
@@ -1339,12 +1475,12 @@ class EVANClassifier(nn.Module):
                 elif self.global_rep == "mean_patch":
                     cls_tokens.append(features_dict[modality]['x_norm_patchtokens'].mean(1))
             fused = torch.stack(cls_tokens).mean(dim=0)
-            return self.classifier(fused)
+            return self.head(fused)
 
-        elif self.classifier_strategy == 'ensemble':
+        elif self.strategy == 'ensemble':
             all_logits = []
             for modality in sorted(features_dict.keys()):
-                if modality not in self.modality_classifiers:
+                if modality not in self.modality_heads:
                     raise RuntimeError(f"{modality} doesn't have its own classifier.")
                 if self.global_rep == "clstoken":
                     cls_token = features_dict[modality]['x_norm_clstoken']
@@ -1352,12 +1488,12 @@ class EVANClassifier(nn.Module):
                     cls_token = features_dict[modality]['x_norm_patchtokens'].mean(1)
                 else:
                     raise ValueError(f"unrecognized global_rep arg, choices are clstoken or mean_patch, received {self.global_rep}")
-                modality_logits = self.modality_classifiers[modality](cls_token)
+                modality_logits = self.modality_heads[modality](cls_token)
                 all_logits.append(modality_logits)
             return torch.stack(all_logits).mean(dim=0)
 
         else:
-            raise ValueError(f"Unknown classifier strategy: {self.classifier_strategy}")
+            raise ValueError(f"Unknown classifier strategy: {self.strategy}")
 
     def forward(self, x, pseudo_modalities=None, intermediate_projectors=None):
         """
@@ -1376,124 +1512,51 @@ class EVANClassifier(nn.Module):
         else:
             features_dict = self.evan.forward_features(x)
         return self.classify_from_features(features_dict)
-    
-    def switch_strategy(self,target_strategy,key=None):
-        if self.classifier_strategy == 'strategy': 
+
+    def switch_strategy(self, target_strategy, key=None):
+        if self.strategy == target_strategy:
             print(f"Already using {target_strategy} head")
-        elif target_strategy=="mean":
+        elif target_strategy == "mean":
             self.ensemble_to_mean(key)
-        elif target_strategy=="ensemble":
+        elif target_strategy == "ensemble":
             self.mean_to_ensemble()
             for mod in self.evan.patch_embedders.keys():
-                self.instantiate_modality_classifier(mod)
+                self.instantiate_modality_head(mod)
         return
-            
+
     def mean_to_ensemble(self):
         """Convert from 'mean' to 'ensemble' strategy, the existing classifier becomes new_key classifier"""
-        if self.classifier_strategy == 'ensemble':
+        if self.strategy == 'ensemble':
             print("!!!!  mean_to_ensemble was called on classifier but it already is ensemble. No changes made.")
             return()
-        assert self.classifier_strategy == 'mean'
-        self.modality_classifiers = nn.ModuleDict()
+        assert self.strategy == 'mean'
+        self.modality_heads = nn.ModuleDict()
         for mod in self.evan.supported_modalities:
-            self.modality_classifiers[mod]=copy.deepcopy(self.classifier)
-        self.classifier=None
-        self.classifier_strategy='ensemble'
+            self.modality_heads[mod] = copy.deepcopy(self.head)
+        self.head = None
+        self.strategy = 'ensemble'
         print("!! Evan Classifier has switched strategy from mean to ensemble")
-        
-    def ensemble_to_mean(self, key_to_keep:str='rgb'):
+
+    def ensemble_to_mean(self, key_to_keep: str = 'rgb'):
         """Convert from 'ensemble' to 'mean' strategy, keeping only key_to_keep classifier"""
-        if self.classifier_strategy == 'mean':
+        if self.strategy == 'mean':
             print("!!!!  mean_to_ensemble was called on classifier but it already is mean. No changes made.")
             return()
-        assert self.classifier_strategy == 'ensemble'
-        self.classifier=self.modality_classifiers[key_to_keep]
-        self.modality_classifiers=None
-        self.classifier_strategy = 'mean'
+        assert self.strategy == 'ensemble'
+        self.head = self.modality_heads[key_to_keep]
+        self.modality_heads = None
+        self.strategy = 'mean'
         print("!! Evan Classifier has switched strategy from ensemble to mean")
-        
-    def set_requires_grad(
-        self,
-        modality: str,
-        *,
-        patch_embedders: bool = False,
-        clsreg: bool = False,
-        msla: bool = False,
-        modality_encoders: bool = False,
-        mfla: bool = False,
-        blocks: bool = False,
-        norm: bool = False,
-        mask_token: bool = False,
-        classifier: bool = False,
-    ):
-        """
-        Set requires_grad for specific components of the model (EVAN + classifier).
-
-        Args:
-            modality: Either a modality key (e.g., 'rgb', 'vre'), 'backbone' for shared weights,
-                      or 'all' to apply to all modalities.
-            patch_embedders: Unfreeze patch embedders for this modality
-            clsreg: Unfreeze CLS and storage (register) tokens for this modality
-            msla: Unfreeze modality-specific layer adaptors (LoRAs or FFT blocks)
-            modality_encoders: Unfreeze modality encodings
-            mfla: Unfreeze modality fusion LoRA adaptors
-            blocks: Unfreeze shared transformer blocks (only when modality='backbone')
-            norm: Unfreeze shared norm layers (only when modality='backbone')
-            mask_token: Unfreeze mask token (only when modality='backbone')
-            classifier: Unfreeze classifier head(s)
-        """
-        # Delegate to EVAN's set_requires_grad for backbone components
-        self.evan.set_requires_grad(
-            modality,
-            patch_embedders=patch_embedders,
-            clsreg=clsreg,
-            msla=msla,
-            modality_encoders=modality_encoders,
-            mfla=mfla,
-            blocks=blocks,
-            norm=norm,
-            mask_token=mask_token,
-        )
-
-        # Handle classifier
-        if classifier:
-            if self.classifier is not None:
-                for param in self.classifier.parameters():
-                    param.requires_grad = True
-            if self.modality_classifiers is not None:
-                if modality == 'all':
-                    for mod_classifier in self.modality_classifiers.values():
-                        for param in mod_classifier.parameters():
-                            param.requires_grad = True
-                elif modality in self.modality_classifiers:
-                    for param in self.modality_classifiers[modality].parameters():
-                        param.requires_grad = True
-                else:
-                    raise RuntimeError(f"{modality} not in modality_classifiers")
-
-    def freeze_all(self):
-        """Freeze all parameters in the model (EVAN + classifier)."""
-        for param in self.parameters():
-            param.requires_grad = False
 
     def get_config(self) -> Dict[str, Any]:
         """Return config dict needed to reconstruct this model architecture."""
         return {
             'evan_config': self.evan.get_config(),
             'num_classes': self.num_classes,
-            'classifier_strategy': self.classifier_strategy,
+            'classifier_strategy': self.strategy,  # keep old key name for checkpoint compat
             'factor': self.factor,
             'global_rep': self.global_rep,
         }
-
-    def save_checkpoint(self, path: str):
-        """Save model checkpoint with config and state dict."""
-        checkpoint = {
-            'model_state_dict': self.state_dict(),
-            'config': self.get_config(),
-        }
-        torch.save(checkpoint, path)
-        print(f"EVANClassifier checkpoint saved to: {path}")
 
     @classmethod
     def from_checkpoint(cls, path: str, device: Any | None = None) -> "EVANClassifier":
@@ -1511,25 +1574,8 @@ class EVANClassifier(nn.Module):
         config = checkpoint['config']
         evan_config = config['evan_config']
 
-        # Extract modality info before creating EVAN
-        supported_modalities = evan_config.pop('supported_modalities', None)
-        supported_modalities_in_chans = evan_config.pop('supported_modalities_in_chans', None)
-        starting_modality = evan_config.get('starting_modality', 'rgb')
+        evan, supported_modalities = EvanPredictor._reconstruct_evan(evan_config, device)
 
-        # Backward compatibility: if starting_n_chans not in config, get it from supported_modalities_in_chans
-        if 'starting_n_chans' not in evan_config and supported_modalities_in_chans:
-            evan_config['starting_n_chans'] = supported_modalities_in_chans[0]
-
-        # Create EVAN model
-        evan = EVAN(**evan_config, device=device)
-
-        # Add any additional modalities
-        if supported_modalities and supported_modalities_in_chans:
-            for mod, n_chans in zip(supported_modalities, supported_modalities_in_chans):
-                if mod != starting_modality and mod not in evan.patch_embedders:
-                    evan.create_modality_components(mod, n_chans)
-
-        # Create classifier
         model = cls(
             evan_model=evan,
             num_classes=config['num_classes'],
@@ -1542,8 +1588,8 @@ class EVANClassifier(nn.Module):
         # For ensemble strategy, instantiate classifiers for all modalities before loading state dict
         if config['classifier_strategy'] == 'ensemble' and supported_modalities:
             for mod in supported_modalities:
-                if mod not in model.modality_classifiers:
-                    model.instantiate_modality_classifier(mod)
+                if mod not in model.modality_heads:
+                    model.instantiate_modality_head(mod)
 
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         print(f"EVANClassifier loaded from checkpoint: {path}")
@@ -1610,7 +1656,7 @@ class UNetDecoder(nn.Module):
         return self.head(x)
 
 
-class EvanSegmenter(nn.Module):
+class EvanSegmenter(EvanPredictor):
     """
     Segmentation head on top of EVAN.
 
@@ -1639,26 +1685,80 @@ class EvanSegmenter(nn.Module):
                           'unet' (UNetDecoder with 4 ConvTranspose2d stages).
             device: Target device.
         """
-        super().__init__()
-        self.evan = evan_model
-        self.num_classes = num_classes
-        self.decoder_strategy = decoder_strategy
+        super().__init__(evan_model, num_classes, decoder_strategy, device)
         self.decoder_type = decoder_type
-        self.device = device
 
         embed_dim = evan_model.embed_dim
         self._patch_hw = evan_model.img_size // evan_model.patch_size
         self._img_size = evan_model.img_size
 
         if decoder_strategy == 'mean':
-            self.decoder = self._make_decoder(embed_dim)
-            self.modality_decoders = None
+            self.head = self._make_decoder(embed_dim)
+            self.modality_heads = None
         elif decoder_strategy == 'ensemble':
-            self.decoder = None
-            self.modality_decoders = nn.ModuleDict()
-            self.instantiate_modality_decoder(evan_model.starting_modality)
+            self.head = None
+            self.modality_heads = nn.ModuleDict()
+            self.instantiate_modality_head(evan_model.starting_modality)
         else:
             raise ValueError(f"Unknown decoder_strategy: {decoder_strategy!r}")
+
+    def switch_strategy(self, target_strategy, key=None):
+        if self.strategy == target_strategy:
+            print(f"Already using {target_strategy} decoder strategy")
+        elif target_strategy == 'ensemble':
+            self.mean_to_ensemble()
+            for mod in self.evan.patch_embedders.keys():
+                self.instantiate_modality_head(mod)
+        elif target_strategy == 'mean':
+            self.ensemble_to_mean(key)
+
+    def mean_to_ensemble(self):
+        if self.strategy == 'ensemble':
+            print("!!!!  mean_to_ensemble called on segmenter but already ensemble. No changes made.")
+            return
+        assert self.strategy == 'mean'
+        self.modality_heads = nn.ModuleDict()
+        for mod in self.evan.supported_modalities:
+            self.modality_heads[mod] = copy.deepcopy(self.head)
+        self.head = None
+        self.strategy = 'ensemble'
+        print("!! EvanSegmenter switched strategy from mean to ensemble")
+
+    def ensemble_to_mean(self, key_to_keep: str = None):
+        if self.strategy == 'mean':
+            print("!!!!  ensemble_to_mean called on segmenter but already mean. No changes made.")
+            return
+        assert self.strategy == 'ensemble'
+        key_to_keep = key_to_keep or self.evan.starting_modality
+        self.head = self.modality_heads[key_to_keep]
+        self.modality_heads = None
+        self.strategy = 'mean'
+        print("!! EvanSegmenter switched strategy from ensemble to mean")
+
+    # --------------- public aliases for backward compatibility ---------------
+    @property
+    def decoder_strategy(self):
+        return self.strategy
+
+    @decoder_strategy.setter
+    def decoder_strategy(self, value):
+        self.strategy = value
+
+    @property
+    def decoder(self):
+        return self.head
+
+    @decoder.setter
+    def decoder(self, value):
+        self.head = value
+
+    @property
+    def modality_decoders(self):
+        return self.modality_heads
+
+    @modality_decoders.setter
+    def modality_decoders(self, value):
+        self.modality_heads = value
 
     def _make_decoder(self, embed_dim: int) -> nn.Module:
         """Return a decoder head according to decoder_type."""
@@ -1667,21 +1767,25 @@ class EvanSegmenter(nn.Module):
         else:  # 'linear'
             return nn.Conv2d(embed_dim, self.num_classes, kernel_size=1)
 
-    def _apply_decoder(self, head: nn.Module, patch_tokens: torch.Tensor) -> torch.Tensor:
-        """Run patch_tokens [B, N, D] through head and return [B, C, H, W]."""
+    def _apply_decoder(self, dec: nn.Module, patch_tokens: torch.Tensor) -> torch.Tensor:
+        """Run patch_tokens [B, N, D] through dec and return [B, C, H, W]."""
         if self.decoder_type == 'unet':
-            return head(patch_tokens)
+            return dec(patch_tokens)
         # linear: reshape to spatial map, apply 1×1 conv, bilinear upsample
         B, N, D = patch_tokens.shape
         feat_map = patch_tokens.permute(0, 2, 1).reshape(B, D, self._patch_hw, self._patch_hw)
-        logits_small = head(feat_map)
+        logits_small = dec(feat_map)
         return F.interpolate(logits_small, size=(self._img_size, self._img_size),
                              mode='bilinear', align_corners=False)
 
-    def instantiate_modality_decoder(self, modality_key: str):
-        """Create and register a decoder for a new modality (ensemble strategy)."""
+    def instantiate_modality_head(self, modality_key: str):
+        """Create and register a decoder head for a new modality (ensemble strategy)."""
         embed_dim = self.evan.embed_dim
-        self.modality_decoders[modality_key] = self._make_decoder(embed_dim).to(self.device)
+        self.modality_heads[modality_key] = self._make_decoder(embed_dim).to(self.device)
+
+    # Keep old name as alias so external callers (shot.py) continue to work
+    def instantiate_modality_decoder(self, modality_key: str):
+        return self.instantiate_modality_head(modality_key)
 
     def segment_from_features(self, features_dict: dict) -> torch.Tensor:
         """
@@ -1694,21 +1798,21 @@ class EvanSegmenter(nn.Module):
         Returns:
             logits: [B, num_classes, H, W]
         """
-        if self.decoder_strategy == 'mean':
+        if self.strategy == 'mean':
             patch_maps = [
                 features_dict[mod]['x_norm_patchtokens']
                 for mod in sorted(features_dict.keys())
             ]
             avg_patches = torch.stack(patch_maps).mean(dim=0)  # [B, N, D]
-            return self._apply_decoder(self.decoder, avg_patches)
+            return self._apply_decoder(self.head, avg_patches)
 
-        elif self.decoder_strategy == 'ensemble':
+        elif self.strategy == 'ensemble':
             all_logits = []
             for mod in sorted(features_dict.keys()):
-                if mod not in self.modality_decoders:
+                if mod not in self.modality_heads:
                     raise RuntimeError(f"No decoder for modality '{mod}'.")
                 patch_tokens = features_dict[mod]['x_norm_patchtokens']
-                all_logits.append(self._apply_decoder(self.modality_decoders[mod], patch_tokens))
+                all_logits.append(self._apply_decoder(self.modality_heads[mod], patch_tokens))
             return torch.stack(all_logits).mean(dim=0)
 
     def forward(self, x: dict) -> torch.Tensor:
@@ -1721,62 +1825,12 @@ class EvanSegmenter(nn.Module):
         features_dict = self.evan.forward_features(x)
         return self.segment_from_features(features_dict)
 
-    def freeze_all(self):
-        """Freeze all parameters."""
-        for param in self.parameters():
-            param.requires_grad = False
-
-    def set_requires_grad(
-        self,
-        modality: str,
-        *,
-        patch_embedders: bool = False,
-        clsreg: bool = False,
-        msla: bool = False,
-        modality_encoders: bool = False,
-        mfla: bool = False,
-        blocks: bool = False,
-        norm: bool = False,
-        mask_token: bool = False,
-        decoder: bool = False,
-    ):
-        """Mirror of EVANClassifier.set_requires_grad — 'decoder' replaces 'classifier'."""
-        self.evan.set_requires_grad(
-            modality,
-            patch_embedders=patch_embedders,
-            clsreg=clsreg,
-            msla=msla,
-            modality_encoders=modality_encoders,
-            mfla=mfla,
-            blocks=blocks,
-            norm=norm,
-            mask_token=mask_token,
-        )
-        if decoder:
-            if self.decoder is not None:
-                for param in self.decoder.parameters():
-                    param.requires_grad = True
-            if self.modality_decoders is not None:
-                if modality == 'all':
-                    for mod_dec in self.modality_decoders.values():
-                        for param in mod_dec.parameters():
-                            param.requires_grad = True
-                elif modality in self.modality_decoders:
-                    for param in self.modality_decoders[modality].parameters():
-                        param.requires_grad = True
-                else:
-                    raise RuntimeError(f"'{modality}' not in modality_decoders")
-
     def get_config(self) -> dict:
         return {
             'evan_config': self.evan.get_config(),
             'num_classes': self.num_classes,
-            'decoder_strategy': self.decoder_strategy,
+            'decoder_strategy': self.strategy,  # keep old key name for checkpoint compat
         }
-
-    def save_checkpoint(self, path: str):
-        torch.save({'model_state_dict': self.state_dict(), 'config': self.get_config()}, path)
-        print(f"EvanSegmenter checkpoint saved to: {path}")
 
     @classmethod
     def from_checkpoint(cls, path: str, device=None) -> "EvanSegmenter":
@@ -1784,19 +1838,7 @@ class EvanSegmenter(nn.Module):
         config = checkpoint['config']
         evan_config = config['evan_config']
 
-        supported_modalities = evan_config.pop('supported_modalities', None)
-        supported_modalities_in_chans = evan_config.pop('supported_modalities_in_chans', None)
-        starting_modality = evan_config.get('starting_modality', 'rgb')
-
-        if 'starting_n_chans' not in evan_config and supported_modalities_in_chans:
-            evan_config['starting_n_chans'] = supported_modalities_in_chans[0]
-
-        evan = EVAN(**evan_config, device=device)
-
-        if supported_modalities and supported_modalities_in_chans:
-            for mod, n_chans in zip(supported_modalities, supported_modalities_in_chans):
-                if mod != starting_modality and mod not in evan.patch_embedders:
-                    evan.create_modality_components(mod, n_chans)
+        evan, supported_modalities = EvanPredictor._reconstruct_evan(evan_config, device)
 
         model = cls(
             evan_model=evan,
@@ -1807,8 +1849,8 @@ class EvanSegmenter(nn.Module):
 
         if config['decoder_strategy'] == 'ensemble' and supported_modalities:
             for mod in supported_modalities:
-                if mod not in model.modality_decoders:
-                    model.instantiate_modality_decoder(mod)
+                if mod not in model.modality_heads:
+                    model.instantiate_modality_head(mod)
 
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         print(f"EvanSegmenter loaded from checkpoint: {path}")

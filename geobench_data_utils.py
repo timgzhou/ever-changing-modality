@@ -392,6 +392,7 @@ def get_benv2_loaders(
 
 # PASTIS S2 bands (10 bands)
 PASTIS_S2_BANDS = ('B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B11', 'B12')
+PASTIS_S2_RGB_BANDS = ('B04', 'B03', 'B02')
 # PASTIS S1: asc + desc, each 3 channels — merged into single 's1' (6ch)
 PASTIS_S1_ASC_BANDS = ('VV_asc', 'VH_asc', 'VV/VH_asc')
 PASTIS_S1_DESC_BANDS = ('VV_desc', 'VH_desc', 'VV/VH_desc')
@@ -424,6 +425,7 @@ def get_pastis_loaders(
     temporal_aggregation: str = 'median',
     num_time_steps: int = 10,
     starting_modality: str = 's2',
+    new_modality: str='s1',
     data_normalizer=None,
 ) -> tuple:
     """
@@ -436,8 +438,10 @@ def get_pastis_loaders(
         temporal_aggregation: How to collapse time dimension. 'mean' or 'median'.
         num_time_steps: Number of timestamps to sample before aggregation. Train uses
             random sampling; val/test use uniform sampling.
-        starting_modality: Which modality is available at stage 0 ('s2' or 's1').
-            train1/val1 will contain only this modality; train2/val2/test contain both.
+        starting_modality: Which modality is available at stage 0 ('s2', 's1', or 'rgb').
+            'rgb' uses B04/B03/B02 channels from the S2 stack (3ch), useful for initializing
+            from DINOv2 weights. train1/val1 will contain only this modality; train2/val2/test
+            contain both.
 
     Returns:
         train1_loader: starting_modality-only, with semantic segmentation masks
@@ -447,7 +451,7 @@ def get_pastis_loaders(
         test_loader:   S2+S1, with masks
         task_config:   TaskConfig describing this dataset/task
     """
-    assert starting_modality in ('s2', 's1'), f"starting_modality must be 's2' or 's1', got {starting_modality!r}"
+    assert starting_modality in ('s2', 's1', 'rgb'), f"starting_modality must be 's2', 's1', or 'rgb', got {starting_modality!r}"
     root = Path(data_root)
 
     n_s1 = len(PASTIS_S1_ASC_BANDS) + len(PASTIS_S1_DESC_BANDS)
@@ -504,7 +508,6 @@ def get_pastis_loaders(
         Subset(val_full, val2_indices), modality_stack_order=full_stack_order, merge_modalities=s1_merge,
     )
 
-    new_modality = 's1' if starting_modality == 's2' else 's2'
     print(f"PASTIS — Train1: {len(train1_ds)}, Train2: {len(train2_ds)}, Test: {len(test_ds)} (S2+S1)")
     print(f"PASTIS — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
 
@@ -530,8 +533,19 @@ def get_pastis_loaders(
         unique = mask.unique().tolist()
         print(f"  mask: shape={tuple(mask.shape)}  dtype={mask.dtype}  unique classes={unique[:20]}{'...' if len(unique)>20 else ''}")
 
-    start_channels = len(PASTIS_S2_BANDS) if starting_modality == 's2' else n_s1
-    new_channels   = n_s1 if starting_modality == 's2' else len(PASTIS_S2_BANDS)
+    # Add 'rgb' as a virtual modality: B04, B03, B02 are at positions 2, 1, 0 in the S2 block
+    if 'rgb' not in modality_slices:
+        modality_slices['rgb'] = [2, 1, 0]  # absolute indices into stacked image
+
+    if starting_modality == 's2':
+        start_channels = len(PASTIS_S2_BANDS)
+        new_channels   = n_s1
+    elif starting_modality == 'rgb':
+        start_channels = len(PASTIS_S2_RGB_BANDS)
+        new_channels   = n_s1
+    else:  # s1
+        start_channels = n_s1
+        new_channels   = len(PASTIS_S2_BANDS)
     task_config = TaskConfig(
         dataset_name='pastis',
         task_type='segmentation',

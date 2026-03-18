@@ -256,6 +256,19 @@ class MultiModalTransform:
         return result
 
 
+_geobench_rgb_stats = {'min': float('inf'), 'max': float('-inf'), 'sum': 0.0, 'count': 0, 'batches': 0}
+
+def print_and_reset_rgb_stats():
+    s = _geobench_rgb_stats
+    if s['batches'] == 0:
+        return
+    mean = s['sum'] / s['count'] if s['count'] > 0 else float('nan')
+    print(f"  [RGB post-clip stats over {s['batches']} batches] "
+          f"min={s['min']:.3f}  max={s['max']:.3f}  mean={mean:.3f}")
+    s['min'] = float('inf'); s['max'] = float('-inf')
+    s['sum'] = 0.0; s['count'] = 0; s['batches'] = 0
+
+
 def create_multimodal_batch(
     batch,
     bands_rgb=None,
@@ -288,10 +301,26 @@ def create_multimodal_batch(
     # band-name tuples (e.g. {'s2': slice(0, 10), 's1': slice(10, 16)}).
     # Detect this case and bypass the band-index lookup path.
     if modality_bands_dict is not None and any(
-        isinstance(v, slice) for v in modality_bands_dict.values()
+        isinstance(v, (slice, list)) for v in modality_bands_dict.values()
     ):
         image = batch['image']  # [B, C_total, H, W] — already normalized
-        return {mod: image[:, modality_bands_dict[mod], :, :] for mod in modalities}
+        result = {}
+        for mod in modalities:
+            x = image[:, modality_bands_dict[mod], :, :]
+            if mod == 'rgb':
+                # Clip to [0, S2_RGB_CLIP] and rescale to [0, 1] before ImageNet norm.
+                # S2 surface reflectance (/10000) is physically in [0,1] but concentrates
+                # below 0.2; clipping fills the full range for DINOv2 compatibility.
+                S2_RGB_CLIP = 0.2
+                x = (x.clamp(0.0, S2_RGB_CLIP) / S2_RGB_CLIP)
+                _geobench_rgb_stats['min'] = min(_geobench_rgb_stats['min'], x.min().item())
+                _geobench_rgb_stats['max'] = max(_geobench_rgb_stats['max'], x.max().item())
+                _geobench_rgb_stats['sum'] += x.float().sum().item()
+                _geobench_rgb_stats['count'] += x.numel()
+                _geobench_rgb_stats['batches'] += 1
+                x = apply_imagenet_normalization(x)
+            result[mod] = x
+        return result
 
     image = batch['image']  # [B, 13, H, W]
     result = {}

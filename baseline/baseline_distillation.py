@@ -1,5 +1,9 @@
 """Baseline Distillation: Train student on new modality using teacher's soft labels."""
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,14 +15,14 @@ import wandb
 import csv
 from tqdm import tqdm
 
-from evan_main import evan_small, evan_base, evan_large, EVANClassifier
+from evan_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
 from eurosat_data_utils import (
     get_loaders,
     get_loaders_with_val,
     get_modality_bands_dict,
     create_multimodal_batch,
 )
-from train_utils import _compute_map
+from train_utils import _compute_map, compute_miou, evaluate
 
 VALID_NEW_MODS = {
     'eurosat': ['vre', 'nir', 'swir', 'rgb'],
@@ -27,7 +31,7 @@ VALID_NEW_MODS = {
 }
 
 
-def get_loaders_and_config(dataset, batch_size, num_workers):
+def get_loaders_and_config(dataset, batch_size, num_workers, data_normalizer=None, num_time_steps=10):
     """Return (train1, val1, train2, val2, test, task_config)."""
     if dataset == 'eurosat':
         from types import SimpleNamespace
@@ -51,7 +55,8 @@ def get_loaders_and_config(dataset, batch_size, num_workers):
     elif dataset == 'pastis':
         from geobench_data_utils import get_pastis_loaders
         train1, val1, train2, val2, test, task_config = get_pastis_loaders(
-            batch_size=batch_size, num_workers=num_workers
+            batch_size=batch_size, num_workers=num_workers,
+            data_normalizer=data_normalizer, num_time_steps=num_time_steps,
         )
         return train1, val1, train2, val2, test, task_config
     else:
@@ -60,74 +65,36 @@ def get_loaders_and_config(dataset, batch_size, num_workers):
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 
-def init_student_from_teacher(
-    teacher_checkpoint_path: str,
-    student_modality: str,
-    student_n_chans: int,
-    device: str = 'cpu',
-) -> EVANClassifier:
+def _copy_evan_backbone_and_modality(teacher_state_dict, evan_config, student_modality,
+                                      student_n_chans, teacher_modality, device):
     """
-    Create a monomodal student EVANClassifier initialized from a teacher checkpoint.
-
-    Copies the teacher's backbone weights (blocks, norm) and modality-specific
-    components (MSLA, MFLA, CLS token, etc.) to the student's modality.
-    The patch embedder is randomly initialized (different channel count),
-    and the classifier is copied from the teacher.
-
-    Args:
-        teacher_checkpoint_path: Path to teacher checkpoint file
-        student_modality: Modality name for the student (e.g., 'nir', 'swir')
-        student_n_chans: Number of input channels for student modality
-        device: Device to load model to
-
-    Returns:
-        EVANClassifier with student modality initialized from teacher weights
+    Shared helper: build a fresh monomodal EVAN and copy backbone + modality-specific
+    weights from the teacher state dict.  Returns the initialised EVAN model.
     """
     from evan_main import EVAN
 
-    # Load teacher checkpoint
-    checkpoint = torch.load(teacher_checkpoint_path, map_location=device)
-    config = checkpoint['config']
-    evan_config = config['evan_config'].copy()
-    teacher_state_dict = checkpoint['model_state_dict']
-
-    # Get teacher modality info
-    teacher_modality = evan_config.get('starting_modality', 'rgb')
-
-    if student_modality == teacher_modality:
-        raise ValueError(
-            f"Student modality ({student_modality}) must be different from "
-            f"teacher modality ({teacher_modality}). Use from_checkpoint() instead."
-        )
-
-    print(f"=== Initializing student '{student_modality}' from teacher '{teacher_modality}' ===")
-
-    # Update config for student modality
+    evan_config = evan_config.copy()
     evan_config['starting_modality'] = student_modality
     evan_config['starting_n_chans'] = student_n_chans
-    # Remove multimodal info from config (student is monomodal)
     evan_config.pop('supported_modalities', None)
     evan_config.pop('supported_modalities_in_chans', None)
 
-    # Create student EVAN model (monomodal, with student_modality)
     student_evan = EVAN(**evan_config, device=device)
 
-    # === Copy backbone weights (shared across modalities) ===
-    backbone_keys = []
-    for key in teacher_state_dict.keys():
-        if key.startswith('evan.blocks.') or key.startswith('evan.norm.') or \
-           key == 'evan.mask_token' or key.startswith('evan.rope_embed'):
-            backbone_keys.append(key)
-
+    # --- backbone weights ---
+    backbone_keys = [
+        k for k in teacher_state_dict
+        if k.startswith('evan.blocks.') or k.startswith('evan.norm.')
+        or k == 'evan.mask_token' or k.startswith('evan.rope_embed')
+    ]
     print(f"  Copying {len(backbone_keys)} backbone parameters from teacher")
-    student_state_dict = student_evan.state_dict()
+    student_sd = student_evan.state_dict()
     for key in backbone_keys:
-        # Remove 'evan.' prefix for EVAN state dict
         evan_key = key.replace('evan.', '', 1)
-        if evan_key in student_state_dict:
-            student_state_dict[evan_key] = teacher_state_dict[key]
+        if evan_key in student_sd:
+            student_sd[evan_key] = teacher_state_dict[key]
 
-    # === Copy modality-specific weights (teacher_modality -> student_modality) ===
+    # --- modality-specific weights (teacher_modality -> student_modality) ---
     modality_components = [
         'modality_specific_layer_adaptors',
         'modality_fusion_lora_adaptors',
@@ -136,54 +103,109 @@ def init_student_from_teacher(
         'modality_encoders',
         'modality_specific_mask_tokens',
     ]
+    copied = 0
+    for comp in modality_components:
+        t_prefix = f'evan.{comp}.{teacher_modality}'
+        s_prefix = f'{comp}.{student_modality}'
+        for key in teacher_state_dict:
+            if key.startswith(t_prefix):
+                s_key = s_prefix + key[len(t_prefix):]
+                if s_key in student_sd:
+                    student_sd[s_key] = teacher_state_dict[key]
+                    copied += 1
 
-    copied_modality_keys = 0
-    for component_name in modality_components:
-        teacher_prefix = f'evan.{component_name}.{teacher_modality}'
-        student_prefix = f'{component_name}.{student_modality}'
+    print(f"  Copying {copied} modality-specific parameters ({teacher_modality} -> {student_modality})")
+    print(f"  Patch embedder for '{student_modality}' randomly initialised ({student_n_chans} channels)")
 
-        for key in teacher_state_dict.keys():
-            if key.startswith(teacher_prefix):
-                suffix = key[len(teacher_prefix):]
-                student_key = f'{student_prefix}{suffix}'
-                if student_key in student_state_dict:
-                    student_state_dict[student_key] = teacher_state_dict[key]
-                    copied_modality_keys += 1
+    student_evan.load_state_dict(student_sd, strict=True)
+    return student_evan
 
-    print(f"  Copying {copied_modality_keys} modality-specific parameters "
-          f"({teacher_modality} -> {student_modality})")
-    print(f"  Patch embedder for '{student_modality}' randomly initialized "
-          f"({student_n_chans} channels)")
 
-    # Load the modified state dict into student EVAN
-    student_evan.load_state_dict(student_state_dict, strict=True)
+def init_student_from_teacher(
+    teacher_checkpoint_path: str,
+    student_modality: str,
+    student_n_chans: int,
+    task_type: str = 'classification',
+    device: str = 'cpu',
+):
+    """
+    Create a monomodal student (EVANClassifier or EvanSegmenter) initialised from a
+    teacher checkpoint.  Backbone and modality-specific LoRA/FFT weights are copied;
+    the patch embedder is randomly initialised.  The head is copied for classifiers and
+    left at random init for segmenters (different spatial output shape).
 
-    # === Create classifier and copy weights from teacher ===
-    student_model = EVANClassifier(
-        evan_model=student_evan,
-        num_classes=config['num_classes'],
-        classifier_strategy=config['classifier_strategy'],
-        factor=config['factor'],
-        global_rep=config['global_rep'],
-        device=device,
+    Args:
+        teacher_checkpoint_path: Path to teacher checkpoint file.
+        student_modality: Modality name for the student (e.g. 's1', 's2').
+        student_n_chans: Number of input channels for student modality.
+        task_type: 'classification', 'multilabel', or 'segmentation'.
+        device: Device to load model to.
+
+    Returns:
+        EVANClassifier or EvanSegmenter with student modality initialised from teacher.
+    """
+    checkpoint = torch.load(teacher_checkpoint_path, map_location=device)
+    config = checkpoint['config']
+    evan_config = config['evan_config']
+    teacher_state_dict = checkpoint['model_state_dict']
+    teacher_modality = evan_config.get('starting_modality', 'rgb')
+
+    if student_modality == teacher_modality:
+        raise ValueError(
+            f"Student modality ({student_modality}) must differ from teacher modality ({teacher_modality})."
+        )
+
+    print(f"=== Initialising student '{student_modality}' from teacher '{teacher_modality}' ===")
+
+    student_evan = _copy_evan_backbone_and_modality(
+        teacher_state_dict, evan_config, student_modality, student_n_chans, teacher_modality, device
     )
 
-    # Copy classifier weights
-    classifier_state = {}
-    for key in teacher_state_dict.keys():
-        if key.startswith('classifier.'):
-            classifier_state[key.replace('classifier.', '')] = teacher_state_dict[key]
+    if task_type == 'segmentation':
+        student_model = EvanSegmenter(
+            evan_model=student_evan,
+            num_classes=config['num_classes'],
+            decoder_strategy=config.get('decoder_strategy', 'mean'),
+            device=device,
+        )
+        print("  Segmentation decoder randomly initialised (spatial head — no weight copying)")
+    else:
+        student_model = EVANClassifier(
+            evan_model=student_evan,
+            num_classes=config['num_classes'],
+            classifier_strategy=config['classifier_strategy'],
+            factor=config['factor'],
+            global_rep=config['global_rep'],
+            device=device,
+        )
+        # copy classifier head
+        classifier_state = {
+            k.replace('classifier.', ''): v
+            for k, v in teacher_state_dict.items()
+            if k.startswith('classifier.')
+        }
+        if classifier_state:
+            student_model.classifier.load_state_dict(classifier_state)
+            print("  Classifier weights copied from teacher")
 
-    if classifier_state:
-        student_model.classifier.load_state_dict(classifier_state)
-        print(f"  Classifier weights copied from teacher")
-
-    print(f"=== Student initialization complete ===")
+    print("=== Student initialisation complete ===")
     return student_model
 
 
-def distillation_loss(student_logits, teacher_logits, temperature=2.0):
-    """Compute KL divergence loss between student and teacher soft labels."""
+def distillation_loss(student_logits, teacher_logits, temperature=2.0, ignore_index=None, labels=None):
+    """Compute KL divergence loss between student and teacher soft labels.
+
+    Supports both classification [B, C] and segmentation [B, C, H, W] logits.
+    For segmentation, pass labels [B, H, W] and ignore_index to mask void pixels.
+    """
+    if student_logits.dim() == 4:
+        C = student_logits.shape[1]
+        student_logits = student_logits.permute(0, 2, 3, 1).reshape(-1, C)
+        teacher_logits = teacher_logits.permute(0, 2, 3, 1).reshape(-1, C)
+        if ignore_index is not None and labels is not None:
+            mask = labels.reshape(-1) != ignore_index
+            student_logits = student_logits[mask]
+            teacher_logits = teacher_logits[mask]
     student_soft = F.log_softmax(student_logits / temperature, dim=-1)
     teacher_soft = F.softmax(teacher_logits / temperature, dim=-1)
     return F.kl_div(student_soft, teacher_soft, reduction='batchmean') * (temperature ** 2)
@@ -213,13 +235,14 @@ def feature_distillation_loss(student_features, teacher_features):
 def evaluate_ensemble(student_model, teacher_model, test_loader, device,
                       student_modality_bands_dict, teacher_modality_bands_dict,
                       student_modality, teacher_modality, ensemble_mode='avg',
-                      multilabel=False, label_key='label'):
+                      multilabel=False, label_key='label', segmentation=False,
+                      num_classes=None, ignore_index=-100):
     """
     Evaluate ensemble of teacher and student models on test set.
 
     Args:
-        student_model: Student EVAN classifier
-        teacher_model: Teacher EVAN classifier
+        student_model: Student EVAN classifier or EvanSegmenter
+        teacher_model: Teacher EVAN classifier or EvanSegmenter
         test_loader: Test dataloader
         device: torch device
         student_modality_bands_dict: Band dict for student modality
@@ -229,9 +252,12 @@ def evaluate_ensemble(student_model, teacher_model, test_loader, device,
         ensemble_mode: 'avg' (average logits) or 'avg_softmax' (average probabilities)
         multilabel: If True, report mAP instead of accuracy
         label_key: Batch key for labels
+        segmentation: If True, compute mIoU (logits are [B, C, H, W])
+        num_classes: Required when segmentation=True
+        ignore_index: Ignored label value for mIoU
 
     Returns:
-        Ensemble metric: accuracy (%) for classification, mAP (%) for multilabel
+        Ensemble metric: accuracy (%), mAP (%), or mIoU (%)
     """
     student_model.eval()
     teacher_model.eval()
@@ -239,36 +265,40 @@ def evaluate_ensemble(student_model, teacher_model, test_loader, device,
     total = 0
     all_outputs = [] if multilabel else None
     all_labels = [] if multilabel else None
+    all_seg_preds = [] if segmentation else None
+    all_seg_labels = [] if segmentation else None
+
+    softmax_dim = 1  # works for both [B, C] and [B, C, H, W]
 
     with torch.no_grad():
         for batch in tqdm(test_loader, desc=f"Eval ensemble ({ensemble_mode})"):
             labels = batch[label_key].to(device)
 
-            # Get student input and predictions
             student_input = create_multimodal_batch(
                 batch, modality_bands_dict=student_modality_bands_dict, modalities=(student_modality,)
             )
             student_input = {k: v.to(device) for k, v in student_input.items()}
             student_logits = student_model(student_input)
 
-            # Get teacher input and predictions
             teacher_input = create_multimodal_batch(
                 batch, modality_bands_dict=teacher_modality_bands_dict, modalities=(teacher_modality,)
             )
             teacher_input = {k: v.to(device) for k, v in teacher_input.items()}
             teacher_logits = teacher_model(teacher_input)
 
-            # Ensemble logits/probs
             if ensemble_mode == 'avg':
                 ensemble_logits = (student_logits + teacher_logits) / 2
             elif ensemble_mode == 'avg_softmax':
-                student_probs = F.softmax(student_logits, dim=-1)
-                teacher_probs = F.softmax(teacher_logits, dim=-1)
+                student_probs = F.softmax(student_logits, dim=softmax_dim)
+                teacher_probs = F.softmax(teacher_logits, dim=softmax_dim)
                 ensemble_logits = (student_probs + teacher_probs) / 2
             else:
                 raise ValueError(f"Unknown ensemble_mode: {ensemble_mode}")
 
-            if multilabel:
+            if segmentation:
+                all_seg_preds.append(ensemble_logits.argmax(dim=1).cpu())
+                all_seg_labels.append(labels.cpu())
+            elif multilabel:
                 all_outputs.append(ensemble_logits.cpu())
                 all_labels.append(labels.cpu())
             else:
@@ -276,6 +306,9 @@ def evaluate_ensemble(student_model, teacher_model, test_loader, device,
                 total += labels.size(0)
                 correct += predicted.eq(labels).sum().item()
 
+    if segmentation:
+        return compute_miou(torch.cat(all_seg_preds), torch.cat(all_seg_labels),
+                            num_classes, ignore_index=ignore_index)
     if multilabel:
         return _compute_map(torch.cat(all_outputs), torch.cat(all_labels))
     return 100. * correct / total
@@ -359,7 +392,7 @@ def train_classifier_with_frozen_backbone(student_model, train_loader, test_load
 
     # Freeze everything, only train classifier
     student_model.freeze_all()
-    student_model.set_requires_grad(student_modality, classifier=True)
+    student_model.set_requires_grad(student_modality, head=True)
 
     ce_criterion = nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(
@@ -424,6 +457,7 @@ def distillation_training_loop(
     temperature=2.0, alpha=0.5, distillation_mode='regular',
     use_wandb=False, wandb_prefix=None, clip_norm=10,
     multilabel=False, label_key='label',
+    segmentation=False, num_classes=None, ignore_index=-100,
 ):
     """
     Training loop for knowledge distillation from teacher to student.
@@ -449,10 +483,13 @@ def distillation_training_loop(
         clip_norm: Max gradient norm for clipping
         multilabel: Use BCEWithLogitsLoss; report mAP instead of accuracy
         label_key: Batch key for labels ('label' or 'mask')
+        segmentation: If True, model outputs [B, C, H, W] and labels are [B, H, W]; report mIoU
+        num_classes: Required when segmentation=True
+        ignore_index: Label value to ignore in mIoU (e.g. 19 for PASTIS void_label)
 
     Returns:
         Tuple of (train_metric, test_metric, best_test_metric, best_epoch)
-        where metric is accuracy (%) for classification or mAP (%) for multilabel
+        where metric is accuracy (%), mAP (%), or mIoU (%) depending on task
     """
     from torch.optim.lr_scheduler import ReduceLROnPlateau
     from train_utils import evaluate
@@ -462,16 +499,23 @@ def distillation_training_loop(
     best_test_metric = 0
     best_epoch = 0
     scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=0, min_lr=1e-6)
-    ce_criterion = nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss()
+    if segmentation:
+        ce_criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
+    elif multilabel:
+        ce_criterion = nn.BCEWithLogitsLoss()
+    else:
+        ce_criterion = nn.CrossEntropyLoss()
 
     for epoch in range(num_epochs):
         student_model.train()
         train_loss = 0.0
-        # For classification: track accuracy. For multilabel: accumulate logits for mAP.
+        # Per-task accumulators
         train_correct = 0
         train_total = 0
         all_train_outputs = [] if multilabel else None
         all_train_labels = [] if multilabel else None
+        all_seg_preds = [] if segmentation else None
+        all_seg_labels = [] if segmentation else None
 
         pbar = tqdm(train_loader, desc=f"Distill Epoch {epoch+1}/{num_epochs} [{student_modality.upper()}]")
         for batch in pbar:
@@ -505,14 +549,19 @@ def distillation_training_loop(
                 loss = feature_distillation_loss(student_feat, teacher_feat)
                 # For metric tracking, still compute logits
                 with torch.no_grad():
-                    student_logits = student_model.classify_from_features(student_features)
+                    if segmentation:
+                        student_logits = student_model.segment_from_features(student_features)
+                    else:
+                        student_logits = student_model.classify_from_features(student_features)
             else:
                 # Regular or with_guidance: use logit-based distillation
                 with torch.no_grad():
                     teacher_logits = teacher_model(teacher_input)
 
                 student_logits = student_model(student_input)
-                distill_loss = distillation_loss(student_logits, teacher_logits, temperature)
+                distill_loss = distillation_loss(student_logits, teacher_logits, temperature,
+                                                ignore_index=ignore_index if segmentation else None,
+                                                labels=labels if segmentation else None)
 
                 if distillation_mode == 'with_guidance':
                     # Fixed 0.5 supervision + 0.5 distillation
@@ -533,7 +582,11 @@ def distillation_training_loop(
             optimizer.step()
 
             train_loss += loss.item()
-            if multilabel:
+            if segmentation:
+                all_seg_preds.append(student_logits.detach().argmax(dim=1).cpu())
+                all_seg_labels.append(labels.detach().cpu())
+                pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'})
+            elif multilabel:
                 all_train_outputs.append(student_logits.detach().cpu())
                 all_train_labels.append(labels.detach().cpu())
                 pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'})
@@ -556,10 +609,13 @@ def distillation_training_loop(
                 })
 
         train_loss /= len(train_loader)
-        if multilabel:
-            import torch as _torch
+        if segmentation:
+            train_metric = compute_miou(
+                torch.cat(all_seg_preds), torch.cat(all_seg_labels), num_classes, ignore_index=ignore_index
+            )
+        elif multilabel:
             train_metric = _compute_map(
-                _torch.cat(all_train_outputs), _torch.cat(all_train_labels)
+                torch.cat(all_train_outputs), torch.cat(all_train_labels)
             )
         else:
             train_metric = 100. * train_correct / train_total
@@ -569,10 +625,11 @@ def distillation_training_loop(
             student_model, test_loader, ce_criterion, device,
             student_modality_bands_dict, modalities_to_use=(student_modality,),
             multilabel=multilabel, label_key=label_key,
+            segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
         )
         scheduler.step(train_loss)
 
-        metric_name = "mAP" if multilabel else "Acc"
+        metric_name = "mIoU" if segmentation else ("mAP" if multilabel else "Acc")
         if (epoch % 8 == 1) or (epoch + 1 == num_epochs):
             print(f"  Train ({student_modality.upper()}): Loss: {train_loss:.4f}, {metric_name}: {train_metric:.2f}%")
             print(f"  Test ({student_modality.upper()}):  Loss: {test_loss:.4f}, {metric_name}: {test_metric:.2f}% (epoch {epoch+1}/{num_epochs})")
@@ -614,6 +671,8 @@ def main():
                         help='Number of training epochs (default: 1)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of dataloader workers (default: 4)')
+    parser.add_argument('--num_time_steps', type=int, default=10,
+                        help='Timestamps to sample per PASTIS image before temporal aggregation (default: 10)')
     parser.add_argument('--tz_fusion_time', type=int, default=3,
                         help='n modality-independent layers before fusion')
     parser.add_argument('--tz_lora_rank', type=int, default=32,
@@ -656,9 +715,36 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # Load teacher model
+    # Read normalizer from teacher checkpoint config (must match training preprocessing)
+    _ckpt_meta = torch.load(teacher_checkpoint_path, map_location='cpu')
+    normalization = _ckpt_meta.get('config', {}).get('normalization', 'zscore')
+    data_normalizer = None
+    if normalization == 'div10000':
+        from geobench_data_utils import make_div10000_normalizer
+        data_normalizer = make_div10000_normalizer()
+        print(f"Using div10000 normalizer (from teacher checkpoint config)")
+    else:
+        print(f"Using zscore normalizer (from teacher checkpoint config)")
+    del _ckpt_meta
+
+    # Create datasets (do this first so we know task_type before loading teacher)
+    print("\n=== Creating datasets ===")
+    train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = \
+        get_loaders_and_config(args.dataset, args.batch_size, args.num_workers,
+                               data_normalizer=data_normalizer, num_time_steps=args.num_time_steps)
+
+    is_segmentation = (task_config.task_type == 'segmentation')
+    multilabel = task_config.multilabel
+    label_key = task_config.label_key
+    ignore_index = getattr(task_config, 'ignore_index', -100)
+    metric_name = "mIoU" if is_segmentation else ("mAP" if multilabel else "Acc")
+
+    # Load teacher model — dispatch on task type
     print(f"\n=== Loading teacher from {teacher_checkpoint_path} ===")
-    teacher_model = EVANClassifier.from_checkpoint(teacher_checkpoint_path, device=device)
+    if is_segmentation:
+        teacher_model = EvanSegmenter.from_checkpoint(teacher_checkpoint_path, device=device)
+    else:
+        teacher_model = EVANClassifier.from_checkpoint(teacher_checkpoint_path, device=device)
     teacher_model = teacher_model.to(device)
     teacher_model.eval()
 
@@ -670,11 +756,6 @@ def main():
         raise ValueError(f"Student modality ({args.modality}) must be different from teacher modality ({teacher_modality})")
 
     print(f"Student modality: {args.modality}")
-
-    # Create datasets
-    print("\n=== Creating datasets ===")
-    train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = \
-        get_loaders_and_config(args.dataset, args.batch_size, args.num_workers)
 
     # Build modality_bands_dict
     if args.dataset == 'eurosat':
@@ -690,6 +771,23 @@ def main():
         s = modality_slices[args.modality]
         num_student_chans = s.stop - s.start
 
+    # Evaluate teacher on test split before distillation
+    print(f"\n=== Teacher baseline ({teacher_modality.upper()}) on test split ===")
+    if is_segmentation:
+        _ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
+    elif multilabel:
+        _ce = nn.BCEWithLogitsLoss()
+    else:
+        _ce = nn.CrossEntropyLoss()
+    _, teacher_test_metric = evaluate(
+        teacher_model, test_loader, _ce, device,
+        teacher_modality_bands_dict, modalities_to_use=(teacher_modality,),
+        multilabel=multilabel, label_key=label_key,
+        segmentation=is_segmentation, num_classes=task_config.num_classes,
+        ignore_index=ignore_index,
+    )
+    print(f"  Teacher test {metric_name}: {teacher_test_metric:.2f}%")
+
     # Initialize wandb if enabled
     if args.wandb_project:
         wandb.init(
@@ -700,8 +798,8 @@ def main():
 
     print(f"Model: {args.model}, Batch size: {args.batch_size}, LR: {args.lr}, Epochs: {args.epochs}")
 
-    # Create student EVAN model
-    print("\n=== Creating student EVAN model ===")
+    # Create student model
+    print("\n=== Creating student model ===")
 
     if args.init_from_teacher:
         print(f"Initializing student from teacher checkpoint: {teacher_checkpoint_path}")
@@ -709,11 +807,11 @@ def main():
             teacher_checkpoint_path=teacher_checkpoint_path,
             student_modality=args.modality,
             student_n_chans=num_student_chans,
+            task_type=task_config.task_type,
             device=device,
         )
         student_model = student_model.to(device)
     else:
-        # Initialize from DINO pretrained weights
         model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
         evan_model = model_fn(
             tz_fusion_time=args.tz_fusion_time,
@@ -722,6 +820,7 @@ def main():
             n_storage_tokens=4,
             starting_modality=args.modality,
             starting_n_chans=num_student_chans,
+            img_size=task_config.img_size,
             device=device,
             load_weights=False
         )
@@ -738,26 +837,32 @@ def main():
                 flatten_embedding=False,
             ).to(device)
 
-        student_model = EVANClassifier(
-            evan_model, num_classes=task_config.num_classes,
-            classifier_strategy="mean", global_rep=args.global_rep, device=device,
-        )
+        if is_segmentation:
+            student_model = EvanSegmenter(
+                evan_model, num_classes=task_config.num_classes,
+                decoder_strategy="mean", device=device,
+            )
+        else:
+            student_model = EVANClassifier(
+                evan_model, num_classes=task_config.num_classes,
+                classifier_strategy="mean", global_rep=args.global_rep, device=device,
+            )
         student_model = student_model.to(device)
 
     # Freeze student backbone, train only specified components
     student_model.freeze_all()
     if args.train_mode == 'fft':
         student_model.set_requires_grad('backbone', blocks=True, norm=True)
-        student_model.set_requires_grad(args.modality, msla=True, mfla=False, patch_embedders=True, clsreg=True, classifier=True)
+        student_model.set_requires_grad(args.modality, msla=True, mfla=False, patch_embedders=True, clsreg=True, head=True)
         print(f"Mode=fft, Freezing lora paths, training full layers and classifier.")
     elif args.train_mode == 'adaptor':
-        student_model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, classifier=True)
+        student_model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, head=True)
         print(f"Mode=adaptor, Freezing backbone, training embedder, lora or fft adaptors and classifier.")
     elif args.train_mode == 'probe':
-        student_model.set_requires_grad(args.modality, classifier=True)
+        student_model.set_requires_grad(args.modality, head=True)
         print(f"Mode=Probe, Freezing backbone, only training classifier.")
     elif args.train_mode == 'emb+probe':
-        student_model.set_requires_grad(args.modality, patch_embedders=True, classifier=True)
+        student_model.set_requires_grad(args.modality, patch_embedders=True, head=True)
         print(f"Mode=Emb+Probe, Freezing backbone, training embedder(tokenizer) and classifier.")
 
     # Print parameter info
@@ -768,9 +873,6 @@ def main():
     # Training setup
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, student_model.parameters()), lr=args.lr)
     num_epochs = args.epochs
-    multilabel = task_config.multilabel
-    label_key = task_config.label_key
-    metric_name = "mAP" if multilabel else "Acc"
 
     print(f"\n=== Distillation training for {num_epochs} epochs ===")
     print(f"Strategy: Distill from {teacher_modality.upper()} teacher to {args.modality.upper()} student")
@@ -786,6 +888,8 @@ def main():
         distillation_mode=args.distillation_mode,
         use_wandb=bool(args.wandb_project), wandb_prefix='distill',
         multilabel=multilabel, label_key=label_key,
+        segmentation=is_segmentation, num_classes=task_config.num_classes,
+        ignore_index=ignore_index,
     )
 
     print("\n=== Distillation Training complete ===")
@@ -797,6 +901,8 @@ def main():
         student_modality_bands_dict, teacher_modality_bands_dict,
         args.modality, teacher_modality, ensemble_mode='avg',
         multilabel=multilabel, label_key=label_key,
+        segmentation=is_segmentation, num_classes=task_config.num_classes,
+        ignore_index=ignore_index,
     )
     print(f"  Ensemble {metric_name} (avg logits): {ensemble_metric_avg:.2f}%")
 
@@ -805,6 +911,8 @@ def main():
         student_modality_bands_dict, teacher_modality_bands_dict,
         args.modality, teacher_modality, ensemble_mode='avg_softmax',
         multilabel=multilabel, label_key=label_key,
+        segmentation=is_segmentation, num_classes=task_config.num_classes,
+        ignore_index=ignore_index,
     )
     print(f"  Ensemble {metric_name} (avg softmax): {ensemble_metric_softmax:.2f}%")
 
@@ -813,7 +921,7 @@ def main():
     supervised_classifier_acc = None
     supervised_classifier_best_acc = None
 
-    if args.distillation_mode == 'feature' and not multilabel:
+    if args.distillation_mode == 'feature' and not multilabel and not is_segmentation:
         print("\n=== Feature Mode: Additional Evaluations ===")
 
         print("\n--- Evaluation 1: Using teacher's classifier on student features ---")

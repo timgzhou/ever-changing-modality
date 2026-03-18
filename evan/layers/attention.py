@@ -73,7 +73,7 @@ class SelfAttention(nn.Module):
         k = k.to(dtype=rope_dtype)
         N = q.shape[-2]
         prefix = N - sin.shape[-2]
-        assert prefix >= 0
+        assert prefix >= 0, f"RoPE mismatch: seq_len={N}, rope_len={sin.shape[-2]}, prefix={prefix}"
         q_prefix = q[:, :, :prefix, :]
         q = rope_apply(q[:, :, prefix:, :], sin, cos)  # [B, head, hw, D//head]
         q = torch.cat((q_prefix, q), dim=-2)  # [B, head, N, D//head]

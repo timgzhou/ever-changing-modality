@@ -225,3 +225,5 @@ ds_ers
 GEO-Bench-2
 *.png
 .claude/
+.vscode/
+pyrightconfig.json

@@ -12,6 +12,7 @@ from eurosat_data_utils import (
     get_band_indices,
     BAND_MINS,
     BAND_MAXS,
+    print_and_reset_rgb_stats,
 )
 import wandb
 
@@ -483,6 +484,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                 })
 
         train_loss /= len(train_loader)
+        print_and_reset_rgb_stats()
         if segmentation:
             train_metric = compute_miou(
                 torch.cat(train_seg_preds), torch.cat(train_seg_labels), num_classes,
@@ -1037,12 +1039,12 @@ def _delulu_stage2_train_classifier(
         print(f"  Distill-only mode: tuning ALL model parameters (EVAN + classifiers)")
         model.freeze_all()
         model.set_requires_grad('backbone', blocks=True, norm=True)
-        model.set_requires_grad('all', classifier=True)
+        model.set_requires_grad('all', head=True)
         trainable_params = list(model.parameters())
         best_classifier_state = None  # Will save full model state instead
     else:
         model.freeze_all()
-        model.set_requires_grad("all", classifier=True)
+        model.set_requires_grad("all", head=True)
         trainable_params = list(model.modality_classifiers.parameters())
 
     optimizer = torch.optim.AdamW(trainable_params, lr=lr)

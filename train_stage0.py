@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 
 EUROSAT_MODALITIES = ['rgb', 'vre', 'nir', 'swir', 'aw']
 BENV2_MODALITIES   = ['s2', 's1']
-PASTIS_MODALITIES  = ['s2', 's1']
+PASTIS_MODALITIES  = ['s2', 's1', 'rgb']
 
 
 def get_task_config_and_loaders(dataset, modality, batch_size, num_workers, data_normalizer=None, num_time_steps=10):
@@ -120,7 +120,9 @@ def main():
     print("\n=== Creating datasets ===")
     data_normalizer = None
     normalization = 'zscore'
-    if args.use_s2dino_weights and args.dataset == 'pastis':
+    if args.dataset == 'pastis' and (
+        args.use_s2dino_weights or (args.use_dino_weights and args.modality == 'rgb')
+    ):
         from geobench_data_utils import make_div10000_normalizer
         data_normalizer = make_div10000_normalizer()
         normalization = 'div10000'
@@ -180,32 +182,19 @@ def main():
     model = model.to(device)
 
     # Freeze / unfreeze according to train_mode
-    # 'classifier' kwarg → 'decoder' kwarg for EvanSegmenter
     model.freeze_all()
     if args.train_mode == 'fft':
         model.set_requires_grad('backbone', blocks=True, norm=True)
-        if is_segmentation:
-            model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, decoder=True)
-        else:
-            model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, classifier=True)
+        model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, modality_encoders=True, head=True)
         print("Mode=fft: training full backbone layers + head.")
     elif args.train_mode == 'adaptor':
-        if is_segmentation:
-            model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, decoder=True)
-        else:
-            model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, classifier=True)
+        model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, modality_encoders=True, head=True)
         print("Mode=adaptor: training embedder, LoRA/FFT adaptors + head.")
     elif args.train_mode == 'probe':
-        if is_segmentation:
-            model.set_requires_grad(args.modality, decoder=True)
-        else:
-            model.set_requires_grad(args.modality, classifier=True)
+        model.set_requires_grad(args.modality, head=True)
         print("Mode=probe: training head only.")
     elif args.train_mode == 'emb+probe':
-        if is_segmentation:
-            model.set_requires_grad(args.modality, patch_embedders=True, decoder=True)
-        else:
-            model.set_requires_grad(args.modality, patch_embedders=True, classifier=True)
+        model.set_requires_grad(args.modality, patch_embedders=True, head=True)
         print("Mode=emb+probe: training embedder + head.")
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -324,4 +313,7 @@ python -u train_stage0.py --dataset benv2 --modality s1 --epochs 2 --checkpoint_
 # PASTIS S2
 python -u train_stage0.py --dataset pastis --modality s2 --epochs 2 --batch_size 16 --checkpoint_name pastis_s2_s0 --train_mode fft --num_workers 4 --use_dino_weights 
 python -u train_stage0.py --dataset pastis --modality s2 --epochs 16 --batch_size 16 --checkpoint_name pastis_s2_s0 --train_mode fft --num_workers 4  --use_s2dino_weights
+
+# PASTIS RGB (init from DINOv3, 3-channel B04/B03/B02 subset of S2)
+python -u train_stage0.py --dataset pastis --modality rgb --epochs 16 --batch_size 16 --checkpoint_name pastis_rgb_s0 --train_mode fft --num_workers 4 --use_dino_weights
 """
