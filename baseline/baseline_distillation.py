@@ -447,7 +447,7 @@ def train_classifier_with_frozen_backbone(student_model, train_loader, test_load
         metric_name = "mAP" if multilabel else "Acc"
         print(f"  Classifier Epoch {epoch+1}: Test {metric_name} = {test_acc:.2f}% (best: {best_test_acc:.2f}%)")
 
-    return test_acc, best_test_acc
+    return test_acc, best_test_acc # type: ignore
 
 
 def distillation_training_loop(
@@ -649,7 +649,7 @@ def distillation_training_loop(
                 f'{wandb_prefix}/lr': optimizer.param_groups[0]['lr'],
             })
 
-    return train_metric, test_metric, best_test_metric, best_epoch
+    return train_metric, test_metric, best_test_metric, best_epoch  # type: ignore
 
 
 def main():

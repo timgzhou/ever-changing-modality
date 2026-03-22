@@ -4,3 +4,4 @@ benv2,s2,s1,0.0001,0.001,16,0.75,0.3,0.1,0.0,48972070,all,False,0,mAP,42.80,56.6
 benv2,s2,s1,0.0001,0.001,16,0.75,0.3,0.3,0.0,48972070,all,False,0,mAP,41.74,57.46,57.77,56.77,41.74,57.52,57.43,0.00,checkpoints/benv2_s2_s0.pt,checkpoints/benv2_s2_to_s1_dryrun.pt
 pastis,s2,s1,0.0001,0.001,64,0.75,0.3,0.3,0.0,48126248,all,False,0,mIoU,2.32,6.25,4.16,2.36,2.32,15.66,2.32,0.00,checkpoints/pastis_s2_s0.pt,checkpoints/pastis_s2_to_s1_dryrun.pt
 pastis,s2,s1,0.0001,0.001,80,0.75,0.3,0.3,0.0,48126248,all,False,0,mIoU,5.09,18.45,15.46,11.37,7.09,19.50,15.41,0.00,checkpoints/pastis_s2_s0.pt,checkpoints/pastis_s2_to_s1_dryrun.pt
+pastis,s2,s1,0.0001,0.001,120,0.75,0.3,0.3,0.0,42802856,all,False,0,mIoU,7.75,18.67,14.84,13.90,7.75,18.67,14.90,0.00,checkpoints/pastis_s2_s0.pt,checkpoints/pastis_s2_to_s1.pt

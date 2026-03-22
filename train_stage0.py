@@ -92,7 +92,7 @@ def main():
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--wandb_project', type=str, default=None)
     parser.add_argument('--global_rep', type=str, default='clstoken', choices=['clstoken', 'mean_patch'])
-    parser.add_argument('--train_mode', type=str, default='emb+probe',
+    parser.add_argument('--train_mode', type=str, default='fft',
                         choices=['probe', 'adaptor', 'fft', 'emb+probe'])
     parser.add_argument('--checkpoint_name', type=str, default=None)
     parser.add_argument('--num_time_steps', type=int, default=10,
@@ -302,18 +302,18 @@ if __name__ == '__main__':
 python -u train_stage0.py --dataset eurosat --modality rgb --epochs 5 --checkpoint_name eurosat_rgb_s0
 
 # BEN-v2 S2 (random init)
-python -u train_stage0.py --dataset benv2 --modality s2 --epochs 2 --checkpoint_name benv2_s2_s0 --train_mode fft
+python -u train_stage0.py --dataset benv2 --modality s2 --epochs 2 --checkpoint_name benv2_s2_s0
 
 # BEN-v2 S2 (init from torchgeo S2-DINO)
-python -u train_stage0.py --dataset benv2 --modality s2 --epochs 2 --checkpoint_name benv2_s2dino_s0 --train_mode fft --use_s2dino_weights
+python -u train_stage0.py --dataset benv2 --modality s2 --epochs 2 --checkpoint_name benv2_s2dino_s0 --use_s2dino_weights
 
 # BEN-v2 S1 (start from S1 instead)
-python -u train_stage0.py --dataset benv2 --modality s1 --epochs 2 --checkpoint_name benv2_s1_s0 --train_mode fft
+python -u train_stage0.py --dataset benv2 --modality s1 --epochs 2 --checkpoint_name benv2_s1_s0
 
 # PASTIS S2
-python -u train_stage0.py --dataset pastis --modality s2 --epochs 2 --batch_size 16 --checkpoint_name pastis_s2_s0 --train_mode fft --num_workers 4 --use_dino_weights 
-python -u train_stage0.py --dataset pastis --modality s2 --epochs 16 --batch_size 16 --checkpoint_name pastis_s2_s0 --train_mode fft --num_workers 4  --use_s2dino_weights
+python -u train_stage0.py --dataset pastis --modality s2 --epochs 2 --batch_size 16 --checkpoint_name pastis_s2_s0 --num_workers 4 --use_dino_weights 
+python -u train_stage0.py --dataset pastis --modality s2 --epochs 16 --batch_size 16 --checkpoint_name pastis_s2_s0 --num_workers 4  --use_s2dino_weights
 
 # PASTIS RGB (init from DINOv3, 3-channel B04/B03/B02 subset of S2)
-python -u train_stage0.py --dataset pastis --modality rgb --epochs 16 --batch_size 16 --checkpoint_name pastis_rgb_s0 --train_mode fft --num_workers 4 --use_dino_weights
+python -u train_stage0.py --dataset pastis --modality rgb --epochs 16 --batch_size 16 --checkpoint_name pastis_rgb_s0 --num_workers 4 --use_dino_weights
 """
