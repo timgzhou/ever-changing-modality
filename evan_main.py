@@ -47,7 +47,6 @@ class EVAN(nn.Module):
         n_storage_tokens: int = 4,
         mask_k_bias: bool = False,
         untie_cls_and_patch_norms: bool = False,
-        untie_global_and_local_cls_norm: bool = False,
         device: Any | None = None,
         tz_modality_specific_layer_augmenter: Literal["lora", "fft"] = "lora",
         tz_modality_fusion_layer_augmenter: Literal["lora","none"] = "none",
@@ -102,11 +101,6 @@ class EVAN(nn.Module):
         else:
             self.cls_norm = None
 
-        self.untie_global_and_local_cls_norm = untie_global_and_local_cls_norm
-        if untie_global_and_local_cls_norm:
-            self.local_cls_norm = norm_layer_cls(embed_dim)
-        else:
-            self.local_cls_norm = None
         self.head = nn.Identity()
 
 
@@ -127,7 +121,7 @@ class EVAN(nn.Module):
         self.add_new_cls_token(starting_modality)
         if self.n_storage_tokens > 0: self.add_new_storage_tokens(starting_modality)
         self.add_new_msla(starting_modality)
-        self.add_modality_encoder(starting_modality)
+        self.add_modality_encoding(starting_modality)
         if self.tz_modality_fusion_layer_augmenter!="none": 
             self.add_new_mfla(starting_modality)
 
@@ -165,13 +159,8 @@ class EVAN(nn.Module):
             embed_dim=self.embed_dim,
             flatten_embedding=False,
         )
-    def add_new_cls_token(self,modality_name,init_modality=None):
-        assert modality_name not in self.cls_tokens, f"{modality_name} already in cls_tokens"
-        if init_modality in self.cls_tokens:
-            print(f"initializing {modality_name} clstoken from {init_modality} clstoken.")
-            self.cls_tokens[modality_name] = nn.Parameter(self.cls_tokens[self.starting_modality].data.clone())
-        else:
-            self.cls_tokens[modality_name] = nn.Parameter(torch.empty(1, 1, self.embed_dim, device=self.device))
+    def add_new_cls_token(self,modality_name):
+        self.cls_tokens[modality_name] = nn.Parameter(torch.empty(1, 1, self.embed_dim, device=self.device))
     def add_new_storage_tokens(self,modality_name):
         assert modality_name not in self.storage_tokens, f"{modality_name} already in storage_tokens"
         self.storage_tokens[modality_name] = nn.Parameter(torch.empty(1, self.n_storage_tokens, self.embed_dim, device=self.device))
@@ -192,18 +181,16 @@ class EVAN(nn.Module):
             # so weight init from backbone is deferred to the pretrained weight loaders.
         else:
             raise RuntimeError(f"unrecognized {self.tz_modality_specific_layer_augmenter=}")
-    def add_modality_encoder(self,modality_name):
+    def add_modality_encoding(self,modality_name):
         self.modality_encodings[modality_name]=nn.Parameter(
             torch.zeros(1, 1, self.embed_dim, device=self.device)
         )
-    def add_new_mfla(self, modality, init="backbone"):
+    def add_new_mfla(self, modality):
         """
         Add modality fusion layer adaptors.
 
         Args:
             modality: Name of the modality
-            init: Weight initialization. "backbone" copies from self.blocks,
-                  a modality name copies from that modality, None for random init.
         """
         num_fusion_blocks = self.n_blocks - self.tz_fusion_time
         if self.tz_modality_fusion_layer_augmenter == "lora":
@@ -233,28 +220,6 @@ class EVAN(nn.Module):
                 for i in range(length)
             ])
 
-    def copy_weights_to_adaptor(self, adaptor_list, source="backbone", block_offset=0):
-        """
-        Copy weights from a source to an adaptor list.
-
-        Args:
-            adaptor_list: Target nn.ModuleList to copy weights into
-            source: Weight source. Options:
-                - "backbone": Copy from self.blocks
-                - <modality_name>: Copy from that modality's msla/mfla
-            block_offset: Starting block index when copying from backbone
-        """
-        for i, adaptor in enumerate(adaptor_list):
-            if source == "backbone":
-                src_block = self.blocks[block_offset + i]
-            else:
-                block_idx = i + block_offset
-                if block_idx < self.tz_fusion_time:
-                    src_block = self.modality_specific_layer_adaptors[source][block_idx]
-                else:
-                    src_block = self.modality_fusion_lora_adaptors[source][block_idx - self.tz_fusion_time]
-            adaptor.load_state_dict(src_block.state_dict())
-
     def load_pretrained_dino(self, model_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", load_weights:bool=True):
         """
         Load pretrained DINO weights from HuggingFace into EVAN.
@@ -265,9 +230,8 @@ class EVAN(nn.Module):
         if not load_weights:
             print("pretrained=False, not loading weight and returning directly.")
             return
-        print(f"\n=== Loading pretrained DINO weights ===")
+        print(f"\n=== Loading pretrained DINO weights from HuggingFace... ===")
         print(f"Model: {model_name}")
-        print("Loading pretrained weights from HuggingFace...")
 
         from huggingface_hub import hf_hub_download
         from safetensors.torch import load_file
@@ -377,6 +341,12 @@ class EVAN(nn.Module):
                         checkpoint[new_key] = checkpoint.pop(key)
         
         result = self.load_state_dict(checkpoint, strict=False)
+
+        actually_transferred_params = sum(
+            v.numel() for k, v in checkpoint.items()
+            if k not in result.unexpected_keys
+        )
+        print(f"    - Actually transferred: {actually_transferred_params:,}")
 
         # Filter out expected missing keys (EVAN-specific multi-modality components)
         def is_expected_missing(key):
@@ -552,10 +522,12 @@ class EVAN(nn.Module):
         params_before = sum(p.numel() for p in self.parameters())
         self.add_new_patch_embedders(modality_key, in_chans)
         self.add_new_msla(modality_key, init="backbone")
-        self.add_new_mfla(modality_key, init="backbone")
-        self.add_new_cls_token(modality_key, init_modality=self.starting_modality)
-        self.add_new_storage_tokens(modality_key)
-        self.add_modality_encoder(modality_key)
+        if self.tz_modality_fusion_layer_augmenter!="none":
+            self.add_new_mfla(modality_key, init="backbone")
+        self.add_new_cls_token(modality_key)
+        if self.n_storage_tokens > 0:
+            self.add_new_storage_tokens(modality_key)
+        self.add_modality_encoding(modality_key)
 
         params_after = sum(p.numel() for p in self.parameters())
         new_params = params_after - params_before
@@ -565,7 +537,9 @@ class EVAN(nn.Module):
         num_fusion_blocks = self.n_blocks - self.tz_fusion_time
         embedder_params = sum(p.numel() for p in self.patch_embedders[modality_key].parameters())
         msla_params = sum(p.numel() for p in self.modality_specific_layer_adaptors[modality_key].parameters())
-        mfla_params = sum(p.numel() for p in self.modality_fusion_lora_adaptors[modality_key].parameters())
+        if self.tz_modality_fusion_layer_augmenter!="none": 
+            mfla_params = sum(p.numel() for p in self.modality_fusion_lora_adaptors[modality_key].parameters())
+        else: mfla_params=0
         cls_token_params = self.cls_tokens[modality_key].numel()
         storage_token_params = self.storage_tokens[modality_key].numel() if self.n_storage_tokens > 0 else 0
         encoding_params = self.modality_encodings[modality_key].numel()
@@ -603,7 +577,7 @@ class EVAN(nn.Module):
         cls_token = self.cls_tokens[modality_key]
         if self.n_storage_tokens > 0:
             storage_tokens = self.storage_tokens[modality_key]
-        else:
+        else: # create an empty tensor with dim for torch.cat to work, no-op
             storage_tokens = torch.empty(
                 1,
                 0,
@@ -633,120 +607,15 @@ class EVAN(nn.Module):
         Returns:
             Dictionary with normalized features
         """
-        # Now x is a dict of modalities
         if isinstance(x, torch.Tensor) or not isinstance(x, dict) or len(x) == 0:
             raise ValueError("Input must be a non-empty dict of modalities.")
 
-        # Validate batch sizes match across modalities
         batch_sizes = [v.shape[0] for v in x.values()]
         if len(set(batch_sizes)) > 1:
             raise ValueError(f"Batch sizes must match across modalities, got {batch_sizes}")
 
-        # Step 1 & 2: Process through modality-specific layers
         embedded_modalities = self.forward_modality_specific_features(x)
-
-        # Step 3: Concatenate patches for fusion (allow cross-modal attention)
-        # Store metadata to split back later
-        modality_info = {}
-        all_cls_storage = {}
-        all_patches = []
-        current_idx = 0
-
-        for modality_key in sorted(embedded_modalities.keys()):
-            x_mod = embedded_modalities[modality_key]
-
-            # Extract CLS and storage tokens (keep separate per modality)
-            all_cls_storage[modality_key] = x_mod[:, :self.n_storage_tokens + 1, :]
-
-            # Extract patch tokens
-            patches = x_mod[:, self.n_storage_tokens + 1:, :]
-            num_patches = patches.shape[1]
-
-            # Store metadata for later splitting
-            modality_info[modality_key] = {
-                'num_patches': num_patches,
-                'start_idx': current_idx,
-                'end_idx': current_idx + num_patches
-            }
-
-            all_patches.append(patches)
-            current_idx += num_patches
-
-        # Concatenate all patches along sequence dimension
-        # This allows cross-modal attention during fusion
-        x_patches_concat = torch.cat(all_patches, dim=1)  # [B, sum(num_patches), embed_dim]
-
-        # Concatenate all CLS/storage tokens from all modalities
-        all_cls_storage_list = [all_cls_storage[k] for k in sorted(all_cls_storage.keys())]
-        x_cls_storage_concat = torch.cat(all_cls_storage_list, dim=1)  # [B, n_modalities * (1 + n_storage), embed_dim]
-        n_cls_storage_per_modality = self.n_storage_tokens + 1
-        n_modalities = len(all_cls_storage)
-
-        # Compute H, W from image size and patch size
-        H = W = self.img_size // self.patch_size
-
-        # Combine for fusion processing
-        x_fused = torch.cat([x_cls_storage_concat, x_patches_concat], dim=1)
-
-        # Step 4: Process through fusion blocks with cross-modal attention
-        # All patches from all modalities attend to each other here!
-        # self.blocks holds only the fusion-stage blocks (indices 0..n_fusion-1) when
-        # tz_modality_specific_layer_augmenter=="fft", so index with lora_idx directly.
-        for lora_idx in range(len(self.blocks)):
-            if self.rope_embed is not None:
-                rope_sincos = self.rope_embed(H=H, W=W)
-            else:
-                rope_sincos = None
-
-            if self.tz_modality_fusion_layer_augmenter=="lora":
-                x_fused = self.blocks[lora_idx](x_fused, rope_sincos)
-                lora_output = 0
-                for modality_key in embedded_modalities.keys():
-                    lora = self.modality_fusion_lora_adaptors[modality_key][lora_idx]
-                    lora_output = lora_output + lora(x_fused)
-                x_fused = x_fused + lora_output
-
-        # Step 5: Split fused representation back into modality-specific outputs
-        # Total CLS/storage tokens = n_modalities * (1 + n_storage_tokens)
-        total_cls_storage = n_modalities * n_cls_storage_per_modality
-        x_cls_storage_fused = x_fused[:, :total_cls_storage, :]
-        x_patches_fused = x_fused[:, total_cls_storage:, :]
-        output_dict = {}
-        sorted_modalities = sorted(embedded_modalities.keys())
-        for mod_idx, modality_key in enumerate(sorted_modalities):
-            # Extract this modality's CLS/storage tokens
-            cls_start = mod_idx * n_cls_storage_per_modality
-            cls_end = cls_start + n_cls_storage_per_modality
-            x_cls_storage_mod = x_cls_storage_fused[:, cls_start:cls_end, :]
-
-            # Extract this modality's patches
-            info = modality_info[modality_key]
-            patch_start, patch_end = info['start_idx'], info['end_idx']
-            patches = x_patches_fused[:, patch_start:patch_end, :]
-
-            # Recombine this modality's CLS/storage with its patches
-            x_mod = torch.cat([x_cls_storage_mod, patches], dim=1)
-
-            # Apply normalization
-            if self.untie_cls_and_patch_norms or self.untie_global_and_local_cls_norm:
-                if self.untie_cls_and_patch_norms:
-                    x_norm_cls_reg = self.cls_norm(x_mod[:, :self.n_storage_tokens + 1])
-                else:
-                    x_norm_cls_reg = self.norm(x_mod[:, :self.n_storage_tokens + 1])
-                x_norm_patch = self.norm(x_mod[:, self.n_storage_tokens + 1:])
-            else:
-                x_norm = self.norm(x_mod)
-                x_norm_cls_reg = x_norm[:, :self.n_storage_tokens + 1]
-                x_norm_patch = x_norm[:, self.n_storage_tokens + 1:]
-
-            output_dict[modality_key] = {
-                "x_norm_clstoken": x_norm_cls_reg[:, 0],
-                "x_storage_tokens": x_norm_cls_reg[:, 1:],
-                "x_norm_patchtokens": x_norm_patch,
-                "x_prenorm": x_mod,
-            }
-
-        return output_dict
+        return self.forward_fusion_from_modality_features(embedded_modalities)
 
     def forward_modality_specific_features(self, x: Dict[str, Tensor]) -> Dict[str, Tensor]:
         """
@@ -868,29 +737,31 @@ class EVAN(nn.Module):
         x_fused = torch.cat([x_cls_storage_concat, x_patches_concat], dim=1)
 
         # Step 2: Process through fusion blocks with cross-modal attention
+        if self.rope_embed is not None:
+            # multi-modal rope, same spatial location patch of different modalities get rotated by the same amount
+            sin, cos = self.rope_embed(H=H, W=W)  # [HW, D]
+            sin = sin.repeat(n_modalities, 1)       # [n_modalities*HW, D]
+            cos = cos.repeat(n_modalities, 1)
+            rope_sincos = (sin, cos)
+        else:
+            rope_sincos = None
         for lora_idx in range(len(self.blocks)):
-            if self.rope_embed is not None:
-                rope_sincos = self.rope_embed(H=H, W=W)
-            else:
-                rope_sincos = None
 
             # Shared block forward on concatenated representation
             x_fused = self.blocks[lora_idx](x_fused, rope_sincos)
 
             # Add fusion LoRA only for hallucinated modalities (if specified)
             if hallucinated_modalities:
-                lora_output = 0
-                for modality_key in hallucinated_modalities:
-                    if modality_key in self.modality_fusion_lora_adaptors:
-                        lora = self.modality_fusion_lora_adaptors[modality_key][lora_idx]
-                        lora_output = lora_output + lora(x_fused)
-                x_fused = x_fused + lora_output
-            # else: no MFLA applied when hallucinated_modalities is None (all real)
+                raise NotImplementedError("WARNING: don't use MFLA yet, not implemented")
+                # lora_output = 0
+                # for modality_key in hallucinated_modalities:
+                #     if modality_key in self.modality_fusion_lora_adaptors:
+                #         lora = self.modality_fusion_lora_adaptors[modality_key][lora_idx]
+                #         lora_output = lora_output + lora(x_fused)
+                # x_fused = x_fused + lora_output
 
         # Step 3: Split fused representation back into modality-specific outputs
         total_cls_storage = n_modalities * n_cls_storage_per_modality
-        x_cls_storage_fused = x_fused[:, :total_cls_storage, :]
-        x_patches_fused = x_fused[:, total_cls_storage:, :]
 
         # Split back into modality-specific outputs
         output_dict = {}
@@ -899,22 +770,20 @@ class EVAN(nn.Module):
             # Extract this modality's CLS/storage tokens
             cls_start = mod_idx * n_cls_storage_per_modality
             cls_end = cls_start + n_cls_storage_per_modality
-            x_cls_storage_mod = x_cls_storage_fused[:, cls_start:cls_end, :]
+            x_cls_storage_mod = x_fused[:, cls_start:cls_end, :]
 
             # Extract this modality's patches
             info = modality_info[modality_key]
-            patch_start, patch_end = info['start_idx'], info['end_idx']
-            patches = x_patches_fused[:, patch_start:patch_end, :]
+            patch_start = total_cls_storage + info['start_idx']
+            patch_end = total_cls_storage + info['end_idx']
+            patches = x_fused[:, patch_start:patch_end, :]
 
             # Recombine this modality's CLS/storage with its patches
             x_mod = torch.cat([x_cls_storage_mod, patches], dim=1)
 
             # Apply normalization
-            if self.untie_cls_and_patch_norms or self.untie_global_and_local_cls_norm:
-                if self.untie_cls_and_patch_norms:
-                    x_norm_cls_reg = self.cls_norm(x_mod[:, :self.n_storage_tokens + 1])
-                else:
-                    x_norm_cls_reg = self.norm(x_mod[:, :self.n_storage_tokens + 1])
+            if self.untie_cls_and_patch_norms:
+                x_norm_cls_reg = self.cls_norm(x_mod[:, :self.n_storage_tokens + 1])
                 x_norm_patch = self.norm(x_mod[:, self.n_storage_tokens + 1:])
             else:
                 x_norm = self.norm(x_mod)
@@ -1008,9 +877,6 @@ class EVAN(nn.Module):
                 if self.cls_norm is not None:
                     for param in self.cls_norm.parameters():
                         param.requires_grad = True
-                if self.local_cls_norm is not None:
-                    for param in self.local_cls_norm.parameters():
-                        param.requires_grad = True
         elif modality == 'all':
             # Apply to all modalities
             for mod_key in self.patch_embedders.keys():
@@ -1073,7 +939,6 @@ class EVAN(nn.Module):
             'n_storage_tokens': self.n_storage_tokens,
             'mask_k_bias': self.mask_k_bias,
             'untie_cls_and_patch_norms': self.untie_cls_and_patch_norms,
-            'untie_global_and_local_cls_norm': self.untie_global_and_local_cls_norm,
             'tz_modality_specific_layer_augmenter': self.tz_modality_specific_layer_augmenter,
             'tz_modality_fusion_layer_augmenter': self.tz_modality_fusion_layer_augmenter,
             'tz_fusion_time': self.tz_fusion_time,

@@ -185,10 +185,10 @@ def main():
     model.freeze_all()
     if args.train_mode == 'fft':
         model.set_requires_grad('backbone', blocks=True, norm=True)
-        model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, modality_encoders=True, head=True)
+        model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, modality_encoders=True, head=True)
         print("Mode=fft: training full backbone layers + head.")
     elif args.train_mode == 'adaptor':
-        model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, modality_encoders=True, head=True)
+        model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, modality_encoders=True, head=True)
         print("Mode=adaptor: training embedder, LoRA/FFT adaptors + head.")
     elif args.train_mode == 'probe':
         model.set_requires_grad(args.modality, head=True)
