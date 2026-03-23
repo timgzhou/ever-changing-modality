@@ -9,7 +9,6 @@ from datetime import datetime
 import wandb
 
 from evan_main import EVANClassifier, EvanSegmenter
-from train_utils import _delulu_stage3_test, _delulu_stage3_test_segmentation
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 VALID_NEW_MODS = {
@@ -21,7 +20,7 @@ VALID_NEW_MODS = {
 def get_loaders_and_config(dataset, batch_size, num_workers, data_normalizer=None):
     """Return (train1, val1, train2, val2, test, task_config, modality_bands_dict_full)."""
     if dataset == 'eurosat':
-        from eurosat_data_utils import ALL_BAND_NAMES, get_loaders_with_val
+        from eurosat_data_utils import get_loaders_with_val
         from types import SimpleNamespace
         train1, val1, train2, val2, test = get_loaders_with_val(batch_size, num_workers)
         # EuroSAT: full modality_bands_dict built per-run from get_modality_bands_dict
@@ -74,8 +73,10 @@ def main():
                         help='Frequency of labeled monomodal batches from train1 (0-1, default: 0.3)')
     parser.add_argument('--labeled_start_fraction', type=float, default=0.0,
                         help='Fraction of training before labeled mixing starts (0=start, 0.5=halfway, 1=never)')
+    parser.add_argument('--entr_frequency', type=float, default=0,
+                        help='Frequency of entropy minimization instead of distillation on unlabeled batches')
     parser.add_argument('--active_losses', type=str, nargs='+', default=None,
-                        choices=['mae', 'latent', 'prefusion', 'distill', 'ce'],
+                        choices=['mae', 'latent', 'prefusion', 'distill', 'ce', 'entr'],
                         help='Which losses to activate (default: all)')
     parser.add_argument('--use_mfla', action='store_true',
                         help='Enable MFLA training for hallucinated modalities')
@@ -85,6 +86,11 @@ def main():
                         help='When student peeking surpasses teacher, replace teacher and use peeking mode for distillation')
     parser.add_argument('--results_csv', type=str, required=True,
                         help='Path to results CSV file')
+    parser.add_argument('--intermediate_projector_type', type=str, default='self',
+                        choices=['self', 'cross'],
+                        help='Type of intermediate projector: self-attention (self) or cross-attention (cross)')
+    parser.add_argument('--intermediate_projector_num_layers', type=int, default=2,
+                        help='Number of layers in intermediate projector (default: 2)')
 
     # UNIMPORTANT
     parser.add_argument('--batch_size', type=int, default=64)
@@ -125,7 +131,7 @@ def main():
 
     # Build modality_bands_dict
     if args.dataset == 'eurosat':
-        from eurosat_data_utils import ALL_BAND_NAMES, get_modality_bands_dict
+        from eurosat_data_utils import get_modality_bands_dict
         modality_bands_dict = get_modality_bands_dict(starting_modality, newmod)
         bands_newmod = modality_bands_dict[newmod]
     else:
@@ -163,6 +169,10 @@ def main():
         (bands_newmod.stop - bands_newmod.start)
     if newmod not in evan.patch_embedders:
         print(f"  Creating {newmod} modality components...")
+        evan.intermediate_projector_type = args.intermediate_projector_type
+        evan.intermediate_projector_num_layers = args.intermediate_projector_num_layers
+        if args.intermediate_projector_type == "cross" and not hasattr(evan, 'projector_queries'):
+            evan.projector_queries = torch.nn.ParameterDict()
         evan.create_modality_components(newmod, num_newmod_channels)
         model = model.to(device)
 
@@ -176,7 +186,7 @@ def main():
             print(f"requiring mae from newmod only.")
             mae_modalities = [newmod]
 
-    _, _, intermediate_projectors, trainable_total, best_checkpoints, best_checkpoint_summary = train_shot(
+    trainable_total, _, best_checkpoint_summary = train_shot(
         model=model,
         train_loader=train2_loader,
         device=device,
@@ -203,10 +213,6 @@ def main():
         replace_teacher_w_peek=args.replace_teacher_w_peek,
     )
 
-    # ========================================= EVALUATION =====================================
-    print("\n=== Evaluating trained model ===")
-
-    all_modalities = [starting_modality, newmod]
     if task_config.task_type == 'segmentation':
         metric_name = "mIoU"
     elif task_config.multilabel:
@@ -214,58 +220,14 @@ def main():
     else:
         metric_name = "Acc"
 
-    objectives = {
-        "transfer": {"desc": f"Using only {newmod}, hallucinating {starting_modality}"},
-        "peeking":  {"desc": f"Using only {starting_modality}, hallucinating {newmod}"},
-        "addition": {"desc": f"Using both {starting_modality} and {newmod}"}
+    # Metrics already computed during training at best val epoch — use those directly
+    best = best_checkpoint_summary.get('best_ens_addition', best_checkpoint_summary.get('best_addition', {}))
+    metrics = {
+        'transfer': best.get('test_transfer', 0.0),
+        'peeking':  best.get('test_peeking', 0.0),
+        'addition': best.get('test_addition', 0.0),
     }
-
-    metrics = {}
-    addition_ens_metric = None
-    for objective, info in objectives.items():
-        print(f"\n--- Evaluating: {objective.capitalize()} objective ---")
-        print(f"    {info['desc']}")
-
-        if task_config.task_type == 'segmentation':
-            metric, ens_metric = _delulu_stage3_test_segmentation(
-                model=model,
-                evan=model.evan,
-                test_loader=test_loader,
-                device=device,
-                modality_bands_dict=modality_bands_dict,
-                unlabeled_modalities=[newmod],
-                labeled_modalities=[starting_modality],
-                all_modalities=all_modalities,
-                intermediate_projectors=intermediate_projectors,
-                num_classes=task_config.num_classes,
-                objective=objective,
-                use_mfla=args.use_mfla,
-                label_key=task_config.label_key,
-                ignore_index=getattr(task_config, 'ignore_index', -100),
-            )
-        else:
-            metric, ens_metric = _delulu_stage3_test(
-                model=model,
-                evan=model.evan,
-                test_loader=test_loader,
-                device=device,
-                modality_bands_dict=modality_bands_dict,
-                unlabeled_modalities=[newmod],
-                labeled_modalities=[starting_modality],
-                all_modalities=all_modalities,
-                intermediate_projectors=intermediate_projectors,
-                objective=objective,
-                use_mfla=args.use_mfla,
-                multilabel=task_config.multilabel,
-                label_key=task_config.label_key,
-            )
-
-        metrics[objective] = metric
-        if objective == "addition" and ens_metric is not None:
-            addition_ens_metric = ens_metric
-            wandb.log({f"test/addition_ens_{metric_name.lower()}": ens_metric})
-        print(f"{objective.capitalize()} {metric_name}: {metric:.2f}%")
-        wandb.log({f"test/{objective}_{metric_name.lower()}": metric})
+    addition_ens_metric = best.get('test_addition_ens', None)
 
     # ========================================= CHECKPOINT =====================================
     timestamp_shot = datetime.now().strftime('%m%d_%H%M')
@@ -275,10 +237,9 @@ def main():
     checkpoint_data = {
         'model_state_dict': model.state_dict(),
         'config': model.get_config(),
-        'intermediate_projectors_state_dict': intermediate_projectors.state_dict() if intermediate_projectors is not None else None,
     }
     torch.save(checkpoint_data, checkpoint_shotete)
-    print(f"SHOT checkpoint saved to: {checkpoint_shotete} (includes intermediate_projectors)")
+    print(f"SHOT checkpoint saved to: {checkpoint_shotete}")
 
     # Log results to CSV
     filename = args.results_csv
@@ -341,20 +302,6 @@ if __name__ == '__main__':
 
 # DRYRUN examples
 """
-# EuroSAT (nir to rgb) — original behaviour
-python -u shot_ete.py \
-    --dataset eurosat \
-    --new_mod_group rgb \
-    --checkpoint_name nir_to_rgb-dryrun \
-    --stage0_checkpoint checkpoints/nir_fft.pt  \
-    --epochs 4 \
-    --eval_every_n_epochs 1 \
-    --batch_size 64 \
-    --results_csv res/shot_ete_dryrun.csv \
-    --labeled_frequency 0.1 \
-    --use_mfla \
-    --mfla_warmup_epochs 1
-
 # BEN-v2 (s2 -> add s1)
 python -u shot_ete.py \
     --dataset benv2 \

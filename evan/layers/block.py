@@ -10,7 +10,7 @@ from torch import Tensor, nn
 
 from evan.utils import cat_keep_shapes, uncat_with_shapes
 
-from .attention import CausalSelfAttention, SelfAttention
+from .attention import CausalSelfAttention, CrossAttention, SelfAttention
 from .ffn_layers import Mlp
 from .layer_scale import LayerScale  # , DropPath
 
@@ -210,6 +210,85 @@ class SelfAttentionBlock(nn.Module):
             return self._forward_list(x_or_x_list, rope_list=rope_or_rope_list)
         else:
             raise AssertionError
+
+
+class CrossAttentionBlock(nn.Module):
+    """
+    Cross-attention block: pre-norm on both tgt and memory, residual + FFN.
+    RoPE is applied natively inside CrossAttention to the patch portions of Q and K.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        ffn_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        proj_bias: bool = True,
+        ffn_bias: bool = True,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        init_values=None,
+        act_layer: Callable[..., nn.Module] = nn.GELU,
+        norm_layer: Callable[..., nn.Module] = nn.LayerNorm,
+        ffn_layer: Callable[..., nn.Module] = Mlp,
+        device=None,
+    ) -> None:
+        super().__init__()
+        self.norm_tgt = norm_layer(dim)
+        self.norm_mem = norm_layer(dim)
+        self.attn = CrossAttention(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            proj_bias=proj_bias,
+            attn_drop=attn_drop,
+            proj_drop=drop,
+            device=device,
+        )
+        self.ls1 = LayerScale(dim, init_values=init_values, device=device) if init_values else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * ffn_ratio)
+        self.mlp = ffn_layer(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop=drop,
+            bias=ffn_bias,
+            device=device,
+        )
+        self.ls2 = LayerScale(dim, init_values=init_values, device=device) if init_values else nn.Identity()
+
+    def forward(
+        self,
+        tgt: Tensor,
+        memory: Tensor,
+        rope_tgt=None,
+        rope_memory=None,
+        prefix_len_tgt: int = 0,
+        prefix_len_memory: int = 0,
+        attn_mask: Tensor | None = None,
+    ) -> Tensor:
+        """
+        Args:
+            tgt:    [B, Nq, D] — query tokens
+            memory: [B, Nkv, D] — key/value tokens
+            rope_tgt:    (sin, cos) for tgt patch tokens
+            rope_memory: (sin, cos) for memory patch tokens
+            prefix_len_tgt:    CLS+storage tokens in tgt that skip RoPE
+            prefix_len_memory: CLS+storage tokens in memory that skip RoPE
+            attn_mask: [B, 1, Nq, Nkv] additive attention mask (0 or -inf), or None
+        Returns:
+            [B, Nq, D]
+        """
+        tgt = tgt + self.ls1(self.attn(
+            self.norm_tgt(tgt), self.norm_mem(memory),
+            rope_tgt=rope_tgt, rope_memory=rope_memory,
+            prefix_len_tgt=prefix_len_tgt, prefix_len_memory=prefix_len_memory,
+            attn_mask=attn_mask,
+        ))
+        tgt = tgt + self.ls2(self.mlp(self.norm2(tgt)))
+        return tgt
 
 
 class CausalSelfAttentionBlock(nn.Module):

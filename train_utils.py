@@ -17,11 +17,27 @@ from eurosat_data_utils import (
 import wandb
 
 
+class SequenceProjector(nn.Module):
+    def __init__(self, embed_dim, num_heads=8, ffn_factor=4, num_layers=1):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=embed_dim * ffn_factor,
+            batch_first=True,
+            norm_first=True
+        )
+        self.layers = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+    def forward(self, x):
+        return self.layers(x)
+
+
 def hallucinate_intermediate_features(
     source_intermediate: dict,
     source_modalities: tuple,
     target_modalities: tuple,
-    intermediate_projectors: nn.ModuleDict,
+    evan,
 ) -> dict:
     """
     Hallucinate intermediate features for target modalities from source modalities.
@@ -33,7 +49,7 @@ def hallucinate_intermediate_features(
         source_intermediate: Dict of source modality features {mod: [B, seq_len, embed_dim]}
         source_modalities: Tuple of source modality names
         target_modalities: Tuple of target modality names to hallucinate
-        intermediate_projectors: Trained sequence projectors with keys like 'rgb_to_vre'
+        evan: EVAN model (projectors accessed via evan.intermediate_projectors and evan._project_sequence)
 
     Returns:
         Dict of hallucinated features {mod: [B, seq_len, embed_dim]}
@@ -47,7 +63,7 @@ def hallucinate_intermediate_features(
             proj_key = f"{src_mod}_to_{tar_mod}"
             src_seq = source_intermediate[src_mod]  # [B, seq_len, embed_dim]
             src_seq_norm = F.layer_norm(src_seq, [src_seq.shape[-1]])
-            projected_seqs.append(intermediate_projectors[proj_key](src_seq_norm))
+            projected_seqs.append(evan._project_sequence(src_seq_norm, proj_key, tar_mod))
         # Mean of all projections
         hallucinated[tar_mod] = torch.stack(projected_seqs).mean(dim=0)
     return hallucinated
@@ -1135,7 +1151,7 @@ def _delulu_stage2_train_classifier(
             curr_acc = _delulu_stage3_test(
                 model, evan, test_loader, device, modality_bands_dict,
                 unlabeled_modalities, labeled_modalities, all_modalities,
-                intermediate_projectors, objective=objective
+                objective=objective
             )
             if curr_acc > best_acc:
                 best_acc = curr_acc
@@ -1155,7 +1171,7 @@ def _delulu_stage2_train_classifier(
 def _delulu_stage3_test(
     model, evan, test_loader, device, modality_bands_dict,
     unlabeled_modalities, labeled_modalities, all_modalities,
-    intermediate_projectors, objective="transfer", use_mfla=False,
+    objective="transfer", use_mfla=False,
     multilabel=False, label_key='label',
 ):
     """Stage 3: Test with modalities based on objective.
@@ -1182,7 +1198,6 @@ def _delulu_stage3_test(
         raise ValueError(f"Unknown objective: {objective}")
 
     model.eval()
-    intermediate_projectors.eval()
     total = 0
     all_mods_list = list(all_modalities)
 
@@ -1225,7 +1240,7 @@ def _delulu_stage3_test(
             if objective == "transfer":
                 hallucinated_intermediate = hallucinate_intermediate_features(
                     test_intermediate, unlabeled_modalities, labeled_modalities,
-                    intermediate_projectors
+                    evan
                 )
                 fusion_input = merge_intermediate_features(
                     test_intermediate, hallucinated_intermediate,
@@ -1238,7 +1253,7 @@ def _delulu_stage3_test(
             elif objective == "peeking":
                 hallucinated_intermediate = hallucinate_intermediate_features(
                     test_intermediate, labeled_modalities, unlabeled_modalities,
-                    intermediate_projectors
+                    evan
                 )
                 fusion_input = merge_intermediate_features(
                     test_intermediate, hallucinated_intermediate,
@@ -1257,7 +1272,7 @@ def _delulu_stage3_test(
             if objective == "addition":
                 peeking_hal = hallucinate_intermediate_features(
                     test_intermediate, labeled_modalities, unlabeled_modalities,
-                    intermediate_projectors
+                    evan
                 )
                 peeking_fusion_input = merge_intermediate_features(
                     test_intermediate, peeking_hal,
@@ -1276,7 +1291,7 @@ def _delulu_stage3_test(
 
                 transfer_hal = hallucinate_intermediate_features(
                     test_intermediate, unlabeled_modalities, labeled_modalities,
-                    intermediate_projectors
+                    evan
                 )
                 transfer_fusion_input = merge_intermediate_features(
                     test_intermediate, transfer_hal,
@@ -1389,7 +1404,7 @@ def compute_miou(preds: torch.Tensor, labels: torch.Tensor, num_classes: int, ig
 def _delulu_stage3_test_segmentation(
     model, evan, test_loader, device, modality_bands_dict,
     unlabeled_modalities, labeled_modalities, all_modalities,
-    intermediate_projectors, num_classes: int,
+    num_classes: int,
     objective: str = "transfer", use_mfla: bool = False,
     label_key: str = 'mask', ignore_index: int = -100,
 ):
@@ -1408,7 +1423,6 @@ def _delulu_stage3_test_segmentation(
         unlabeled_modalities: Modalities without labeled data at test time.
         labeled_modalities: Modalities with labeled data at test time.
         all_modalities: All modalities (labeled + unlabeled).
-        intermediate_projectors: Trained sequence projectors.
         num_classes: Number of segmentation classes.
         objective: 'transfer', 'peeking', or 'addition'.
         use_mfla: Whether to apply MFLA for hallucinated modalities.
@@ -1427,7 +1441,6 @@ def _delulu_stage3_test_segmentation(
         raise ValueError(f"Unknown objective: {objective}")
 
     model.eval()
-    intermediate_projectors.eval()
 
     all_sv_preds = []
     all_labels = []
@@ -1450,7 +1463,7 @@ def _delulu_stage3_test_segmentation(
             if objective == "transfer":
                 hallucinated_intermediate = hallucinate_intermediate_features(
                     test_intermediate, unlabeled_modalities, labeled_modalities,
-                    intermediate_projectors
+                    evan
                 )
                 fusion_input = merge_intermediate_features(
                     test_intermediate, hallucinated_intermediate,
@@ -1463,7 +1476,7 @@ def _delulu_stage3_test_segmentation(
             elif objective == "peeking":
                 hallucinated_intermediate = hallucinate_intermediate_features(
                     test_intermediate, labeled_modalities, unlabeled_modalities,
-                    intermediate_projectors
+                    evan
                 )
                 fusion_input = merge_intermediate_features(
                     test_intermediate, hallucinated_intermediate,
@@ -1484,7 +1497,7 @@ def _delulu_stage3_test_segmentation(
             if objective == "addition":
                 peeking_hal = hallucinate_intermediate_features(
                     test_intermediate, labeled_modalities, unlabeled_modalities,
-                    intermediate_projectors
+                    evan
                 )
                 peeking_fused = evan.forward_fusion_from_modality_features(
                     merge_intermediate_features(
@@ -1494,7 +1507,7 @@ def _delulu_stage3_test_segmentation(
                 )
                 transfer_hal = hallucinate_intermediate_features(
                     test_intermediate, unlabeled_modalities, labeled_modalities,
-                    intermediate_projectors
+                    evan
                 )
                 transfer_fused = evan.forward_fusion_from_modality_features(
                     merge_intermediate_features(
@@ -1619,7 +1632,7 @@ def delulu_supervision(
     softvote_test_acc = _delulu_stage3_test(
         model, evan, test_loader, device, modality_bands_dict,
         unlabeled_modalities, labeled_modalities, all_modalities,
-        intermediate_projectors, objective=objective
+        objective=objective
     )
 
     return best_acc,softvote_test_acc

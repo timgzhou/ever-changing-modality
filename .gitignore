@@ -227,3 +227,4 @@ GEO-Bench-2
 .claude/
 .vscode/
 pyrightconfig.json
+one-off/

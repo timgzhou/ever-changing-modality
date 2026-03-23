@@ -157,7 +157,7 @@ def main():
 
     # ========================================== TRAIN SHOT ===========================================
     print(f"\n=== Training with SHOT ===")
-    _, _, intermediate_projectors, trainable_total, best_checkpoints, _ = train_shot(
+    trainable_total, best_checkpoints, _ = train_shot(
         model=model,
         train_loader=train2_loader,
         device=device,
@@ -191,7 +191,6 @@ def main():
     checkpoint_data = {
         'model_state_dict': model.state_dict(),
         'config': model.get_config(),
-        'intermediate_projectors_state_dict': intermediate_projectors.state_dict() if intermediate_projectors is not None else None,
         'sweep_config': {
             'mae_mask_ratio': mae_mask_ratio,
             'modality_dropout': modality_dropout,

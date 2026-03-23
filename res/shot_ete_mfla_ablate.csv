@@ -21,3 +21,4 @@ rgb,vre,0.0001,0.01,128,0.75,0.5,0.4,0.0,47369492,all,False,0,82.83,87.87,81.20,
 rgb,swir,0.0001,0.01,128,0.75,0.5,0.4,0.0,47369492,all,False,0,80.96,87.17,82.11,89.48,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_swir.pt
 vre,swir,0.0001,0.01,64,0.75,0.5,0.4,0.5,47369492,distill+ce,False,0,84.24,90.15,89.09,90.37,84.52,90.15,88.72,90.37,checkpoints/vre_randinit_fft.pt,checkpoints/vre_to_swir.pt
 vre,swir,0.0001,0.001,64,0.75,0.5,0.0,1.0,47369492,distill+ce,False,0,83.48,88.89,89.26,89.74,83.70,88.89,88.07,89.74,checkpoints/vre_randinit_fft.pt,checkpoints/vre_to_swir.pt
+eurosat,rgb,vre,0.0001,0.001,128,0.75,0.5,0.2,0.5,42043796,all,False,0,Acc,85.56,88.46,89.35,90.81,85.56,88.46,89.13,0.00,checkpoints/rgb_randinit_fft.pt,checkpoints/rgb_to_vre.pt

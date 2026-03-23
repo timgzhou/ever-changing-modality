@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
-from evan.layers import LoRALayer, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
+from evan.layers import CrossAttentionBlock, LoRALayer, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
 from functools import partial
 
 logger = logging.getLogger("evan")
@@ -17,6 +17,105 @@ dtype_dict = {
     "fp16": torch.float16,
     "bf16": torch.bfloat16,
 }
+
+
+class CrossSequenceProjector(nn.Module):
+    """
+    Cross-attention based sequence projector for hallucinating missing modality features.
+
+    Architecture:
+    - (num_layers - 1) SelfAttentionBlock layers on source tokens (with RoPE)
+    - 1 CrossAttentionBlock: tgt=queries with RoPE on patch portion, memory=source tokens with RoPE
+
+    Query shape per target modality: [1, n_storage + 2, embed_dim]
+    - n_storage storage queries + 1 CLS query + 1 patch prototype query
+    The patch prototype is broadcast to n_patches and given per-position RoPE before cross-attn.
+    Output: [B, 1 + n_storage + n_patches, embed_dim] (fixed shape regardless of visible input length)
+    """
+
+    def __init__(self, embed_dim, n_storage_tokens, img_size, patch_size,
+                 num_heads=8, ffn_factor=4, num_layers=2, device=None):
+        super().__init__()
+        self.n_storage_tokens = n_storage_tokens
+        self.n_patches = (img_size // patch_size) ** 2
+
+        norm_layer = partial(nn.LayerNorm, eps=1e-6)
+        if num_layers > 1:
+            self.self_attn_layers = nn.ModuleList([
+                SelfAttentionBlock(
+                    dim=embed_dim, num_heads=num_heads, ffn_ratio=ffn_factor,
+                    qkv_bias=True, proj_bias=True, ffn_bias=True,
+                    drop_path=0.0, norm_layer=norm_layer, act_layer=nn.GELU,
+                    ffn_layer=Mlp, init_values=None, mask_k_bias=False, device=device,
+                )
+                for _ in range(num_layers - 1)
+            ])
+        else:
+            self.self_attn_layers = None
+
+        self.cross_attn_block = CrossAttentionBlock(
+            dim=embed_dim, num_heads=num_heads, ffn_ratio=ffn_factor,
+            qkv_bias=True, proj_bias=True, ffn_bias=True,
+            norm_layer=norm_layer, act_layer=nn.GELU, ffn_layer=Mlp, device=device,
+        )
+
+    def forward(self, x, queries, rope_embed, src_patch_mask=None):
+        """
+        Args:
+            x: [B, 1+n_storage+n_patches, embed_dim] — full source token sequence
+            queries: [1, n_storage+2, embed_dim] — target modality's learned queries
+            rope_embed: EVAN's RopePositionEmbedding module
+            src_patch_mask: [B, n_patches] bool tensor, True=masked (will be blocked in cross-attn).
+                            If None, all source patches are attended to.
+        Returns:
+            [B, 1 + n_storage + n_patches, embed_dim]
+        """
+        B = x.shape[0]
+        n_prefix = self.n_storage_tokens + 1  # CLS + storage tokens
+        H = W = int(self.n_patches ** 0.5)
+
+        # Compute RoPE (full grid for both source and query patches)
+        if rope_embed is not None:
+            sin, cos = rope_embed(H=H, W=W)  # [n_patches, D]
+            rope_memory = (sin, cos)
+        else:
+            rope_memory = None
+
+        # Self-attention on source tokens with RoPE
+        if self.self_attn_layers is not None:
+            for blk in self.self_attn_layers:
+                x = blk(x, rope_memory)
+
+        # Prepare queries: broadcast patch prototype and compute RoPE for query side
+        q_cls_storage = queries[:, :n_prefix, :].expand(B, -1, -1)        # [B, n_storage+1, D]
+        q_patch_proto = queries[:, n_prefix:, :].expand(B, -1, -1)        # [B, 1, D]
+        q_patches = q_patch_proto.expand(-1, self.n_patches, -1).clone()  # [B, n_patches, D]
+        q = torch.cat([q_cls_storage, q_patches], dim=1)                  # [B, n_storage+1+n_patches, D]
+
+        rope_tgt = (sin, cos) if rope_embed is not None else None  # full grid for Q patches
+
+        # Build attention mask to block masked source patches from cross-attention
+        # [B, 1, Nq, Nkv]: prefix memory tokens (CLS/storage) are always visible
+        attn_mask = None
+        if src_patch_mask is not None:
+            Nq = q.shape[1]
+            Nkv = x.shape[1]
+            # Start with all zeros (no masking), then block masked patch positions in memory
+            mask = torch.zeros(B, 1, Nq, Nkv, device=x.device, dtype=x.dtype)
+            # src_patch_mask: [B, n_patches] → expand to [B, 1, Nq, n_patches] and place at patch columns
+            patch_block = src_patch_mask[:, None, None, :].expand(B, 1, Nq, -1).to(x.dtype)
+            mask[:, :, :, n_prefix:] = patch_block.masked_fill(patch_block.bool(), float('-inf'))
+            attn_mask = mask
+
+        # Cross-attention: tgt=queries, memory=source tokens
+        out = self.cross_attn_block(
+            tgt=q, memory=x,
+            rope_tgt=rope_tgt, rope_memory=rope_memory,
+            prefix_len_tgt=n_prefix, prefix_len_memory=n_prefix,
+            attn_mask=attn_mask,
+        )
+        return out  # [B, n_storage+1+n_patches, D]
+
 
 class EVAN(nn.Module):
     "The EVer-Adapting Network (EVAN) is a framework designed to handle unseen modalities at test time."
@@ -54,6 +153,8 @@ class EVAN(nn.Module):
         tz_lora_rank: int=32,
         starting_modality: str='rgb',
         starting_n_chans: int = 3,
+        intermediate_projector_type: Literal["self", "cross"] = "self",
+        intermediate_projector_num_layers: int = 2,
         **ignored_kwargs,
     ):
         super().__init__()
@@ -75,6 +176,8 @@ class EVAN(nn.Module):
         self.tz_modality_fusion_layer_augmenter = tz_modality_fusion_layer_augmenter
         self.starting_modality=starting_modality
         self.n_storage_tokens = n_storage_tokens
+        self.intermediate_projector_type = intermediate_projector_type
+        self.intermediate_projector_num_layers = intermediate_projector_num_layers
         self.pos_embed_rope_base=pos_embed_rope_base
         self.pos_embed_rope_min_period=pos_embed_rope_min_period
         self.pos_embed_rope_max_period=pos_embed_rope_max_period
@@ -113,8 +216,11 @@ class EVAN(nn.Module):
         self.storage_tokens = nn.ParameterDict()
         self.modality_specific_layer_adaptors = nn.ModuleDict() # shortened as "msla" as followed
         self.modality_encodings = nn.ParameterDict()
-        if self.tz_modality_fusion_layer_augmenter!="none": 
+        if self.tz_modality_fusion_layer_augmenter!="none":
             self.modality_fusion_lora_adaptors = nn.ModuleDict()
+        self.intermediate_projectors = nn.ModuleDict()
+        if self.intermediate_projector_type == "cross":
+            self.projector_queries = nn.ParameterDict()
 
         # Initialize modality-specific components for starting_modality (starting_n_chans)
         self.add_new_patch_embedders(starting_modality,starting_n_chans)
@@ -122,8 +228,9 @@ class EVAN(nn.Module):
         if self.n_storage_tokens > 0: self.add_new_storage_tokens(starting_modality)
         self.add_new_msla(starting_modality)
         self.add_modality_encoding(starting_modality)
-        if self.tz_modality_fusion_layer_augmenter!="none": 
+        if self.tz_modality_fusion_layer_augmenter!="none":
             self.add_new_mfla(starting_modality)
+        self.add_new_intermediate_projectors(starting_modality)
 
     # Helper Functions to initialize and add new component as modality comes in.
     def initialize_rope_embed(self):
@@ -195,6 +302,46 @@ class EVAN(nn.Module):
         num_fusion_blocks = self.n_blocks - self.tz_fusion_time
         if self.tz_modality_fusion_layer_augmenter == "lora":
             self.modality_fusion_lora_adaptors[modality] = self.create_lora_list(num_fusion_blocks)
+    def _make_intermediate_projector(self, tgt_mod: str) -> nn.Module:
+        if self.intermediate_projector_type == "self":
+            from train_utils import SequenceProjector
+            return SequenceProjector(
+                embed_dim=self.embed_dim, num_heads=8, ffn_factor=4,
+                num_layers=self.intermediate_projector_num_layers,
+            ).to(self.device)
+        elif self.intermediate_projector_type == "cross":
+            return CrossSequenceProjector(
+                embed_dim=self.embed_dim, n_storage_tokens=self.n_storage_tokens,
+                img_size=self.img_size, patch_size=self.patch_size,
+                num_heads=self.num_heads, ffn_factor=4,
+                num_layers=self.intermediate_projector_num_layers,
+                device=self.device,
+            )
+        else:
+            raise ValueError(f"Unknown intermediate_projector_type: {self.intermediate_projector_type}")
+
+    def add_new_intermediate_projectors(self, new_modality_key: str):
+        """
+        Create intermediate projectors for all existing→new and new→existing modality pairs.
+        For 'cross' type, also initializes projector_queries for any target modality missing them.
+        Called by create_modality_components and __init__ (no-op on first modality since no pairs exist).
+        """
+        existing_modalities = [m for m in self.supported_modalities if m != new_modality_key]
+        for src_mod in existing_modalities:
+            key_fwd = f"{src_mod}_to_{new_modality_key}"
+            key_rev = f"{new_modality_key}_to_{src_mod}"
+            self.intermediate_projectors[key_fwd] = self._make_intermediate_projector(new_modality_key)
+            self.intermediate_projectors[key_rev] = self._make_intermediate_projector(src_mod)
+
+        if self.intermediate_projector_type == "cross" and existing_modalities:
+            # n_storage+2: n_storage storage queries + 1 CLS query + 1 patch prototype query
+            query_shape = (1, self.n_storage_tokens + 2, self.embed_dim)
+            for mod in [new_modality_key] + existing_modalities:
+                if mod not in self.projector_queries:
+                    param = nn.Parameter(torch.empty(*query_shape, device=self.device))
+                    nn.init.trunc_normal_(param, std=0.02)
+                    self.projector_queries[mod] = param
+
     def create_lora_list(self,length):
         return nn.ModuleList([
             LoRALayer(self.embed_dim, rank=self.tz_lora_rank, device=self.device) for _ in range(length)
@@ -358,6 +505,8 @@ class EVAN(nn.Module):
                     return True
             if any(pattern in key for pattern in ['modality_encoders', 'modality_fusion_lora_adaptors']):
                 return True
+            if key.startswith('intermediate_projectors.') or key.startswith('projector_queries.'):
+                return True
             return False
 
         unexpected_missing = [k for k in result.missing_keys if not is_expected_missing(k)]
@@ -487,6 +636,8 @@ class EVAN(nn.Module):
                     return True
             if any(p in key for p in ['modality_encoders', 'modality_fusion_lora_adaptors']):
                 return True
+            if key.startswith('intermediate_projectors.') or key.startswith('projector_queries.'):
+                return True
             return False
 
         unexpected_missing = [k for k in result.missing_keys if not is_expected_missing(k)]
@@ -523,16 +674,17 @@ class EVAN(nn.Module):
         self.add_new_patch_embedders(modality_key, in_chans)
         self.add_new_msla(modality_key, init="backbone")
         if self.tz_modality_fusion_layer_augmenter!="none":
-            self.add_new_mfla(modality_key, init="backbone")
+            self.add_new_mfla(modality_key)
         self.add_new_cls_token(modality_key)
         if self.n_storage_tokens > 0:
             self.add_new_storage_tokens(modality_key)
         self.add_modality_encoding(modality_key)
+        self.supported_modalities.append(modality_key)
+        self.supported_modalities_in_chans.append(in_chans)
+        self.add_new_intermediate_projectors(modality_key)
 
         params_after = sum(p.numel() for p in self.parameters())
         new_params = params_after - params_before
-        self.supported_modalities.append(modality_key)
-        self.supported_modalities_in_chans.append(in_chans)
 
         num_fusion_blocks = self.n_blocks - self.tz_fusion_time
         embedder_params = sum(p.numel() for p in self.patch_embedders[modality_key].parameters())
@@ -799,11 +951,24 @@ class EVAN(nn.Module):
 
         return output_dict
 
+    def _project_sequence(self, src_seq_norm: Tensor, key: str, tgt_mod: str, src_patch_mask=None) -> Tensor:
+        """Call the intermediate projector for (src→tgt), dispatching by projector type."""
+        projector = self.intermediate_projectors[key]
+        if self.intermediate_projector_type == "cross":
+            return projector(
+                src_seq_norm,
+                queries=self.projector_queries[tgt_mod],
+                rope_embed=self.rope_embed,
+                src_patch_mask=src_patch_mask,
+            )
+        else:
+            return projector(src_seq_norm)
+
     def forward_features_with_pseudo_modality(
         self,
         x: Dict[str, Tensor],
         pseudo_modalities: List[str],
-        intermediate_projectors: nn.ModuleDict,
+        intermediate_projectors=None,  # deprecated, ignored — use self.intermediate_projectors
     ) -> Dict[str, Dict[str, Tensor]]:
         """
         Forward pass with pseudo-modalities using full sequence projection.
@@ -814,7 +979,6 @@ class EVAN(nn.Module):
         Args:
             x: Dictionary of available modality tensors
             pseudo_modalities: List of modality names to hallucinate (e.g., ['vre'])
-            intermediate_projectors: Trained sequence projectors with keys like 'rgb_to_vre', 'vre_to_rgb'
 
         Returns:
             Dictionary with normalized features per modality (same format as forward_features)
@@ -825,15 +989,12 @@ class EVAN(nn.Module):
 
         # Step 2: Create pseudo-features for missing modalities using full sequence projection
         for mod in pseudo_modalities:
-            # Project full sequence from all available modalities and take mean
             projected_seqs = []
             for avail_mod in available_modalities:
-                avail_seq = embedded[avail_mod]  # [B, seq_len, embed_dim]
+                avail_seq = embedded[avail_mod]
                 avail_seq_norm = F.layer_norm(avail_seq, [avail_seq.shape[-1]])
                 key = f"{avail_mod}_to_{mod}"
-                projected = intermediate_projectors[key](avail_seq_norm)  # [B, seq_len, embed_dim]
-                projected_seqs.append(projected)
-            # Mean of all projected sequences
+                projected_seqs.append(self._project_sequence(avail_seq_norm, key, mod))
             embedded[mod] = torch.stack(projected_seqs).mean(dim=0)
 
         # Step 3: Forward through fusion (modality encoding added here)
@@ -850,6 +1011,7 @@ class EVAN(nn.Module):
         mfla: bool = False,
         blocks: bool = False,
         norm: bool = False,
+        intermediate_projectors: bool = False,
     ):
         """
         Set requires_grad for specific components of the model.
@@ -888,6 +1050,12 @@ class EVAN(nn.Module):
                     modality_encoders=modality_encoders,
                     mfla=mfla,
                 )
+            if intermediate_projectors:
+                for param in self.intermediate_projectors.parameters():
+                    param.requires_grad = True
+                if hasattr(self, 'projector_queries'):
+                    for param in self.projector_queries.values():
+                        param.requires_grad = True
         else:
             # Modality-specific components
             if patch_embedders and modality in self.patch_embedders:
@@ -947,6 +1115,8 @@ class EVAN(nn.Module):
             'starting_n_chans': self.supported_modalities_in_chans[0],
             'supported_modalities': self.supported_modalities.copy(),
             'supported_modalities_in_chans': self.supported_modalities_in_chans.copy(),
+            'intermediate_projector_type': self.intermediate_projector_type,
+            'intermediate_projector_num_layers': self.intermediate_projector_num_layers,
         }
 
     def save_checkpoint(self, path: str):
@@ -1155,6 +1325,7 @@ class EvanPredictor(nn.Module):
         blocks: bool = False,
         norm: bool = False,
         head: bool = False,
+        intermediate_projectors: bool = False,
     ):
         """
         Set requires_grad for specific components of the model (EVAN + head).
@@ -1181,6 +1352,7 @@ class EvanPredictor(nn.Module):
             mfla=mfla,
             blocks=blocks,
             norm=norm,
+            intermediate_projectors=intermediate_projectors,
         )
         if head:
             if self.head is not None:
@@ -1336,13 +1508,13 @@ class EVANClassifier(EvanPredictor):
         Args:
             x: Either a tensor [B, C, H, W] or dict {modality: tensor}
             pseudo_modalities: Optional list of modalities to hallucinate using sequence projection
-            intermediate_projectors: Required if pseudo_modalities is provided; trained sequence projectors
+            intermediate_projectors: Deprecated, ignored. Use evan.intermediate_projectors.
         Returns:
             logits: [B, num_classes]
         """
         if pseudo_modalities is not None:
             features_dict = self.evan.forward_features_with_pseudo_modality(
-                x, pseudo_modalities, intermediate_projectors
+                x, pseudo_modalities
             )
         else:
             features_dict = self.evan.forward_features(x)

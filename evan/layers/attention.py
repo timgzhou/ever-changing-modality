@@ -118,6 +118,81 @@ class SelfAttention(nn.Module):
         return x.reshape([B, N, C])
 
 
+class CrossAttention(nn.Module):
+    """
+    Cross-attention: Q from tgt, K/V from memory.
+    RoPE is applied to the patch portion of Q and K (skipping the CLS/storage prefix).
+    prefix_len controls how many leading tokens are treated as CLS/storage (no RoPE).
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = True,
+        proj_bias: bool = True,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        device=None,
+    ) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
+
+        self.q_proj = nn.Linear(dim, dim, bias=qkv_bias, device=device)
+        self.kv_proj = nn.Linear(dim, dim * 2, bias=qkv_bias, device=device)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim, bias=proj_bias, device=device)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(
+        self,
+        tgt: Tensor,
+        memory: Tensor,
+        rope_tgt: Tuple[Tensor, Tensor] | None = None,
+        rope_memory: Tuple[Tensor, Tensor] | None = None,
+        prefix_len_tgt: int = 0,
+        prefix_len_memory: int = 0,
+        attn_mask: Tensor | None = None,
+    ) -> Tensor:
+        """
+        Args:
+            tgt:    [B, Nq, D] — query tokens (e.g. learned queries)
+            memory: [B, Nkv, D] — key/value tokens (e.g. source modality tokens)
+            rope_tgt:    (sin, cos) for tgt patch tokens, shape [Nq-prefix_len_tgt, D]
+            rope_memory: (sin, cos) for memory patch tokens, shape [Nkv-prefix_len_memory, D]
+            prefix_len_tgt:    number of leading tgt tokens that skip RoPE (CLS + storage)
+            prefix_len_memory: number of leading memory tokens that skip RoPE (CLS + storage)
+            attn_mask: [B, 1, Nq, Nkv] additive attention mask (0 or -inf), or None
+        """
+        B, Nq, C = tgt.shape
+        Nkv = memory.shape[1]
+        head_dim = C // self.num_heads
+
+        q = self.q_proj(tgt).reshape(B, Nq, self.num_heads, head_dim).transpose(1, 2)
+        kv = self.kv_proj(memory).reshape(B, Nkv, 2, self.num_heads, head_dim)
+        k, v = kv[:, :, 0].transpose(1, 2), kv[:, :, 1].transpose(1, 2)
+
+        if rope_tgt is not None:
+            sin, cos = rope_tgt
+            rope_dtype = sin.dtype
+            q_patch = rope_apply(q[:, :, prefix_len_tgt:, :].to(rope_dtype), sin, cos)
+            q = torch.cat([q[:, :, :prefix_len_tgt, :], q_patch.to(q.dtype)], dim=2)
+
+        if rope_memory is not None:
+            sin, cos = rope_memory
+            rope_dtype = sin.dtype
+            k_patch = rope_apply(k[:, :, prefix_len_memory:, :].to(rope_dtype), sin, cos)
+            k = torch.cat([k[:, :, :prefix_len_memory, :], k_patch.to(k.dtype)], dim=2)
+
+        x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        x = x.transpose(1, 2).reshape(B, Nq, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(
         self,
