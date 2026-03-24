@@ -929,24 +929,22 @@ def _unlabeled_batch_step(
             if segmentation and model.modality_decoders is not None and mod in model.modality_decoders:
                 patch_tokens = student_fused[mod]['x_norm_patchtokens']
                 mod_logits = model._apply_decoder(model.modality_decoders[mod], patch_tokens)
-                if 'entr' in active_losses and np.random.rand()< entr_frequency:
+                if 'entr' in active_losses:
                     entr_loss = entr_loss + entropy_loss(mod_logits)
                     entr_count += 1
-                else:
-                    distill_loss = distill_loss + distillation_loss(
-                        mod_logits, teacher_logits, distillation_temperature,
-                        ignore_index=ignore_index, labels=seg_labels,
-                    )
-                    distill_count += 1
+                distill_loss = distill_loss + distillation_loss(
+                    mod_logits, teacher_logits, distillation_temperature,
+                    ignore_index=ignore_index, labels=seg_labels,
+                )
+                distill_count += 1
             elif not segmentation and mod in model.modality_classifiers:
                 cls_token = student_fused[mod]['x_norm_clstoken']
                 mod_logits = model.modality_classifiers[mod](cls_token)
-                if 'entr' in active_losses and np.random.rand()< entr_frequency:
+                if 'entr' in active_losses:
                     entr_loss = entr_loss + entropy_loss(mod_logits)
                     entr_count += 1
-                else:
-                    distill_loss = distill_loss + distillation_loss(mod_logits, teacher_logits, distillation_temperature)
-                    distill_count += 1
+                distill_loss = distill_loss + distillation_loss(mod_logits, teacher_logits, distillation_temperature)
+                distill_count += 1
         if distill_count > 0:
             distill_loss = distill_loss / distill_count
         if entr_count > 0:
