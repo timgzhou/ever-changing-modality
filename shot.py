@@ -364,8 +364,9 @@ def evaluate_multimodal(
     If with_labels is False, only teacher-agreement metrics are computed (needs teacher).
 
     Returns dict with keys present based on what was computed:
-      'transfer_acc', 'peeking_acc', 'addition_acc'   (with_labels=True)
-      'transfer_agree', 'addition_agree'               (teacher provided)
+      'transfer_acc', 'peeking_acc', 'addition_acc', 'ens_acc'  (with_labels=True)
+      'transfer_agree', 'addition_agree'                         (teacher provided)
+    'ens_acc' is the ensemble of peeking+transfer (averaged logits before argmax).
     All values are percentages.
     """
     model.eval()
@@ -382,9 +383,10 @@ def evaluate_multimodal(
     peeking_correct = 0
     transfer_correct = 0
     addition_correct = 0
-    peeking_logits_list, transfer_logits_list, addition_logits_list, labels_list = [], [], [], []
+    ens_correct = 0
+    peeking_logits_list, transfer_logits_list, addition_logits_list, ens_logits_list, labels_list = [], [], [], [], []
     # Segmentation accumulators
-    peeking_preds_list, transfer_preds_list, addition_preds_list, seg_labels_list = [], [], [], []
+    peeking_preds_list, transfer_preds_list, addition_preds_list, ens_preds_list, seg_labels_list = [], [], [], [], []
 
     # Agreement accumulators
     transfer_agree = 0
@@ -449,22 +451,28 @@ def evaluate_multimodal(
             )
             addition_sv = _soft_vote(addition_fused)
 
+            # --- Ensemble path: average peeking + transfer ---
+            ens_sv = (peeking_sv + transfer_sv) / 2
+
             # Accumulate label-based metrics
             if with_labels:
                 if segmentation:
                     peeking_preds_list.append(peeking_sv.argmax(1).cpu())
                     transfer_preds_list.append(transfer_sv.argmax(1).cpu())
                     addition_preds_list.append(addition_sv.argmax(1).cpu())
+                    ens_preds_list.append(ens_sv.argmax(1).cpu())
                     seg_labels_list.append(labels.cpu())
                 elif multilabel:
                     peeking_logits_list.append(peeking_sv.cpu())
                     transfer_logits_list.append(transfer_sv.cpu())
                     addition_logits_list.append(addition_sv.cpu())
+                    ens_logits_list.append(ens_sv.cpu())
                     labels_list.append(labels.cpu())
                 else:
                     peeking_correct += (peeking_sv.argmax(1) == labels).sum().item()
                     transfer_correct += (transfer_sv.argmax(1) == labels).sum().item()
                     addition_correct += (addition_sv.argmax(1) == labels).sum().item()
+                    ens_correct += (ens_sv.argmax(1) == labels).sum().item()
 
             # Accumulate teacher agreement
             if teacher_preds is not None:
@@ -488,15 +496,18 @@ def evaluate_multimodal(
             results['peeking_acc'] = compute_miou(all_seg_preds, all_seg_labels, num_classes, ignore_index)
             results['transfer_acc'] = compute_miou(torch.cat(transfer_preds_list), all_seg_labels, num_classes, ignore_index)
             results['addition_acc'] = compute_miou(torch.cat(addition_preds_list), all_seg_labels, num_classes, ignore_index)
+            results['ens_acc'] = compute_miou(torch.cat(ens_preds_list), all_seg_labels, num_classes, ignore_index)
         elif multilabel:
             all_lbls = torch.cat(labels_list)
             results['peeking_acc'] = _compute_map(torch.cat(peeking_logits_list), all_lbls)
             results['transfer_acc'] = _compute_map(torch.cat(transfer_logits_list), all_lbls)
             results['addition_acc'] = _compute_map(torch.cat(addition_logits_list), all_lbls)
+            results['ens_acc'] = _compute_map(torch.cat(ens_logits_list), all_lbls)
         else:
             results['peeking_acc'] = 100.0 * peeking_correct / total
             results['transfer_acc'] = 100.0 * transfer_correct / total
             results['addition_acc'] = 100.0 * addition_correct / total
+            results['ens_acc'] = 100.0 * ens_correct / total
     if teacher is not None:
         denom = total_pixels if segmentation else total
         results['transfer_agree'] = 100.0 * transfer_agree / denom if denom > 0 else 0.0
@@ -990,14 +1001,17 @@ def _run_periodic_eval(
         'transfer': test_results['transfer_acc'],
         'peeking':  test_results['peeking_acc'],
         'addition': test_results['addition_acc'],
+        'ens':      test_results['ens_acc'],
     }
     print(f"  Transfer {metric_label}: {test_results['transfer_acc']:.2f}%")
     print(f"  Peeking {metric_label}:  {test_results['peeking_acc']:.2f}%")
     print(f"  Addition {metric_label}: {test_results['addition_acc']:.2f}%")
+    print(f"  Ens {metric_label}:      {test_results['ens_acc']:.2f}%")
     wandb.log({
         f"test/transfer_{metric_label}": test_results['transfer_acc'],
         f"test/peeking_{metric_label}":  test_results['peeking_acc'],
         f"test/addition_{metric_label}": test_results['addition_acc'],
+        f"test/ens_{metric_label}":      test_results['ens_acc'],
         "epoch": epoch + 1,
     })
 
@@ -1030,16 +1044,6 @@ def _run_periodic_eval(
         )
         val_metrics['peeking'] = peeking_acc
         print(f"  Val peeking {metric_label}: {peeking_acc:.2f}%")
-
-        if replace_teacher_w_peek and teacher_val_acc is not None and peeking_acc > teacher_val_acc:
-            print(f"  >> Student peeking {metric_label} ({peeking_acc:.2f}%) surpassed teacher ({teacher_val_acc:.2f}%) — updating teacher.")
-            teacher_classifier = copy.deepcopy(model)
-            teacher_classifier.freeze_all()
-            teacher_classifier.eval()
-            teacher_val_acc = peeking_acc
-            if replace_teacher_w_peek:
-                teacher_is_peeking = True
-                print(f"     Teacher distillation mode: peeking (real {starting_modality} + hallucinated newmod)")
 
     if 'peeking' in val_metrics and 'teacher_agreement' in val_metrics:
         ens_addition = (val_metrics['peeking'] + val_metrics['teacher_agreement']) / 2
@@ -1080,6 +1084,7 @@ def _run_periodic_eval(
                 f'best/{ckpt_name}_test_transfer': periodic_test_accs['transfer'],
                 f'best/{ckpt_name}_test_peeking': periodic_test_accs['peeking'],
                 f'best/{ckpt_name}_test_addition': periodic_test_accs['addition'],
+                f'best/{ckpt_name}_test_ens': periodic_test_accs['ens'],
                 f'best/{ckpt_name}_epoch': epoch + 1,
                 'epoch': epoch + 1,
             })
@@ -1088,7 +1093,8 @@ def _run_periodic_eval(
         print(f"  >> New records at epoch {epoch+1}: {', '.join(new_records)}")
         print(f"     Test accs: transfer={periodic_test_accs['transfer']:.2f}%, "
               f"peeking={periodic_test_accs['peeking']:.2f}%, "
-              f"addition={periodic_test_accs['addition']:.2f}%")
+              f"addition={periodic_test_accs['addition']:.2f}%, "
+              f"ens={periodic_test_accs['ens']:.2f}%")
 
     wandb.log({
         'val/peeking_acc': val_metrics.get('peeking', 0),
@@ -1411,12 +1417,13 @@ def train_shot(
                 'test_transfer': test_accs['transfer'],
                 'test_peeking': test_accs['peeking'],
                 'test_addition': test_accs['addition'],
-                'test_addition_ens': test_accs.get('addition_ens', 0),
+                'test_addition_ens': test_accs.get('ens', 0),
             }
             print(f"\n{ckpt_name} (epoch {ckpt_data['epoch']+1}, val={ckpt_data['metric']:.2f}%):")
             print(f"  test/transfer: {test_accs['transfer']:.2f}%")
             print(f"  test/peeking: {test_accs['peeking']:.2f}%")
             print(f"  test/addition: {test_accs['addition']:.2f}%")
+            print(f"  test/ens: {test_accs.get('ens', 0):.2f}%")
 
     print("\n=== Phase 2 (Fusion MAE Training) complete ===")
     return trainable_total, best_checkpoints, best_checkpoint_summary

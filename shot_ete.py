@@ -246,7 +246,7 @@ def main():
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "dataset", "starting_modality", "new_modality", "ssl_lr", "weight_decay", "epochs",
-        "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
+        "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction", "entr_frequency",
         "trainable_params", "active_losses", "use_mfla", "mfla_warmup_epochs", "metric_name",
         "transfer_metric", "peeking_metric", "addition_metric", "addition_ens_metric",
         "valchecked_transfer", "valchecked_peek", "valchecked_add", "valchecked_add_ens",
@@ -274,6 +274,7 @@ def main():
             args.modality_dropout,
             args.labeled_frequency,
             args.labeled_start_fraction,
+            args.entr_frequency,
             trainable_total,
             active_losses_str,
             args.use_mfla,
