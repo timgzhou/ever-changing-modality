@@ -259,13 +259,19 @@ def mask_input(evan, batch_size, n_storage_tokens, num_patches, mae_mask_ratio, 
                 key = f"{src_mod}_to_{tgt_mod}"
                 projected_sequences[(src_mod, tgt_mod)] = evan._project_sequence(src_seq_norm, key, tgt_mod, src_patch_mask=src_patch_mask)
 
-    # Prefusion loss: MSE between projected and real target prefusion features
+    # cross projector outputs [B, 1+n_patches, D] (no storage tokens); others output full [B, 1+n_storage+n_patches, D]
+    cross_projector = evan.intermediate_projector_type == "cross"
+
+    # Prefusion loss: MSE between projected and real target features.
+    # For cross projector, strip storage tokens from tgt to match proj_seq shape.
     prefusion_loss = torch.tensor(0.0, device=device)
     if active_losses and 'prefusion' in active_losses:
         for (src_mod, tgt_mod), proj_seq in projected_sequences.items():
-            tgt_seq = prefusion_features[tgt_mod]
+            tgt_seq = prefusion_features[tgt_mod]  # [B, 1+n_storage+n_patches, D]
             if tgt_mod in lrm:
                 tgt_seq = tgt_seq.detach()
+            if cross_projector:
+                tgt_seq = torch.cat([tgt_seq[:, :1], tgt_seq[:, n_storage_tokens + 1:]], dim=1)
             prefusion_loss = prefusion_loss + F.mse_loss(proj_seq, tgt_seq)
         if projected_sequences:
             prefusion_loss = prefusion_loss / len(projected_sequences)
@@ -277,28 +283,32 @@ def mask_input(evan, batch_size, n_storage_tokens, num_patches, mae_mask_ratio, 
         features = prefusion_features[mod]  # [B, 1+n_storage+num_patches, embed_dim]
 
         if modality_dropped[mod]:
-            # Fully dropped: use mean of all projected sequences from available modalities
+            # Fully dropped: use mean of projected sequences from available modalities.
+            # cross projector: proj_seq is [B, 1+n_patches, D] — fusion handles variable prefix size.
+            # other projectors: proj_seq is full [B, 1+n_storage+n_patches, D].
             projected_list = [projected_sequences[(avail_mod, mod)] for avail_mod in available_modalities]
-            # Mean of projections, detached so gradients don't flow back during MAE/latent loss
             masked_mod_features[mod] = torch.stack(projected_list).mean(dim=0)
         else:
-            # Partially masked: replace masked positions with projected tokens
-            # Use mean of projections from available modalities (excluding self)
+            # Partially masked: replace masked patch positions with projected tokens.
             other_available = [m for m in available_modalities if m != mod]
             if other_available:
                 projected_list = [projected_sequences[(avail_mod, mod)] for avail_mod in other_available]
-                projected_seq = torch.stack(projected_list).mean(dim=0)  # [B, seq_len, embed_dim]
+                proj_seq = torch.stack(projected_list).mean(dim=0)
+                if cross_projector:
+                    # proj_seq is [B, 1+n_patches, D]; pad storage slots with zeros to match features shape
+                    zeros = torch.zeros(batch_size, n_storage_tokens, proj_seq.shape[-1], device=device)
+                    projected_seq = torch.cat([proj_seq[:, :1], zeros, proj_seq[:, 1:]], dim=1)
+                else:
+                    projected_seq = proj_seq
             else:
-                # No other modalities available, use zeros (edge case)
                 projected_seq = torch.zeros_like(features)
 
-            # Create full sequence mask: [B, seq_len, 1]
             # CLS and storage tokens are never masked for partial masking
             prefix_mask = torch.zeros(batch_size, n_prefix, device=device, dtype=torch.bool)
             full_mask = torch.cat([prefix_mask, modality_masks[mod]], dim=1)  # [B, seq_len]
             full_mask_expanded = full_mask.unsqueeze(-1)  # [B, seq_len, 1]
 
-            # Replace masked positions with projected tokens
+            # Replace masked positions with projected tokens (zeros at storage slots are never selected)
             masked_mod_features[mod] = torch.where(full_mask_expanded, projected_seq, features)
 
     return modality_masks, masked_mod_features, modality_dropped, prefusion_loss
@@ -898,9 +908,11 @@ def _unlabeled_batch_step(
     if use_mfla:
         set_mfla_training_mode(evan, hallucinated_mods, all_modalities, in_warmup=in_warmup)
 
+    # cross projector produces [B, 1+n_patches, D] for dropped mods — fusion needs to know prefix is smaller
+    dropped_mods = {mod for mod, dropped in modality_dropped.items() if dropped} if evan.intermediate_projector_type == "cross" else set()
     student_fused = evan.forward_fusion_from_modality_features(
         masked_mod_features,
-        hallucinated_modalities=hallucinated_mods if use_mfla else None
+        hallucinated_modalities=dropped_mods | (hallucinated_mods if use_mfla else set())
     )
 
     total_loss = prefusion_loss
@@ -1257,18 +1269,18 @@ def train_shot(
 
     teacher_is_peeking = False
     teacher_val_acc = None
-    for loader,set_name in zip([val_labeled_loader, test_loader],["val(labeled)","test"]):
-        if loader is not None:
-            from train_utils import evaluate as _eval_fn
-            _, teacher_val_acc = _eval_fn(
-                teacher_classifier, loader,
-                nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss(),
-                device, modality_bands_dict, modalities_to_use=(starting_modality,),
-                multilabel=multilabel, label_key=label_key,
-                segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
-            )
-            _metric_label = "mIoU" if segmentation else ("mAP" if multilabel else "accuracy")
-            print(f"\nTeacher baseline {set_name} {_metric_label} (starting modality only): {teacher_val_acc:.2f}%")
+    # for loader,set_name in zip([val_labeled_loader, test_loader],["val(labeled)","test"]):
+    #     if loader is not None:
+    #         from train_utils import evaluate as _eval_fn
+    #         _, teacher_val_acc = _eval_fn(
+    #             teacher_classifier, loader,
+    #             nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss(),
+    #             device, modality_bands_dict, modalities_to_use=(starting_modality,),
+    #             multilabel=multilabel, label_key=label_key,
+    #             segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
+    #         )
+    #         _metric_label = "mIoU" if segmentation else ("mAP" if multilabel else "accuracy")
+    #         print(f"\nTeacher baseline {set_name} {_metric_label} (starting modality only): {teacher_val_acc:.2f}%")
 
     global_step = 0
     for epoch in range(args.epochs):

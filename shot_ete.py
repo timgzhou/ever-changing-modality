@@ -243,6 +243,7 @@ def main():
 
     # Log results to CSV
     filename = args.results_csv
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "dataset", "starting_modality", "new_modality", "ssl_lr", "weight_decay", "epochs",

@@ -265,7 +265,8 @@ def main():
         print(f"  Best val {metric_name}: {best_val_metric:.2f}% — checkpoint: {checkpoint_path}")
 
     # CSV logging
-    filename = f"res/train_stage0_{args.dataset}.csv"
+    filename = f"res/stage0/{args.dataset}.csv"
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "dataset", "model_type", "modality", "train_mode",

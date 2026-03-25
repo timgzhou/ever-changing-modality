@@ -27,10 +27,10 @@ class CrossSequenceProjector(nn.Module):
     - (num_layers - 1) SelfAttentionBlock layers on source tokens (with RoPE)
     - 1 CrossAttentionBlock: tgt=queries with RoPE on patch portion, memory=source tokens with RoPE
 
-    Query shape per target modality: [1, n_storage + 2, embed_dim]
-    - n_storage storage queries + 1 CLS query + 1 patch prototype query
+    Query shape per target modality: [1, 2, embed_dim]
+    - 1 CLS query + 1 patch prototype query (no storage queries)
     The patch prototype is broadcast to n_patches and given per-position RoPE before cross-attn.
-    Output: [B, 1 + n_storage + n_patches, embed_dim] (fixed shape regardless of visible input length)
+    Output: [B, 1 + n_patches, embed_dim] (fixed shape regardless of visible input length)
     """
 
     def __init__(self, embed_dim, n_storage_tokens, img_size, patch_size,
@@ -63,15 +63,15 @@ class CrossSequenceProjector(nn.Module):
         """
         Args:
             x: [B, 1+n_storage+n_patches, embed_dim] — full source token sequence
-            queries: [1, n_storage+2, embed_dim] — target modality's learned queries
+            queries: [1, 2, embed_dim] — target modality's learned queries (CLS + patch prototype)
             rope_embed: EVAN's RopePositionEmbedding module
             src_patch_mask: [B, n_patches] bool tensor, True=masked (will be blocked in cross-attn).
                             If None, all source patches are attended to.
         Returns:
-            [B, 1 + n_storage + n_patches, embed_dim]
+            [B, 1 + n_patches, embed_dim] — no storage tokens in output
         """
         B = x.shape[0]
-        n_prefix = self.n_storage_tokens + 1  # CLS + storage tokens
+        src_n_prefix = self.n_storage_tokens + 1  # CLS + storage tokens in source
         H = W = int(self.n_patches ** 0.5)
 
         # Compute RoPE (full grid for both source and query patches)
@@ -86,11 +86,11 @@ class CrossSequenceProjector(nn.Module):
             for blk in self.self_attn_layers:
                 x = blk(x, rope_memory)
 
-        # Prepare queries: broadcast patch prototype and compute RoPE for query side
-        q_cls_storage = queries[:, :n_prefix, :].expand(B, -1, -1)        # [B, n_storage+1, D]
-        q_patch_proto = queries[:, n_prefix:, :].expand(B, -1, -1)        # [B, 1, D]
-        q_patches = q_patch_proto.expand(-1, self.n_patches, -1).clone()  # [B, n_patches, D]
-        q = torch.cat([q_cls_storage, q_patches], dim=1)                  # [B, n_storage+1+n_patches, D]
+        # Prepare queries: 1 CLS query + patch prototype broadcast to n_patches
+        q_cls = queries[:, :1, :].expand(B, -1, -1)                      # [B, 1, D]
+        q_patch_proto = queries[:, 1:, :].expand(B, -1, -1)              # [B, 1, D]
+        q_patches = q_patch_proto.expand(-1, self.n_patches, -1).clone() # [B, n_patches, D]
+        q = torch.cat([q_cls, q_patches], dim=1)                         # [B, 1+n_patches, D]
 
         rope_tgt = (sin, cos) if rope_embed is not None else None  # full grid for Q patches
 
@@ -100,21 +100,19 @@ class CrossSequenceProjector(nn.Module):
         if src_patch_mask is not None:
             Nq = q.shape[1]
             Nkv = x.shape[1]
-            # Start with all zeros (no masking), then block masked patch positions in memory
             mask = torch.zeros(B, 1, Nq, Nkv, device=x.device, dtype=x.dtype)
-            # src_patch_mask: [B, n_patches] → expand to [B, 1, Nq, n_patches] and place at patch columns
             patch_block = src_patch_mask[:, None, None, :].expand(B, 1, Nq, -1).to(x.dtype)
-            mask[:, :, :, n_prefix:] = patch_block.masked_fill(patch_block.bool(), float('-inf'))
+            mask[:, :, :, src_n_prefix:] = patch_block.masked_fill(patch_block.bool(), float('-inf'))
             attn_mask = mask
 
         # Cross-attention: tgt=queries, memory=source tokens
         out = self.cross_attn_block(
             tgt=q, memory=x,
             rope_tgt=rope_tgt, rope_memory=rope_memory,
-            prefix_len_tgt=n_prefix, prefix_len_memory=n_prefix,
+            prefix_len_tgt=1, prefix_len_memory=src_n_prefix,
             attn_mask=attn_mask,
         )
-        return out  # [B, n_storage+1+n_patches, D]
+        return out  # [B, 1+n_patches, D]
 
 
 class EVAN(nn.Module):
@@ -332,10 +330,9 @@ class EVAN(nn.Module):
             key_rev = f"{new_modality_key}_to_{src_mod}"
             self.intermediate_projectors[key_fwd] = self._make_intermediate_projector(new_modality_key)
             self.intermediate_projectors[key_rev] = self._make_intermediate_projector(src_mod)
-
         if self.intermediate_projector_type == "cross" and existing_modalities:
-            # n_storage+2: n_storage storage queries + 1 CLS query + 1 patch prototype query
-            query_shape = (1, self.n_storage_tokens + 2, self.embed_dim)
+            # 2: 1 CLS query + 1 patch prototype query (no storage queries)
+            query_shape = (1, 2, self.embed_dim)
             for mod in [new_modality_key] + existing_modalities:
                 if mod not in self.projector_queries:
                     param = nn.Parameter(torch.empty(*query_shape, device=self.device))
@@ -835,9 +832,9 @@ class EVAN(nn.Module):
         Args:
             embedded_modalities: Dict mapping modality_key -> tensor [B, 1+n_storage+num_patches, embed_dim]
                                 Output from forward_modality_specific_features (possibly with masking applied)
-            hallucinated_modalities: Optional set of modality names that are hallucinated (not real).
-                                    When provided, only MFLAs for these modalities are applied.
-                                    When None, no MFLAs are applied (backward compatible behavior).
+            hallucinated_modalities: Optional set of modality names whose sequences have shape
+                                    [B, 1+n_patches, embed_dim] (no storage tokens, cross projector only).
+                                    Used for variable-prefix fusion splitting.
 
         Returns:
             Dictionary with normalized features per modality (same format as forward_features):
@@ -854,14 +851,23 @@ class EVAN(nn.Module):
         all_patches = []
         current_idx = 0
 
+        hallucinated_modalities = hallucinated_modalities or set()
+        prefix_sizes = {}  # per-modality CLS+storage count
         for modality_key in sorted(embedded_modalities.keys()):
             x_mod = embedded_modalities[modality_key]
 
+            # Hallucinated modalities have shape [B, 1+n_patches, D] (no storage tokens)
+            if modality_key in hallucinated_modalities:
+                n_prefix = 1
+            else:
+                n_prefix = self.n_storage_tokens + 1
+            prefix_sizes[modality_key] = n_prefix
+
             # Extract CLS and storage tokens (keep separate per modality)
-            all_cls_storage[modality_key] = x_mod[:, :self.n_storage_tokens + 1, :]
+            all_cls_storage[modality_key] = x_mod[:, :n_prefix, :]
 
             # Extract patch tokens
-            patches = x_mod[:, self.n_storage_tokens + 1:, :]
+            patches = x_mod[:, n_prefix:, :]
             num_patches = patches.shape[1]
 
             # Store metadata for later splitting
@@ -879,7 +885,6 @@ class EVAN(nn.Module):
         # Concatenate all CLS/storage tokens from all modalities
         all_cls_storage_list = [all_cls_storage[k] for k in sorted(all_cls_storage.keys())]
         x_cls_storage_concat = torch.cat(all_cls_storage_list, dim=1)
-        n_cls_storage_per_modality = self.n_storage_tokens + 1
         n_modalities = len(all_cls_storage)
 
         # Compute H, W from image size and patch size
@@ -902,27 +907,20 @@ class EVAN(nn.Module):
             # Shared block forward on concatenated representation
             x_fused = self.blocks[lora_idx](x_fused, rope_sincos)
 
-            # Add fusion LoRA only for hallucinated modalities (if specified)
-            if hallucinated_modalities:
-                raise NotImplementedError("WARNING: don't use MFLA yet, not implemented")
-                # lora_output = 0
-                # for modality_key in hallucinated_modalities:
-                #     if modality_key in self.modality_fusion_lora_adaptors:
-                #         lora = self.modality_fusion_lora_adaptors[modality_key][lora_idx]
-                #         lora_output = lora_output + lora(x_fused)
-                # x_fused = x_fused + lora_output
 
         # Step 3: Split fused representation back into modality-specific outputs
-        total_cls_storage = n_modalities * n_cls_storage_per_modality
+        total_cls_storage = sum(prefix_sizes.values())
 
         # Split back into modality-specific outputs
         output_dict = {}
         sorted_modalities = sorted(embedded_modalities.keys())
-        for mod_idx, modality_key in enumerate(sorted_modalities):
+        cls_offset = 0
+        for modality_key in sorted_modalities:
+            n_prefix = prefix_sizes[modality_key]
+
             # Extract this modality's CLS/storage tokens
-            cls_start = mod_idx * n_cls_storage_per_modality
-            cls_end = cls_start + n_cls_storage_per_modality
-            x_cls_storage_mod = x_fused[:, cls_start:cls_end, :]
+            x_cls_storage_mod = x_fused[:, cls_offset:cls_offset + n_prefix, :]
+            cls_offset += n_prefix
 
             # Extract this modality's patches
             info = modality_info[modality_key]
@@ -933,14 +931,14 @@ class EVAN(nn.Module):
             # Recombine this modality's CLS/storage with its patches
             x_mod = torch.cat([x_cls_storage_mod, patches], dim=1)
 
-            # Apply normalization
+            # Apply normalization — for hallucinated modalities n_prefix=1 (CLS only, no storage)
             if self.untie_cls_and_patch_norms:
-                x_norm_cls_reg = self.cls_norm(x_mod[:, :self.n_storage_tokens + 1])
-                x_norm_patch = self.norm(x_mod[:, self.n_storage_tokens + 1:])
+                x_norm_cls_reg = self.cls_norm(x_mod[:, :n_prefix])
+                x_norm_patch = self.norm(x_mod[:, n_prefix:])
             else:
                 x_norm = self.norm(x_mod)
-                x_norm_cls_reg = x_norm[:, :self.n_storage_tokens + 1]
-                x_norm_patch = x_norm[:, self.n_storage_tokens + 1:]
+                x_norm_cls_reg = x_norm[:, :n_prefix]
+                x_norm_patch = x_norm[:, n_prefix:]
 
             output_dict[modality_key] = {
                 "x_norm_clstoken": x_norm_cls_reg[:, 0],
@@ -968,7 +966,6 @@ class EVAN(nn.Module):
         self,
         x: Dict[str, Tensor],
         pseudo_modalities: List[str],
-        intermediate_projectors=None,  # deprecated, ignored — use self.intermediate_projectors
     ) -> Dict[str, Dict[str, Tensor]]:
         """
         Forward pass with pseudo-modalities using full sequence projection.
@@ -998,7 +995,9 @@ class EVAN(nn.Module):
             embedded[mod] = torch.stack(projected_seqs).mean(dim=0)
 
         # Step 3: Forward through fusion (modality encoding added here)
-        return self.forward_fusion_from_modality_features(embedded)
+        # cross projector outputs [B, 1+n_patches, D] — fusion needs variable prefix handling
+        hal = set(pseudo_modalities) if self.intermediate_projector_type == "cross" else None
+        return self.forward_fusion_from_modality_features(embedded, hallucinated_modalities=hal)
 
     def set_requires_grad(
         self,
@@ -1502,7 +1501,7 @@ class EVANClassifier(EvanPredictor):
         else:
             raise ValueError(f"Unknown classifier strategy: {self.strategy}")
 
-    def forward(self, x, pseudo_modalities=None, intermediate_projectors=None):
+    def forward(self, x, pseudo_modalities=None):
         """
         Forward pass supporting both single tensor and dict inputs.
         Args:
