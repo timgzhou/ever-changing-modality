@@ -373,8 +373,6 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                                    modality_bands_dict, criterion, optimizer, num_epochs,
                                    modality, phase_name="Training",
                                    use_wandb=False, wandb_prefix=None, clip_norm=10,
-                                   hallucinate_modality=False, pseudo_modalities=None,
-                                   intermediate_projectors=None,
                                    multilabel=False, label_key='label',
                                    segmentation=False, num_classes=None,
                                    ignore_index=-100,
@@ -397,9 +395,6 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         use_wandb: Whether to log to wandb
         wandb_prefix: Prefix for wandb metrics
         clip_norm: Max gradient norm for clipping
-        hallucinate_modality: If True, use pseudo-modality inference
-        pseudo_modalities: List of modalities to hallucinate (required if hallucinate_modality=True)
-        intermediate_projectors: Trained sequence projectors (required if hallucinate_modality=True)
         multilabel: If True, report mAP instead of top-1 accuracy and accumulate train outputs
         label_key: Key for labels in batch dict ('label' or 'mask')
         segmentation: If True, report mIoU; model outputs [B, C, H, W], labels are [B, H, W]
@@ -408,9 +403,9 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         best_checkpoint_path: Path to save the best checkpoint (required when val_loader is set).
 
     Returns:
-        Tuple of (train_metric, test_metric, best_test_metric, best_epoch, best_val_metric)
+        Tuple of (train_metric, test_metric, best_val_metric, best_val_test_metric)
         where metric is Acc (%), mAP (%), or mIoU (%) depending on task.
-        best_val_metric is None when val_loader is not provided.
+        best_val_metric and best_val_test_metric are None when val_loader is not provided.
     """
     mod_str = modality.upper()
     if segmentation:
@@ -420,24 +415,16 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
     else:
         metric_name = "Acc"
     global_step = 0
-    best_test_metric = 0
-    best_epoch = 0
     best_val_metric = None
+    best_val_test_metric = None
     if val_loader is not None:
         best_val_metric = 0
+        best_val_test_metric = 0
         assert best_checkpoint_path is not None, "best_checkpoint_path required when val_loader is provided"
     scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=0, min_lr=1e-6)
 
-    # Validate hallucinate_modality requirements
-    if hallucinate_modality:
-        assert pseudo_modalities is not None, "pseudo_modalities required when hallucinate_modality=True"
-        assert intermediate_projectors is not None, "intermediate_projectors required when hallucinate_modality=True"
-        print(f"  Using pseudo-modality inference: {modality} + hallucinated {pseudo_modalities}")
-
     for epoch in range(num_epochs):
         model.train()
-        if intermediate_projectors is not None:
-            intermediate_projectors.train()
         train_loss = 0.0
         train_correct = 0
         train_total = 0
@@ -459,10 +446,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
 
             optimizer.zero_grad()
 
-            if hallucinate_modality:
-                outputs = model(modal_input, pseudo_modalities=pseudo_modalities, intermediate_projectors=intermediate_projectors)
-            else:
-                outputs = model(modal_input)
+            outputs = model(modal_input)
 
             loss = criterion(outputs, labels)
             loss.backward()
@@ -527,14 +511,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                 num_classes=num_classes,
                 ignore_index=ignore_index,
             )
-            if hallucinate_modality:
-                test_loss, test_metric = evaluate(
-                    model, test_loader, criterion, device,
-                    pseudo_modalities=pseudo_modalities, intermediate_projectors=intermediate_projectors,
-                    **eval_kwargs,
-                )
-            else:
-                test_loss, test_metric = evaluate(model, test_loader, criterion, device, **eval_kwargs)
+            test_loss, test_metric = evaluate(model, test_loader, criterion, device, **eval_kwargs)
 
             if val_loader is not None:
                 val_loss, val_metric = evaluate(model, val_loader, criterion, device, **eval_kwargs)
@@ -543,13 +520,10 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
             print(f"  Test ({mod_str}):  Loss: {test_loss:.4f}, {metric_name}: {test_metric:.2f}% (epoch {epoch+1}/{num_epochs})")
             if val_metric is not None:
                 print(f"  Val  ({mod_str}):  Loss: {val_loss:.4f}, {metric_name}: {val_metric:.2f}%")
-            if test_metric > best_test_metric:
-                print(f"    New test record: {test_metric:.2f} > previous {best_test_metric:.2f} at epoch {epoch+1}")
-                best_test_metric = test_metric
-                best_epoch = epoch + 1
             if val_metric is not None and val_metric > best_val_metric:
                 print(f"    New val record: {val_metric:.2f} > previous {best_val_metric:.2f} at epoch {epoch+1} — saving checkpoint")
                 best_val_metric = val_metric
+                best_val_test_metric = test_metric
                 model.save_checkpoint(best_checkpoint_path)
 
         if use_wandb and wandb_prefix:
@@ -567,7 +541,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                 log_dict[f'{wandb_prefix}/val_{metric_name.lower()}'] = val_metric
             wandb.log(log_dict)
 
-    return train_metric, test_metric, best_test_metric, best_epoch, best_val_metric
+    return train_metric, test_metric, best_val_metric, best_val_test_metric
 
 
 def supervised_training_loop(model, train_loader, test_loader_full, device,

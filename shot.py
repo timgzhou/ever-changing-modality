@@ -1177,10 +1177,8 @@ def train_shot(
     all_loss_names = ['mae', 'latent', 'prefusion', 'distill', 'entr','ce']
     if active_losses is None:
         active_losses = all_loss_names
-    else:
-        invalid = set(active_losses) - set(all_loss_names)
-        if invalid:
-            raise ValueError(f"Invalid loss names: {invalid}. Valid: {all_loss_names}")
+    elif set(active_losses) - set(all_loss_names):
+        raise ValueError(f"Invalid loss names: {set(active_losses) - set(all_loss_names)}. Valid: {all_loss_names}")
     print(f"  Active losses: {active_losses}")
 
     all_modalities = list(set(mae_modalities + latent_reconstruct_modalities))

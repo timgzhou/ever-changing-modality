@@ -236,7 +236,7 @@ def main():
         checkpoint_path = os.path.join(args.checkpoint_dir,
                                        f'evan_{args.dataset}_stage0_{args.modality}_{timestamp}.pt')
 
-    train_metric, test_metric, best_test_metric, best_epoch, best_val_metric = single_modality_training_loop(
+    train_metric, test_metric, best_val_metric, best_val_test_metric = single_modality_training_loop(
         model, train1_loader, test_loader, device,
         modality_bands_dict, criterion, optimizer, args.epochs,
         modality=args.modality,
@@ -271,8 +271,7 @@ def main():
         "dataset", "model_type", "modality", "train_mode",
         "tz_lora_rank", "tz_modality_specific_layer_augmenter",
         "learning_rate", "trainable_params", "epoch",
-        "test_metric", "best_test_metric(oracle)", "best_epoch",
-        "best_val_metric", "metric_name", "saved_checkpoint", "global_rep",
+        "test_metric", "metric_name", "saved_checkpoint", "global_rep",
     ]
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
@@ -282,8 +281,7 @@ def main():
             args.dataset, args.model, args.modality, args.train_mode,
             args.tz_lora_rank, args.tz_modality_specific_layer_augmenter,
             args.lr, trainable_params, args.epochs,
-            f"{test_metric:.2f}", f"{best_test_metric:.2f}", best_epoch,
-            f"{best_val_metric:.2f}" if best_val_metric is not None else "",
+            f"{best_val_test_metric:.2f}" if best_val_test_metric is not None else "",
             metric_name, checkpoint_path, args.global_rep,
         ])
 

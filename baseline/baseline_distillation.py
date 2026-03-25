@@ -11,6 +11,7 @@ import logging
 import os
 import argparse
 from datetime import datetime
+from typing import Literal
 import wandb
 import csv
 from tqdm import tqdm
@@ -192,7 +193,7 @@ def init_student_from_teacher(
     return student_model
 
 
-def distillation_loss(student_logits, teacher_logits, temperature=2.0, ignore_index=None, labels=None):
+def distillation_loss(student_logits, teacher_logits, temperature=2.0, ignore_index=None, labels=None, kl_type: Literal["kd","ttm","wttm"] = "kd"):
     """Compute KL divergence loss between student and teacher soft labels.
 
     Supports both classification [B, C] and segmentation [B, C, H, W] logits.
@@ -206,9 +207,23 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0, ignore_in
             mask = labels.reshape(-1) != ignore_index
             student_logits = student_logits[mask]
             teacher_logits = teacher_logits[mask]
-    student_soft = F.log_softmax(student_logits / temperature, dim=-1)
     teacher_soft = F.softmax(teacher_logits / temperature, dim=-1)
-    return F.kl_div(student_soft, teacher_soft, reduction='batchmean') * (temperature ** 2)
+    if kl_type == "kd":
+        student_log_soft = F.log_softmax(student_logits / temperature, dim=-1)
+        return F.kl_div(student_log_soft, teacher_soft, reduction="batchmean") * (temperature ** 2)
+
+    elif kl_type == "ttm":
+        student_log_soft = F.log_softmax(student_logits, dim=-1)
+        return F.kl_div(student_log_soft, teacher_soft, reduction="batchmean")
+
+    elif kl_type == "wttm":
+        gamma = 1.0 / temperature
+        student_log_soft = F.log_softmax(student_logits, dim=-1)
+        per_sample_kl = F.kl_div(
+            student_log_soft, teacher_soft, reduction="none"
+        ).sum(dim=-1)                                          # [B]
+        power_sum = (teacher_soft ** gamma).sum(dim=-1)
+        return (power_sum * per_sample_kl).mean()
 
 
 def feature_distillation_loss(student_features, teacher_features):
@@ -454,7 +469,7 @@ def distillation_training_loop(
     student_model, teacher_model, train_loader, test_loader, device,
     student_modality_bands_dict, teacher_modality_bands_dict,
     optimizer, num_epochs, student_modality, teacher_modality,
-    temperature=2.0, alpha=0.5, distillation_mode='regular',
+    temperature=2.0, alpha=0.5, distillation_mode='regular', kl_type="kd",
     use_wandb=False, wandb_prefix=None, clip_norm=10,
     multilabel=False, label_key='label',
     segmentation=False, num_classes=None, ignore_index=-100,
@@ -561,7 +576,7 @@ def distillation_training_loop(
                 student_logits = student_model(student_input)
                 distill_loss = distillation_loss(student_logits, teacher_logits, temperature,
                                                 ignore_index=ignore_index if segmentation else None,
-                                                labels=labels if segmentation else None)
+                                                labels=labels if segmentation else None, kl_type=kl_type)
 
                 if distillation_mode == 'with_guidance':
                     # Fixed 0.5 supervision + 0.5 distillation
@@ -692,6 +707,8 @@ def main():
     parser.add_argument('--distillation_mode', type=str, default='regular',
                         choices=['regular', 'with_guidance', 'feature'],
                         help='Distillation mode: regular (KL on logits), with_guidance (0.5 supervision + 0.5 distillation), feature (MSE on cls+patch tokens)')
+    parser.add_argument('--kl_type', type=str, default='kd',
+                        choices=['kd', 'ttm', 'wttm'])
     parser.add_argument('--init_from_teacher', action='store_true',
                         help='Initialize student backbone and adaptors from teacher weights (instead of DINO pretrained)')
     parser.add_argument('--results_csv', type=str, default=None,
@@ -962,12 +979,13 @@ def main():
         print(f"  Supervised classifier accuracy: {supervised_classifier_acc:.2f}% (best: {supervised_classifier_best_acc:.2f}%)")
 
     filename = args.results_csv
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
     fieldnames = ["model_type", "teacher_modality", "student_modality", "train_mode", "tz_lora_rank",
                   "tz_modality_specific_layer_augmenter", "learning_rate", "trainable_params",
-                  "epoch", "temperature", "alpha", "distillation_mode", "metric_name",
-                  "test_metric", "best_test_metric(oracle)", "best_epoch",
-                  "ensemble_metric_avg", "ensemble_metric_softmax",
+                  "epoch", "temperature", "alpha", "distillation_mode", "kl_type",
+                  "metric_name", "test_metric", "best_test_metric(oracle)", "best_epoch",
+                  "ensemble_metric_logits", "ensemble_metric_softmax",
                   "teacher_classifier_acc", "supervised_classifier_acc", "supervised_classifier_best_acc",
                   "saved_checkpoint", "global_rep", "teacher_checkpoint"]
     with open(filename, mode='a', newline='') as file:
@@ -977,7 +995,7 @@ def main():
         writer.writerow([
             args.model, teacher_modality, args.modality, args.train_mode, args.tz_lora_rank,
             args.tz_modality_specific_layer_augmenter, args.lr, trainable_params,
-            num_epochs, args.temperature, args.alpha, args.distillation_mode, metric_name,
+            num_epochs, args.temperature, args.alpha, args.distillation_mode, args.kl_type, metric_name,
             f"{test_metric:.2f}", f"{best_test_metric:.2f}", best_epoch,
             f"{ensemble_metric_avg:.2f}", f"{ensemble_metric_softmax:.2f}",
             f"{teacher_classifier_acc:.2f}" if teacher_classifier_acc is not None else "",
