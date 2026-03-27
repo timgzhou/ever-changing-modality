@@ -1271,18 +1271,18 @@ def train_shot(
 
     teacher_is_peeking = False
     teacher_val_acc = None
-    # for loader,set_name in zip([val_labeled_loader, test_loader],["val(labeled)","test"]):
-    #     if loader is not None:
-    #         from train_utils import evaluate as _eval_fn
-    #         _, teacher_val_acc = _eval_fn(
-    #             teacher_classifier, loader,
-    #             nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss(),
-    #             device, modality_bands_dict, modalities_to_use=(starting_modality,),
-    #             multilabel=multilabel, label_key=label_key,
-    #             segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
-    #         )
-    #         _metric_label = "mIoU" if segmentation else ("mAP" if multilabel else "accuracy")
-    #         print(f"\nTeacher baseline {set_name} {_metric_label} (starting modality only): {teacher_val_acc:.2f}%")
+    for loader,set_name in zip([val_labeled_loader, test_loader],["val(labeled)","test"]):
+        if loader is not None:
+            from train_utils import evaluate as _eval_fn
+            _, teacher_val_acc = _eval_fn(
+                teacher_classifier, loader,
+                nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss(),
+                device, modality_bands_dict, modalities_to_use=(starting_modality,),
+                multilabel=multilabel, label_key=label_key,
+                segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
+            )
+            _metric_label = "mIoU" if segmentation else ("mAP" if multilabel else "accuracy")
+            print(f"\nTeacher baseline {set_name} {_metric_label} (starting modality only): {teacher_val_acc:.2f}%")
 
     global_step = 0
     for epoch in range(args.epochs):
