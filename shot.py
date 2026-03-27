@@ -1079,9 +1079,10 @@ def _run_periodic_eval(
         print(f"  >> New best model checkpoint (val {checkpoint_selection}: {current_metric:.2f})")
 
     checkpoint_criteria = {
-        'best_transfer': 'teacher_agreement',
-        'best_peeking': 'peeking',
-        'best_addition': 'addition'
+        'best_transfer':     'teacher_agreement',
+        'best_peeking':      'peeking',
+        'best_addition':     'addition',
+        'best_ens_addition': 'ens_addition',
     }
     new_records = []
     for ckpt_name, metric_key in checkpoint_criteria.items():
@@ -1262,9 +1263,10 @@ def train_shot(
     if val_weights is None:
         val_weights = {'peeking': 0.5, 'teacher_agreement': 0.5}
     best_checkpoints = {
-        'best_transfer': {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
-        'best_peeking':  {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
-        'best_addition': {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
+        'best_transfer':     {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
+        'best_peeking':      {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
+        'best_addition':     {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
+        'best_ens_addition': {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
     }
 
     teacher_is_peeking = False
