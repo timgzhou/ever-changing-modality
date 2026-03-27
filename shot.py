@@ -197,7 +197,7 @@ def create_fuse_cls_projectors(hidden_dim, mae_modalities, latent_reconstruct_mo
 
 # MASKING HELPER FUNCTION
 def mask_input(evan, batch_size, n_storage_tokens, num_patches, mae_mask_ratio, all_modalities, prefusion_features, modality_dropout, device,
-               protected_modalities=None, active_losses=None, latent_reconstruct_modalities=None):
+               protected_modalities=None, active_losses=None, latent_reconstruct_modalities=None, protect_lrm=False):
     """
     Apply masking using projected sequences from other modalities, and compute prefusion loss.
 
@@ -250,7 +250,7 @@ def mask_input(evan, batch_size, n_storage_tokens, num_patches, mae_mask_ratio, 
     lrm = set(latent_reconstruct_modalities) if latent_reconstruct_modalities else set()
     for src_mod in available_modalities:
         src_seq = prefusion_features[src_mod]
-        if src_mod in lrm:
+        if protect_lrm and (src_mod in lrm):
             src_seq = src_seq.detach()
         src_seq_norm = F.layer_norm(src_seq, [src_seq.shape[-1]])
         src_patch_mask = modality_masks[src_mod] if use_cross else None
@@ -268,7 +268,7 @@ def mask_input(evan, batch_size, n_storage_tokens, num_patches, mae_mask_ratio, 
     if active_losses and 'prefusion' in active_losses:
         for (src_mod, tgt_mod), proj_seq in projected_sequences.items():
             tgt_seq = prefusion_features[tgt_mod]  # [B, 1+n_storage+n_patches, D]
-            if tgt_mod in lrm:
+            if protect_lrm and (tgt_mod in lrm):
                 tgt_seq = tgt_seq.detach()
             if cross_projector:
                 tgt_seq = torch.cat([tgt_seq[:, :1], tgt_seq[:, n_storage_tokens + 1:]], dim=1)
