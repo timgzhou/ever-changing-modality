@@ -228,3 +228,4 @@ GEO-Bench-2
 .vscode/
 pyrightconfig.json
 one-off/
+cache

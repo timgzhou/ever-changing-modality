@@ -13,3 +13,4 @@ torchgeo
 seaborn
 geobenchv2
 torchinfo
+scikit-learn

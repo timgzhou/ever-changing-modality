@@ -76,7 +76,7 @@ def main():
     parser.add_argument('--entr_frequency', type=float, default=0,
                         help='Frequency of entropy minimization instead of distillation on unlabeled batches')
     parser.add_argument('--active_losses', type=str, nargs='+', default=None,
-                        choices=['mae', 'latent', 'prefusion', 'distill', 'ce', 'entr'],
+                        choices=['mae', 'latent', 'prefusion', 'distill', 'ce'],
                         help='Which losses to activate (default: all)')
     parser.add_argument('--use_mfla', action='store_true',
                         help='Enable MFLA training for hallucinated modalities')
