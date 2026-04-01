@@ -163,17 +163,30 @@ def create_mae_decoders(hidden_dim,patch_size,modality_bands_dict,mae_modalities
 
 # ==================== SHOT TRAINING COMPONENT ====================
 
-def create_latent_projectors(hidden_dim, latent_reconstruct_modalities, device, num_heads=8, ffn_factor=4):
-    """Create transformer-based projectors for latent matching (CLS + patches jointly)."""
+def create_latent_projectors(hidden_dim, latent_reconstruct_modalities, device, num_heads=8, ffn_factor=4,
+                             teacher_dim=None, teacher_n_patches=None):
+    """Create transformer-based projectors for latent matching (CLS + patches jointly).
+
+    Args:
+        hidden_dim: student embed_dim (e.g. 384 for EVAN-Small)
+        teacher_dim: teacher embed_dim if different from student (e.g. 768 for Panopticon).
+                     When set, a Linear(hidden_dim→teacher_dim) output projection is added.
+        teacher_n_patches: number of teacher patch tokens. Stored for use in _compute_latent_loss
+                           to interpolate student patches to match teacher sequence length.
+    """
     projectors = nn.ModuleDict()
     for mod in latent_reconstruct_modalities:
         projectors[mod] = SequenceProjector(
             embed_dim=hidden_dim,
             num_heads=num_heads,
             ffn_factor=ffn_factor,
-            num_layers=2
+            num_layers=2,
+            output_dim=teacher_dim,
         ).to(device)
         print(f"  Initialized Latent Projector (Transformer) for {mod}")
+    # Store cross-teacher metadata as plain attributes (not nn.Parameters)
+    projectors._teacher_dim = teacher_dim
+    projectors._teacher_n_patches = teacher_n_patches
     return projectors
 
 
@@ -746,7 +759,13 @@ def set_mfla_training_mode(evan, hallucinated_modalities, all_modalities, in_war
 
 
 def _compute_latent_loss(student_fused, teacher_out, latent_projectors, latent_reconstruct_modalities, mse_fn, device, only_mod=None):
-    """Compute latent reconstruction loss: project student CLS+patch tokens to match teacher."""
+    """Compute latent reconstruction loss: project student CLS+patch tokens to match teacher.
+
+    Handles cross-architecture teachers (e.g. Panopticon) where teacher_dim and teacher_n_patches
+    may differ from the student. The projector outputs teacher_dim if set, and patch tokens are
+    interpolated to teacher_n_patches if needed.
+    """
+    teacher_n_patches = getattr(latent_projectors, '_teacher_n_patches', None)
     latent_loss = torch.tensor(0.0, device=device)
     for mod in latent_reconstruct_modalities:
         if only_mod is not None and mod != only_mod:
@@ -756,9 +775,15 @@ def _compute_latent_loss(student_fused, teacher_out, latent_projectors, latent_r
         student_cls = student_fused[mod]['x_norm_clstoken']
         teacher_cls = teacher_out[mod]['x_norm_clstoken'].detach()
         student_seq = torch.cat([student_cls.unsqueeze(1), student_patches], dim=1)
-        projected_seq = latent_projectors[mod](student_seq)
-        projected_cls = projected_seq[:, 0, :]
-        projected_patches = projected_seq[:, 1:, :]
+        projected_seq = latent_projectors[mod](student_seq)   # [B, 1+N_student, D_out]
+        projected_cls = projected_seq[:, 0, :]                # [B, D_out]
+        projected_patches = projected_seq[:, 1:, :]           # [B, N_student, D_out]
+        if teacher_n_patches is not None and projected_patches.shape[1] != teacher_n_patches:
+            # Interpolate student patch sequence length to match teacher
+            projected_patches = F.interpolate(
+                projected_patches.transpose(1, 2),  # [B, D_out, N_student]
+                size=teacher_n_patches, mode='linear', align_corners=False,
+            ).transpose(1, 2)                        # [B, N_teacher, D_out]
         latent_loss = latent_loss + mse_fn(projected_cls, teacher_cls) + mse_fn(projected_patches, teacher_patches)
     return latent_loss
 
@@ -1152,6 +1177,10 @@ def train_shot(
     ignore_index: int = -100,           # Label value to ignore in mIoU (e.g. 19 for PASTIS void_label)
     # Teacher replacement options
     replace_teacher_w_peek: bool = False,       # When teacher is replaced by student, use peeking mode for distillation
+    # External teacher (e.g. PanopticonTeacher) — skip deepcopy from student when provided
+    teacher_classifier=None,
+    teacher_latent_dim: int = None,             # Teacher embed_dim (e.g. 768 for Panopticon) if != student embed_dim
+    teacher_n_patches: int = None,              # Teacher patch token count if != student (e.g. 81 for Panopticon@128px)
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -1196,10 +1225,15 @@ def train_shot(
 
     all_modalities = list(set(mae_modalities + latent_reconstruct_modalities))
 
-    teacher_classifier = copy.deepcopy(model)
-    teacher_classifier.freeze_all()
-    teacher_classifier.eval()
-    print(f"\nTeacher classifier created (frozen copy of model for feature + label distillation)")
+    if teacher_classifier is None:
+        teacher_classifier = copy.deepcopy(model)
+        teacher_classifier.freeze_all()
+        teacher_classifier.eval()
+        print(f"\nTeacher classifier created (frozen copy of model for feature + label distillation)")
+    else:
+        teacher_classifier.freeze_all()
+        teacher_classifier.eval()
+        print(f"\nUsing externally provided teacher classifier: {type(teacher_classifier).__name__}")
 
     is_segmenter = hasattr(model, 'decoder_strategy')
     if is_segmenter:
@@ -1213,9 +1247,9 @@ def train_shot(
         if model.classifier_strategy != 'ensemble':
             print(f"!! Converting classifier from {model.classifier_strategy} to ensemble mode for label distillation")
             model.switch_strategy('ensemble')
-            for mod in all_modalities:
-                if mod not in model.modality_classifiers:
-                    model.instantiate_modality_classifier(mod)
+        for mod in all_modalities:
+            if mod not in model.modality_classifiers:
+                model.instantiate_modality_classifier(mod)
 
     model.freeze_all()
     model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=use_mfla, msla=True, patch_embedders=True, head=True)
@@ -1226,7 +1260,9 @@ def train_shot(
     patch_size = evan.patch_size
 
     mae_decoders = create_mae_decoders(embed_dim, patch_size, modality_bands_dict, mae_modalities, device)
-    latent_projectors = create_latent_projectors(embed_dim, latent_reconstruct_modalities, device)
+    latent_projectors = create_latent_projectors(embed_dim, latent_reconstruct_modalities, device,
+                                                  teacher_dim=teacher_latent_dim,
+                                                  teacher_n_patches=teacher_n_patches)
     evan.set_requires_grad("all", intermediate_projectors=True)
 
     trainable_in_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
@@ -1271,18 +1307,18 @@ def train_shot(
 
     teacher_is_peeking = False
     teacher_val_acc = None
-    for loader,set_name in zip([val_labeled_loader, test_loader],["val(labeled)","test"]):
-        if loader is not None:
-            from train_utils import evaluate as _eval_fn
-            _, teacher_val_acc = _eval_fn(
-                teacher_classifier, loader,
-                nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss(),
-                device, modality_bands_dict, modalities_to_use=(starting_modality,),
-                multilabel=multilabel, label_key=label_key,
-                segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
-            )
-            _metric_label = "mIoU" if segmentation else ("mAP" if multilabel else "accuracy")
-            print(f"\nTeacher baseline {set_name} {_metric_label} (starting modality only): {teacher_val_acc:.2f}%")
+    # for loader,set_name in zip([val_labeled_loader, test_loader],["val(labeled)","test"]):
+    #     if loader is not None:
+    #         from train_utils import evaluate as _eval_fn
+    #         _, teacher_val_acc = _eval_fn(
+    #             teacher_classifier, loader,
+    #             nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss(),
+    #             device, modality_bands_dict, modalities_to_use=(starting_modality,),
+    #             multilabel=multilabel, label_key=label_key,
+    #             segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
+    #         )
+    #         _metric_label = "mIoU" if segmentation else ("mAP" if multilabel else "accuracy")
+    #         print(f"\nTeacher baseline {set_name} {_metric_label} (starting modality only): {teacher_val_acc:.2f}%")
 
     global_step = 0
     for epoch in range(args.epochs):

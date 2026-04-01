@@ -410,5 +410,95 @@ def main():
     print(f'Logged to {args.results_csv}')
 
 
+class PanopticonTeacher(nn.Module):
+    """Frozen Panopticon ViT-B/14 + trained LP head, implementing the teacher interface for shot.py.
+
+    Exposes:
+      - __call__(input_dict)                   → logits [B, num_classes]   (distill loss)
+      - .evan.forward_features(input_dict)     → {mod: {x_norm_clstoken, x_norm_patchtokens}}
+      - .evan.starting_modality                (string)
+      - .freeze_all()                          (freezes all parameters)
+
+    `input_dict` format (same as what shot.py passes): {mod_name: tensor [B, C, H, W]}
+    where the tensor is GEO-Bench z-score normalised (consistent with LP training).
+
+    Note on shapes (for latent loss):
+      Panopticon patch_size=14, so for 128×128 input: N_patches = floor(128/14)^2 = 81.
+      EVAN student has patch_size=16, N_patches = 64. The latent projectors handle
+      this mismatch when train_shot is called with teacher_latent_dim=768, teacher_n_patches=81.
+    """
+
+    class _EvanStub:
+        """Minimal stub satisfying the .evan interface used by shot.py."""
+
+        def __init__(self, starting_modality: str, backbone: nn.Module, chn_ids: torch.Tensor):
+            self.starting_modality = starting_modality
+            self._backbone = backbone
+            self._chn_ids = chn_ids  # [C] int16
+
+        @torch.no_grad()
+        def forward_features(self, input_dict: dict) -> dict:
+            """Return {mod: {'x_norm_clstoken': [B,768], 'x_norm_patchtokens': [B,N,768]}}."""
+            imgs = next(iter(input_dict.values()))  # [B, C, H, W]
+            B = imgs.shape[0]
+            chn_ids = self._chn_ids.unsqueeze(0).expand(B, -1).to(imgs.device)
+            out = self._backbone.forward_features(dict(imgs=imgs, chn_ids=chn_ids))
+            mod = next(iter(input_dict.keys()))
+            return {mod: {
+                'x_norm_clstoken':    out['x_norm_clstoken'],     # [B, 768]
+                'x_norm_patchtokens': out['x_norm_patchtokens'],   # [B, N, 768]
+            }}
+
+    def __init__(self, backbone: nn.Module, head: nn.Module,
+                 modality: str, chn_ids: torch.Tensor):
+        super().__init__()
+        self.backbone = backbone
+        self.head = head
+        self.modality = modality
+        self._chn_ids = chn_ids                                    # [C] int16
+        self.evan = self._EvanStub(modality, backbone, chn_ids)
+
+    def freeze_all(self):
+        for p in self.parameters():
+            p.requires_grad_(False)
+
+    def forward(self, input_dict: dict) -> torch.Tensor:
+        """Return logits [B, num_classes]."""
+        imgs = next(iter(input_dict.values()))   # [B, C, H, W]
+        B = imgs.shape[0]
+        chn_ids = self._chn_ids.unsqueeze(0).expand(B, -1).to(imgs.device)
+        with torch.no_grad():
+            cls = self.backbone(dict(imgs=imgs, chn_ids=chn_ids))  # [B, 768], L2-norm
+        return self.head(cls)                                       # [B, num_classes]
+
+    @classmethod
+    def from_checkpoint(cls, head_state_path: str, modality: str,
+                        num_classes: int, device) -> "PanopticonTeacher":
+        """Load from a stage0 LP checkpoint (head.state_dict only).
+
+        Args:
+            head_state_path: path to `head.state_dict()` saved by --train_stage0
+                             (nn.Sequential(BatchNorm1d(768, affine=False), Linear(768, num_classes)))
+            modality: 's2', 's1', or 's2s1'
+            num_classes: output classes (19 for BEN-v2)
+            device: torch device
+        """
+        hub = os.path.expanduser('~/.cache/torch/hub/Panopticon-FM_panopticon_main')
+        if hub not in sys.path:
+            sys.path.insert(0, hub)
+
+        backbone = torch.hub.load('Panopticon-FM/panopticon', 'panopticon_vitb14', trust_repo=True)
+        backbone = backbone.to(device).eval()
+        for p in backbone.parameters():
+            p.requires_grad_(False)
+
+        head = nn.Sequential(nn.BatchNorm1d(768, affine=False), nn.Linear(768, num_classes))
+        head.load_state_dict(torch.load(head_state_path, map_location=device))
+        head = head.to(device).eval()
+
+        chn_ids = {'s2': S2_CHN_IDS, 's1': S1_CHN_IDS, 's2s1': S2S1_CHN_IDS}[modality]
+        return cls(backbone, head, modality, chn_ids).to(device)
+
+
 if __name__ == '__main__':
     main()

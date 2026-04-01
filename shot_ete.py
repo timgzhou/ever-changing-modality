@@ -1,5 +1,6 @@
 
 from shot import train_shot
+import re
 import torch
 import logging
 import os
@@ -17,7 +18,7 @@ VALID_NEW_MODS = {
     'pastis':  ['s1', 's2'],
 }
 
-def get_loaders_and_config(dataset, batch_size, num_workers, data_normalizer=None):
+def get_loaders_and_config(dataset, batch_size, num_workers, data_normalizer=None, starting_modality=None):
     """Return (train1, val1, train2, val2, test, task_config, modality_bands_dict_full)."""
     if dataset == 'eurosat':
         from eurosat_data_utils import get_loaders_with_val
@@ -38,9 +39,10 @@ def get_loaders_and_config(dataset, batch_size, num_workers, data_normalizer=Non
 
     elif dataset == 'benv2':
         from geobench_data_utils import get_benv2_loaders
-        train1, val1, train2, val2, test, task_config = get_benv2_loaders(
-            batch_size=batch_size, num_workers=num_workers
-        )
+        kwargs = dict(batch_size=batch_size, num_workers=num_workers)
+        if starting_modality is not None:
+            kwargs['starting_modality'] = starting_modality
+        train1, val1, train2, val2, test, task_config = get_benv2_loaders(**kwargs)
         return train1, val1, train2, val2, test, task_config
 
     elif dataset == 'pastis':
@@ -86,7 +88,7 @@ def main():
                         help='When student peeking surpasses teacher, replace teacher and use peeking mode for distillation')
     parser.add_argument('--results_csv', type=str, required=True,
                         help='Path to results CSV file')
-    parser.add_argument('--intermediate_projector_type', type=str, default='self',
+    parser.add_argument('--intermediate_projector_type', type=str, default='cross',
                         choices=['self', 'cross'],
                         help='Type of intermediate projector: self-attention (self) or cross-attention (cross)')
     parser.add_argument('--intermediate_projector_num_layers', type=int, default=2,
@@ -110,33 +112,42 @@ def main():
         parser.error(f"--new_mod_group {args.new_mod_group!r} is not valid for --dataset {args.dataset}. "
                      f"Valid choices: {valid_new_mods}")
 
-    # Load stage 0 checkpoint — dispatch to EvanSegmenter for segmentation tasks
+    # Load stage 0 checkpoint — detect Panopticon LP checkpoint vs EVAN checkpoint
     print(f"\n=== Loading Stage 0 checkpoint from: {args.stage0_checkpoint} ===")
-    checkpoint = torch.load(args.stage0_checkpoint, map_location='cpu')
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    config = checkpoint['config']
-    if 'decoder_strategy' in config:
-        model = EvanSegmenter.from_checkpoint(args.stage0_checkpoint, device)
-    else:
-        model = EVANClassifier.from_checkpoint(args.stage0_checkpoint, device)
-    evan_config = config['evan_config']
-    starting_modality = evan_config['starting_modality']
+    raw_ckpt = torch.load(args.stage0_checkpoint, map_location='cpu')
+    is_panopticon = not isinstance(raw_ckpt, dict) or 'config' not in raw_ckpt
 
-    print(f"Stage 0 config:")
-    for k, v in config.items():
-        print(f"  {k}: {v}")
-    print(f"\nUsing device: {device}")
+    if is_panopticon:
+        if args.replace_teacher_w_peek:
+            parser.error("--replace_teacher_w_peek is not supported with Panopticon teacher checkpoints.")
+        m = re.search(r'panopticon_lp_benv2_(\w+)_s0', args.stage0_checkpoint)
+        starting_modality = m.group(1) if m else args.new_mod_group
+        config = {'normalization': 'zscore', 'evan_config': {'starting_modality': starting_modality}}
+        print(f"  Detected Panopticon LP checkpoint — starting modality: {starting_modality}")
+        print(f"\nUsing device: {device}")
+    else:
+        checkpoint = raw_ckpt
+        config = checkpoint['config']
+        if 'decoder_strategy' in config:
+            model = EvanSegmenter.from_checkpoint(args.stage0_checkpoint, device)
+        else:
+            model = EVANClassifier.from_checkpoint(args.stage0_checkpoint, device)
+        evan_config = config['evan_config']
+        starting_modality = evan_config['starting_modality']
+        print(f"Stage 0 config:")
+        for k, v in config.items():
+            print(f"  {k}: {v}")
+        print(f"\nUsing device: {device}")
 
     newmod = args.new_mod_group
 
-    # Build modality_bands_dict
+    # Build modality_bands_dict (EuroSAT only; GeoBench uses slices from task_config)
     if args.dataset == 'eurosat':
         from eurosat_data_utils import get_modality_bands_dict
         modality_bands_dict = get_modality_bands_dict(starting_modality, newmod)
         bands_newmod = modality_bands_dict[newmod]
     else:
-        # GeoBench: slices come from task_config (built when we load loaders below)
-        # We'll fill modality_bands_dict after loading
         modality_bands_dict = None
         bands_newmod = None
 
@@ -155,15 +166,51 @@ def main():
         data_normalizer = make_div10000_normalizer()
         print(f"Using div10000 normalizer (from stage0 checkpoint config)")
     train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = \
-        get_loaders_and_config(args.dataset, args.batch_size, args.num_workers, data_normalizer=data_normalizer)
+        get_loaders_and_config(args.dataset, args.batch_size, args.num_workers, data_normalizer=data_normalizer,
+                               starting_modality=starting_modality if is_panopticon else None)
 
     if args.dataset != 'eurosat':
         modality_bands_dict = task_config.modality_slices
         bands_newmod = modality_bands_dict[newmod]
 
-    evan = model.evan
-    model = model.to(device)
-    print(f"SSL-trained components loaded: {newmod} patch embedder, {newmod} modality-specific LoRAs")
+    if is_panopticon:
+        # Build Panopticon teacher (frozen backbone + trained LP head)
+        from lp_panopticon_benv2 import PanopticonTeacher
+        panopticon_teacher = PanopticonTeacher.from_checkpoint(
+            head_state_path=args.stage0_checkpoint,
+            modality=starting_modality,
+            num_classes=task_config.num_classes,
+            device=device,
+        )
+        # Build random-init EVAN student (no pretrained weights)
+        from evan_main import evan_base, EVANClassifier
+        evan_student = evan_base(
+            load_weights=False,
+            starting_modality=starting_modality,
+            starting_n_chans=task_config.modality_a_channels,
+            img_size=task_config.img_size,
+            n_storage_tokens=4,
+            device=device,
+        )
+        model = EVANClassifier(
+            evan_student,
+            num_classes=task_config.num_classes,
+            classifier_strategy='ensemble',
+            device=device,
+        ).to(device)
+        evan = model.evan
+        # Dims for latent projector cross-architecture matching
+        teacher_latent_dim = 768
+        teacher_n_patches = (task_config.img_size // 14) ** 2
+        print(f"Panopticon teacher loaded. Random-init EVAN student created.")
+        print(f"  teacher_latent_dim={teacher_latent_dim}, teacher_n_patches={teacher_n_patches}")
+    else:
+        panopticon_teacher = None
+        teacher_latent_dim = None
+        teacher_n_patches = None
+        evan = model.evan
+        model = model.to(device)
+        print(f"SSL-trained components loaded: {newmod} patch embedder, {newmod} modality-specific LoRAs")
 
     num_newmod_channels = len(bands_newmod) if not isinstance(bands_newmod, slice) else \
         (bands_newmod.stop - bands_newmod.start)
@@ -211,6 +258,9 @@ def main():
         num_classes=task_config.num_classes,
         ignore_index=getattr(task_config, 'ignore_index', -100),
         replace_teacher_w_peek=args.replace_teacher_w_peek,
+        teacher_classifier=panopticon_teacher,
+        teacher_latent_dim=teacher_latent_dim,
+        teacher_n_patches=teacher_n_patches,
     )
 
     if task_config.task_type == 'segmentation':
@@ -248,7 +298,7 @@ def main():
     fieldnames = [
         "dataset", "starting_modality", "new_modality", "ssl_lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction", "entr_frequency",
-        "trainable_params", "active_losses", "use_mfla", "mfla_warmup_epochs", "metric_name",
+        "trainable_params", "active_losses", "use_mfla", "mfla_warmup_epochs", "intermediate_projector_type", "metric_name",
         "transfer_metric", "peeking_metric", "addition_metric", "addition_ens_metric",
         "valchecked_transfer", "valchecked_peek", "valchecked_add", "valchecked_add_ens",
         "stage0_checkpoint", "shote2e_checkpoint"
@@ -280,6 +330,7 @@ def main():
             active_losses_str,
             args.use_mfla,
             args.mfla_warmup_epochs,
+            args.intermediate_projector_type,
             metric_name,
             f"{metrics['transfer']:.2f}",
             f"{metrics['peeking']:.2f}",
@@ -304,6 +355,30 @@ if __name__ == '__main__':
 
 # DRYRUN examples
 """
+# BEN-v2 using Panopticon LP checkpoint as teacher (s2 teacher → add s1)
+python -u shot_ete.py \
+    --dataset benv2 \
+    --new_mod_group s1 \
+    --stage0_checkpoint checkpoints/panopticon_lp_benv2_s2_s0.pt \
+    --epochs 2 \
+    --eval_every_n_epochs 1 \
+    --batch_size 32 \
+    --results_csv res/shot_ete_dryrun.csv \
+    --active_losses distill ce latent \
+    --labeled_frequency 0.3
+
+# BEN-v2 using Panopticon LP checkpoint as teacher (s1 teacher → add s2)
+python -u shot_ete.py \
+    --dataset benv2 \
+    --new_mod_group s2 \
+    --stage0_checkpoint checkpoints/panopticon_lp_benv2_s1_s0.pt \
+    --epochs 2 \
+    --eval_every_n_epochs 1 \
+    --batch_size 32 \
+    --results_csv res/shot_ete_dryrun.csv \
+    --active_losses distill ce latent \
+    --labeled_frequency 0.3
+
 # BEN-v2 (s2 -> add s1)
 python -u shot_ete.py \
     --dataset benv2 \

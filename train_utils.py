@@ -18,7 +18,7 @@ import wandb
 
 
 class SequenceProjector(nn.Module):
-    def __init__(self, embed_dim, num_heads=8, ffn_factor=4, num_layers=1):
+    def __init__(self, embed_dim, num_heads=8, ffn_factor=4, num_layers=1, output_dim=None):
         super().__init__()
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
@@ -28,9 +28,13 @@ class SequenceProjector(nn.Module):
             norm_first=True
         )
         self.layers = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.proj_out = nn.Linear(embed_dim, output_dim) if output_dim is not None else None
 
     def forward(self, x):
-        return self.layers(x)
+        x = self.layers(x)
+        if self.proj_out is not None:
+            x = self.proj_out(x)
+        return x
 
 
 def hallucinate_intermediate_features(
