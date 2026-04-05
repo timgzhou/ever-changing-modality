@@ -1,4 +1,4 @@
-"""Training utilities for EVAN on EuroSAT."""
+"""Training utilities for EVAN."""
 
 import torch
 import torch.nn as nn
@@ -6,10 +6,8 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 from einops import rearrange
-from eurosat_data_utils import (
-    create_multimodal_batch,
-    print_and_reset_rgb_stats,
-)
+from data_utils import create_multimodal_batch
+from eurosat_data_utils import print_and_reset_rgb_stats
 import wandb
 
 

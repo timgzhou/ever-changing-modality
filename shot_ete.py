@@ -1,5 +1,6 @@
 
 from shot import train_shot
+from data_utils import get_loaders
 import re
 import torch
 import logging
@@ -17,43 +18,6 @@ VALID_NEW_MODS = {
     'benv2':   ['s1', 's2'],
     'pastis':  ['s1', 's2'],
 }
-
-def get_loaders_and_config(dataset, batch_size, num_workers, data_normalizer=None, starting_modality=None):
-    """Return (train1, val1, train2, val2, test, task_config, modality_bands_dict_full)."""
-    if dataset == 'eurosat':
-        from eurosat_data_utils import get_loaders_with_val
-        from types import SimpleNamespace
-        train1, val1, train2, val2, test = get_loaders_with_val(batch_size, num_workers)
-        # EuroSAT: full modality_bands_dict built per-run from get_modality_bands_dict
-        # Here we just return the loaders; caller builds modality_bands_dict after knowing starting+new mod
-        task_config = SimpleNamespace(
-            dataset_name='eurosat',
-            task_type='classification',
-            num_classes=10,
-            multilabel=False,
-            label_key='label',
-            modality_slices=None,
-            img_size=224,
-        )
-        return train1, val1, train2, val2, test, task_config
-
-    elif dataset == 'benv2':
-        from geobench_data_utils import get_benv2_loaders
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers)
-        if starting_modality is not None:
-            kwargs['starting_modality'] = starting_modality
-        train1, val1, train2, val2, test, task_config = get_benv2_loaders(**kwargs)
-        return train1, val1, train2, val2, test, task_config
-
-    elif dataset == 'pastis':
-        from geobench_data_utils import get_pastis_loaders
-        train1, val1, train2, val2, test, task_config = get_pastis_loaders(
-            batch_size=batch_size, num_workers=num_workers, data_normalizer=data_normalizer
-        )
-        return train1, val1, train2, val2, test, task_config
-
-    else:
-        raise ValueError(f"Unknown dataset: {dataset}")
 
 
 def main():
@@ -145,15 +109,6 @@ def main():
 
     newmod = args.new_mod_group
 
-    # Build modality_bands_dict (EuroSAT only; GeoBench uses slices from task_config)
-    if args.dataset == 'eurosat':
-        from eurosat_data_utils import get_modality_bands_dict
-        modality_bands_dict = get_modality_bands_dict(starting_modality, newmod)
-        bands_newmod = modality_bands_dict[newmod]
-    else:
-        modality_bands_dict = None
-        bands_newmod = None
-
     wandb.init(
         project=args.wandb_project,
         config={**config, **vars(args)},
@@ -169,12 +124,11 @@ def main():
         data_normalizer = make_div10000_normalizer()
         print(f"Using div10000 normalizer (from stage0 checkpoint config)")
     train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = \
-        get_loaders_and_config(args.dataset, args.batch_size, args.num_workers, data_normalizer=data_normalizer,
-                               starting_modality=starting_modality if is_panopticon else None)
+        get_loaders(args.dataset, starting_modality, args.batch_size, args.num_workers,
+                    data_normalizer=data_normalizer, new_modality=newmod)
 
-    if args.dataset != 'eurosat':
-        modality_bands_dict = task_config.modality_slices
-        bands_newmod = modality_bands_dict[newmod]
+    modality_bands_dict = task_config.modality_bands_dict
+    bands_newmod = modality_bands_dict[newmod]
 
     if is_panopticon:
         # Build Panopticon teacher (frozen backbone + trained LP head)

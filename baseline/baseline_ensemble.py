@@ -9,11 +9,8 @@ from tqdm import tqdm
 from itertools import combinations
 
 from evan_main import EVANClassifier
-from eurosat_data_utils import (
-    get_loaders,
-    get_modality_bands_dict,
-    create_multimodal_batch,
-)
+from data_utils import create_multimodal_batch
+from eurosat_data_utils import get_modality_bands_dict
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 

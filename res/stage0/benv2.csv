@@ -1,0 +1,2 @@
+dataset,model_type,modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,test_metric,metric_name,saved_checkpoint,global_rep
+benv2,evan_small,s2,fft,32,fft,0.0001,23106451,2,51.89,mAP,checkpoints/benv2_s2_s0_dryrun.pt,clstoken

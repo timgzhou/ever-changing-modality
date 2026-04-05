@@ -20,49 +20,15 @@ PASTIS_MODALITIES  = ['s2', 's1', 'rgb']
 
 
 def get_task_config_and_loaders(dataset, modality, batch_size, num_workers, data_normalizer=None, num_time_steps=10):
-    """
-    Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict).
-
-    modality_bands_dict maps modality name → band tuple (EuroSAT) or slice (GeoBench).
-    For GeoBench datasets this is task_config.modality_slices filtered to {modality: ...}.
-    """
-    if dataset == 'eurosat':
-        from eurosat_data_utils import get_loaders_with_val, get_modality_bands_dict
-        train1_loader, val1_loader, _, _, test_loader = get_loaders_with_val(batch_size, num_workers)
-        modality_bands_dict = get_modality_bands_dict(modality)
-
-        from types import SimpleNamespace
-        task_config = SimpleNamespace(
-            dataset_name='eurosat',
-            task_type='classification',
-            modality_a_channels=len(modality_bands_dict[modality]),
-            num_classes=10,
-            multilabel=False,
-            label_key='label',
-            modality_slices=None,
-            img_size=224,
-        )
-        return train1_loader, val1_loader, test_loader, task_config, modality_bands_dict
-
-    elif dataset == 'benv2':
-        from geobench_data_utils import get_benv2_loaders
-        train1_loader, val1_loader, _, _, test_loader, task_config = get_benv2_loaders(
-            batch_size=batch_size, num_workers=num_workers, starting_modality=modality
-        )
-        modality_bands_dict = {modality: task_config.modality_slices[modality]}
-        return train1_loader, val1_loader, test_loader, task_config, modality_bands_dict
-
-    elif dataset == 'pastis':
-        from geobench_data_utils import get_pastis_loaders
-        train1_loader, val1_loader, _, _, test_loader, task_config = get_pastis_loaders(
-            batch_size=batch_size, num_workers=num_workers, starting_modality=modality,
-            data_normalizer=data_normalizer, num_time_steps=num_time_steps,
-        )
-        modality_bands_dict = {modality: task_config.modality_slices[modality]}
-        return train1_loader, val1_loader, test_loader, task_config, modality_bands_dict
-
-    else:
-        raise ValueError(f"Unknown dataset: {dataset}")
+    """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict)."""
+    from data_utils import get_loaders
+    train1, val1, _, _, test, task_config = get_loaders(
+        dataset, modality, batch_size, num_workers,
+        data_normalizer=data_normalizer, num_time_steps=num_time_steps,
+        new_modality=None,
+    )
+    modality_bands_dict = {modality: task_config.modality_bands_dict[modality]}
+    return train1, val1, test, task_config, modality_bands_dict
 
 
 def main():

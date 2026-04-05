@@ -17,12 +17,8 @@ import csv
 from tqdm import tqdm
 
 from evan_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
-from eurosat_data_utils import (
-    get_loaders,
-    get_loaders_with_val,
-    get_modality_bands_dict,
-    create_multimodal_batch,
-)
+from data_utils import get_loaders, create_multimodal_batch
+from eurosat_data_utils import get_modality_bands_dict
 from train_utils import _compute_map, compute_miou, evaluate
 
 VALID_NEW_MODS = {
@@ -32,36 +28,6 @@ VALID_NEW_MODS = {
 }
 
 
-def get_loaders_and_config(dataset, batch_size, num_workers, data_normalizer=None, num_time_steps=10):
-    """Return (train1, val1, train2, val2, test, task_config)."""
-    if dataset == 'eurosat':
-        from types import SimpleNamespace
-        train1, val1, train2, val2, test = get_loaders_with_val(batch_size, num_workers)
-        task_config = SimpleNamespace(
-            dataset_name='eurosat',
-            task_type='classification',
-            num_classes=10,
-            multilabel=False,
-            label_key='label',
-            modality_slices=None,
-            img_size=224,
-        )
-        return train1, val1, train2, val2, test, task_config
-    elif dataset == 'benv2':
-        from geobench_data_utils import get_benv2_loaders
-        train1, val1, train2, val2, test, task_config = get_benv2_loaders(
-            batch_size=batch_size, num_workers=num_workers
-        )
-        return train1, val1, train2, val2, test, task_config
-    elif dataset == 'pastis':
-        from geobench_data_utils import get_pastis_loaders
-        train1, val1, train2, val2, test, task_config = get_pastis_loaders(
-            batch_size=batch_size, num_workers=num_workers,
-            data_normalizer=data_normalizer, num_time_steps=num_time_steps,
-        )
-        return train1, val1, train2, val2, test, task_config
-    else:
-        raise ValueError(f"Unknown dataset: {dataset}")
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
@@ -747,8 +713,8 @@ def main():
     # Create datasets (do this first so we know task_type before loading teacher)
     print("\n=== Creating datasets ===")
     train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = \
-        get_loaders_and_config(args.dataset, args.batch_size, args.num_workers,
-                               data_normalizer=data_normalizer, num_time_steps=args.num_time_steps)
+        get_loaders(args.dataset, args.modality, args.batch_size, args.num_workers,
+                    data_normalizer=data_normalizer, num_time_steps=args.num_time_steps)
 
     is_segmentation = (task_config.task_type == 'segmentation')
     multilabel = task_config.multilabel
@@ -774,19 +740,15 @@ def main():
 
     print(f"Student modality: {args.modality}")
 
-    # Build modality_bands_dict
-    if args.dataset == 'eurosat':
-        student_modality_bands_dict = get_modality_bands_dict(args.modality)
-        teacher_modality_bands_dict = get_modality_bands_dict(teacher_modality)
-        bands_mod = student_modality_bands_dict[args.modality]
-        num_student_chans = len(bands_mod)
+    # modality_bands_dict is populated for all datasets by get_loaders()
+    modality_bands_dict = task_config.modality_bands_dict
+    student_modality_bands_dict = modality_bands_dict
+    teacher_modality_bands_dict = modality_bands_dict
+    bands_mod = modality_bands_dict[args.modality]
+    if isinstance(bands_mod, slice):
+        num_student_chans = bands_mod.stop - bands_mod.start
     else:
-        # GeoBench: slices from task_config
-        modality_slices = task_config.modality_slices
-        student_modality_bands_dict = modality_slices
-        teacher_modality_bands_dict = modality_slices
-        s = modality_slices[args.modality]
-        num_student_chans = s.stop - s.start
+        num_student_chans = len(bands_mod)
 
     # Evaluate teacher on test split before distillation
     print(f"\n=== Teacher baseline ({teacher_modality.upper()}) on test split ===")

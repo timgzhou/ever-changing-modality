@@ -17,10 +17,8 @@ from datetime import datetime
 import wandb
 
 from evan_main import EVANClassifier
-from eurosat_data_utils import (
-    get_loaders_with_val,
-    get_modality_bands_dict
-)
+from data_utils import get_loaders
+from eurosat_data_utils import get_modality_bands_dict
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 
@@ -119,8 +117,6 @@ def main():
     print(f"\nUsing device: {device}")
 
     newmod = args.new_mod_group
-    modality_bands_dict = get_modality_bands_dict(starting_modality, newmod)
-    bands_newmod = modality_bands_dict[newmod]
 
     # Update wandb config with full info
     wandb.config.update({
@@ -136,9 +132,11 @@ def main():
 
     # Create datasets
     print("\n=== Creating datasets ===")
-    train1_loader, val1_loader, train2_loader, val2_loader, test_loader = get_loaders_with_val(
-        args.batch_size, args.num_workers
+    train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = get_loaders(
+        'eurosat', starting_modality, args.batch_size, args.num_workers, new_modality=newmod
     )
+    modality_bands_dict = task_config.modality_bands_dict
+    bands_newmod = modality_bands_dict[newmod]
 
     evan = model.evan
     model = model.to(device)

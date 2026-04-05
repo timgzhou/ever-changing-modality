@@ -230,7 +230,7 @@ def main():
                                        shuffle=False, num_workers=args.num_workers, timeout=120)
     # Use val1 for selection, val2 for reporting, test for final
     # (keeping same split semantics as stage0 but both halves available)
-    modality_slices = task_config.modality_slices  # {'s2': slice(0,12), 's1': slice(12,14)}
+    modality_slices = task_config.modality_bands_dict  # {'s2': slice(0,12), 's1': slice(12,14)}
     num_classes = task_config.num_classes  # 19
 
     all_modalities = ['s2', 's1', 's2s1']

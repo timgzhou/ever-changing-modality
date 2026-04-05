@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 from einops import rearrange
-from eurosat_data_utils import create_multimodal_batch
+from data_utils import create_multimodal_batch
 from train_utils import SequenceProjector, _compute_map, compute_miou, hallucinate_intermediate_features, merge_intermediate_features
 import wandb
 import numpy as np

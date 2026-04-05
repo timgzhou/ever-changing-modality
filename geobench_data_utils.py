@@ -6,14 +6,13 @@ expected by shot_ete.py:
     train1_loader, val1_loader, train2_loader, val2_loader, test_loader
 
 Batches are normalized within the dataset and stacked into a single 'image'
-tensor with a '_modality_slices' key so create_multimodal_batch() in
-eurosat_data_utils.py can slice modalities without band-name lookups.
+tensor so callers can slice modalities without band-name lookups.
 """
 
 import random
 import sys
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass  # kept for potential subclass use
 from pathlib import Path
 
 import torch
@@ -73,26 +72,9 @@ class GeoBenchPASTISMedianAll(GeoBenchPASTIS):
         return tensor.float()
 
 
-# ---------------------------------------------------------------------------
-# TaskConfig
-# ---------------------------------------------------------------------------
-
-@dataclass
-class TaskConfig:
-    """Dataset/task descriptor passed through the training pipeline."""
-    dataset_name: str       # 'eurosat', 'benv2', 'pastis'
-    task_type: str          # 'classification', 'multilabel', 'segmentation'
-    modality_a: str         # starting modality key, e.g. 's2'
-    modality_b: str         # new modality key, e.g. 's1'
-    modality_a_channels: int
-    modality_b_channels: int
-    num_classes: int
-    multilabel: bool
-    label_key: str          # 'label' or 'mask'
-    modality_slices: dict   # {modality_name: slice} into the stacked image tensor
-    img_size: int           # spatial size after any resizing
-    ignore_index: int = -100  # label value to ignore in loss/metric (e.g. 19 for PASTIS void_label)
-
+# TaskConfig lives in data_utils to avoid circular imports; re-export for
+# callers that import it directly from here.
+from data_utils import TaskConfig  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # StackedModalityDataset
@@ -134,24 +116,10 @@ class StackedModalityDataset(Dataset):
         # Determine output modality names and their slices.
         # After merging, the effective modality list may differ from stack_order.
         self.modality_slices: dict[str, slice] = {}
-        offset = 0
 
-        # Build a reverse map: source_key -> output_modality_name
-        source_to_output: dict[str, str] = {}
-        for out_name, sources in self.merge_modalities.items():
-            for src in sources:
-                source_to_output[src] = out_name
-
-        # Walk through stack order, accumulate slices for each output modality
-        output_channels: dict[str, int] = {}
-        for src_key in modality_stack_order:
-            out_key = source_to_output.get(src_key, src_key)
-            # We can't know channel count at init time without a sample,
-            # so we defer slice computation to _build_slices() called lazily.
-
-        # We'll build slices on first __getitem__ call.
+        # Slices are built lazily on first __getitem__ call since we don't
+        # know channel counts at init time without loading a sample.
         self._slices_built = False
-        self._n_channels: dict[str, int] = {}
 
     def _build_slices(self, sample: dict):
         """Compute modality_slices from the first sample."""
@@ -379,7 +347,7 @@ def get_benv2_loaders(
         num_classes=GeoBenchBENV2.num_classes,
         multilabel=True,
         label_key='label',
-        modality_slices=modality_slices,
+        modality_bands_dict=modality_slices,
         img_size=128,
     )
 
@@ -556,7 +524,7 @@ def get_pastis_loaders(
         num_classes=GeoBenchPASTIS.num_classes,
         multilabel=False,
         label_key='mask',
-        modality_slices=modality_slices,
+        modality_bands_dict=modality_slices,
         img_size=128,
         ignore_index=19,  # void_label: parcels mostly outside their patch
     )
