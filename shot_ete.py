@@ -94,6 +94,9 @@ def main():
     parser.add_argument('--intermediate_projector_num_layers', type=int, default=2,
                         help='Number of layers in intermediate projector (default: 2)')
 
+    parser.add_argument('--tz_fusion_time', type=int, default=3,
+                        help='Number of modality-specific blocks before fusion (0=no MSLA, default: 3)')
+
     # UNIMPORTANT
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=2)
@@ -183,13 +186,14 @@ def main():
             device=device,
         )
         # Build random-init EVAN student (no pretrained weights)
-        from evan_main import evan_base, EVANClassifier
+        from evan_main import evan_base
         evan_student = evan_base(
             load_weights=False,
             starting_modality=starting_modality,
             starting_n_chans=task_config.modality_a_channels,
             img_size=task_config.img_size,
             n_storage_tokens=4,
+            tz_fusion_time=args.tz_fusion_time,
             device=device,
         )
         model = EVANClassifier(
@@ -298,7 +302,7 @@ def main():
     fieldnames = [
         "dataset", "starting_modality", "new_modality", "ssl_lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction", "entr_frequency",
-        "trainable_params", "active_losses", "use_mfla", "mfla_warmup_epochs", "intermediate_projector_type", "metric_name",
+        "trainable_params", "active_losses", "use_mfla", "mfla_warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
         "transfer_metric", "peeking_metric", "addition_metric", "addition_ens_metric",
         "valchecked_transfer", "valchecked_peek", "valchecked_add", "valchecked_add_ens",
         "stage0_checkpoint", "shote2e_checkpoint"
@@ -331,6 +335,7 @@ def main():
             args.use_mfla,
             args.mfla_warmup_epochs,
             args.intermediate_projector_type,
+            args.tz_fusion_time,
             metric_name,
             f"{metrics['transfer']:.2f}",
             f"{metrics['peeking']:.2f}",
@@ -364,8 +369,8 @@ python -u shot_ete.py \
     --eval_every_n_epochs 1 \
     --batch_size 32 \
     --results_csv res/shot_ete_dryrun.csv \
-    --active_losses distill ce latent \
-    --labeled_frequency 0.3
+    --labeled_frequency 0.3 \
+    --tz_fusion_time 0
 
 # BEN-v2 using Panopticon LP checkpoint as teacher (s1 teacher → add s2)
 python -u shot_ete.py \

@@ -3,3 +3,4 @@ benv2,s2,s1,0.0001,0.001,128,0.75,0.3,0.3,0.0,0,38763814,all,False,0,mAP,43.56,6
 benv2,s1,s2,0.0001,0.001,128,0.75,0.3,0.3,0.0,0,38763814,all,False,0,mAP,54.34,49.99,53.34,53.58,53.64,49.99,52.65,53.58,checkpoints/panopticon_lp_benv2_s1_s0.pt,checkpoints/delulunet_benv2_0331_2032.pt
 benv2,s1,s2,0.0001,0.001,128,0.75,0.3,0.3,0.0,0,148302118,all,False,0,mAP,53.45,50.18,52.96,53.52,55.75,50.18,51.32,53.52,checkpoints/panopticon_lp_benv2_s1_s0.pt,checkpoints/delulunet_benv2_0331_2330.pt
 benv2,s2,s1,0.0001,0.001,128,0.75,0.3,0.3,0.0,0,148302118,all,False,0,mAP,45.13,63.59,58.16,63.24,45.70,63.39,58.59,63.24,checkpoints/panopticon_lp_benv2_s2_s0.pt,checkpoints/delulunet_benv2_0331_2343.pt
+benv2,s2,s1,0.0001,0.001,2,0.75,0.3,0.3,0.0,0,148013350,all,False,0,cross,0,mAP,35.38,50.03,41.72,50.29,33.39,50.03,41.72,50.29,checkpoints/panopticon_lp_benv2_s2_s0.pt,checkpoints/delulunet_benv2_0401_1426.pt

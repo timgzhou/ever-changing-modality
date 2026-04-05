@@ -1,16 +1,16 @@
 """
 Plot SHOT results using Panopticon LP checkpoints as teacher (BEN-v2).
 
-Two side-by-side subplots: self-projector and cross-projector.
-Each subplot has two groups (s1->s2, s2->s1), each with 4 bars:
+Two separate figures: self-projector and cross-projector.
+Each figure has two groups (s1->s2, s2->s1), each with 4 bars:
   valchecked_transfer, valchecked_peek, valchecked_add, valchecked_add_ens
-  (mean ± std across runs with the same checkpoint mode suffix).
+  (mean ± std across all runs for that direction).
 
-Horizontal baselines:
+All four horizontal baselines span the full figure:
   - Panopticon LP s2 (trained on s2): 62.46
   - Panopticon LP s1 (trained on s1): 55.68
-  - Panopticon zero-shot s1->s2 (s1 teacher evaluated on s2):  31.09
-  - Panopticon zero-shot s2->s1 (s2 teacher evaluated on s1):  27.45
+  - Panopticon zero-shot s1->s2 (s1 teacher on s2 features): 31.09
+  - Panopticon zero-shot s2->s1 (s2 teacher on s1 features): 27.45
 """
 
 import os
@@ -86,13 +86,13 @@ def plot_subplot(ax, df, proj_label):
     x_right = group_centers[-1] + group_width / 2 + group_gap / 4
 
     ax.hlines(BASELINES['s2'], x_left, x_right,
-              colors='steelblue', linestyles='--', linewidth=1.5, label='LP s2 baseline')
+              colors='gray', linestyles='--', linewidth=1.5, label='Panopticon S2 LP')
     ax.hlines(BASELINES['zs_s1_to_s2'], x_left, x_right,
-              colors='steelblue', linestyles=':', linewidth=1.5, label='Zero-shot s1→s2')
+              colors='gray', linestyles=':', linewidth=1.5, label='Zero-shot s1→s2')
     ax.hlines(BASELINES['s1'], x_left, x_right,
-              colors='coral', linestyles='--', linewidth=1.5, label='LP s1 baseline')
+              colors='saddlebrown', linestyles='--', linewidth=1.5, label='Panopticon S1 LP')
     ax.hlines(BASELINES['zs_s2_to_s1'], x_left, x_right,
-              colors='coral', linestyles=':', linewidth=1.5, label='Zero-shot s2→s1')
+              colors='saddlebrown', linestyles=':', linewidth=1.5, label='Zero-shot s2→s1')
 
     ax.set_xticks(group_centers)
     ax.set_xticklabels(DIRECTION_LABELS, fontsize=11)
@@ -103,32 +103,35 @@ def plot_subplot(ax, df, proj_label):
     ax.set_axisbelow(True)
 
 
-# ── figure ────────────────────────────────────────────────────────────────────
-fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
-fig.suptitle('SHOT with Panopticon Teacher (BEN-v2)', fontsize=14, fontweight='bold')
+def make_legend_handles():
+    bar_patches = [mpatches.Patch(color=c, label=l)
+                   for c, l in zip(['#4C72B0', '#DD8452', '#55A868', '#C44E52'], METRIC_LABELS)]
+    baseline_handles = [
+        plt.Line2D([0], [0], color='gray',        linestyle='--', linewidth=1.5, label='Panopticon S2 LP'),
+        plt.Line2D([0], [0], color='gray',        linestyle=':',  linewidth=1.5, label='Zero-shot s1→s2'),
+        plt.Line2D([0], [0], color='saddlebrown', linestyle='--', linewidth=1.5, label='Panopticon S1 LP'),
+        plt.Line2D([0], [0], color='saddlebrown', linestyle=':',  linewidth=1.5, label='Zero-shot s2→s1'),
+    ]
+    return bar_patches + baseline_handles
 
-plot_subplot(axes[0], df_self,  'Self')
-plot_subplot(axes[1], df_cross, 'Cross')
 
-# Unified legend (bars + baselines)
-bar_patches = [mpatches.Patch(color=c, label=l)
-               for c, l in zip(['#4C72B0', '#DD8452', '#55A868', '#C44E52'], METRIC_LABELS)]
-baseline_handles = [
-    plt.Line2D([0], [0], color='steelblue', linestyle='--', linewidth=1.5, label='LP s2 baseline'),
-    plt.Line2D([0], [0], color='steelblue', linestyle=':',  linewidth=1.5, label='Zero-shot s1→s2'),
-    plt.Line2D([0], [0], color='coral',     linestyle='--', linewidth=1.5, label='LP s1 baseline'),
-    plt.Line2D([0], [0], color='coral',     linestyle=':',  linewidth=1.5, label='Zero-shot s2→s1'),
-]
-fig.legend(handles=bar_patches + baseline_handles,
-           loc='lower center', ncol=4, fontsize=10,
-           bbox_to_anchor=(0.5, -0.04))
+out_dir = os.path.join(ROOT, 'res/delulu/benv2')
+os.makedirs(out_dir, exist_ok=True)
 
-plt.tight_layout(rect=[0, 0.08, 1, 1])
-
-out_path = os.path.join(ROOT, 'res/delulu/benv2/panopticon_shot.png')
-os.makedirs(os.path.dirname(out_path), exist_ok=True)
-plt.savefig(out_path, dpi=150, bbox_inches='tight')
-print(f'Saved to {out_path}')
-plt.show()
+for df, proj_label, fname in [
+    (df_self,  'Self',  'panopticon_self.png'),
+    (df_cross, 'Cross', 'panopticon_cross.png'),
+]:
+    fig, ax = plt.subplots(figsize=(7, 6))
+    fig.suptitle('DELULU with Panopticon Teacher (BEN-v2)', fontsize=13, fontweight='bold')
+    plot_subplot(ax, df, proj_label)
+    fig.legend(handles=make_legend_handles(),
+               loc='lower center', ncol=4, fontsize=10,
+               bbox_to_anchor=(0.5, -0.04))
+    plt.tight_layout(rect=[0, 0.1, 1, 1])
+    out_path = os.path.join(out_dir, fname)
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    print(f'Saved to {out_path}')
+    plt.show()
 
 # python plotting/panopticon_shot.py
