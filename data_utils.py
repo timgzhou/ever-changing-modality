@@ -21,7 +21,7 @@ import torch
 @dataclass
 class TaskConfig:
     """Dataset/task descriptor passed through the training pipeline."""
-    dataset_name: str           # 'eurosat', 'benv2', 'pastis'
+    dataset_name: str           # 'eurosat', 'benv2', 'pastis', 'dfc2020'
     task_type: str              # 'classification', 'multilabel', 'segmentation'
     modality_a: str             # starting modality key, e.g. 's2'
     modality_b: str             # new modality key, e.g. 's1'
@@ -117,7 +117,7 @@ def get_loaders(
     Return the standard 5-loader tuple plus TaskConfig for a given dataset.
 
     Args:
-        dataset: One of 'eurosat', 'benv2', 'pastis'.
+        dataset: One of 'eurosat', 'benv2', 'pastis', 'dfc2020'.
         starting_modality: Modality available at stage 0.
             EuroSAT: 'rgb' | 'vre' | 'nir' | 'swir' | 'aw'
             BEN-v2:  's2' | 's1'
@@ -154,8 +154,15 @@ def get_loaders(
             starting_modality=starting_modality, new_modality=_new,
             data_normalizer=data_normalizer, num_time_steps=num_time_steps,
         )
+    elif dataset == 'dfc2020':
+        from dfc2020_data_utils import get_dfc2020_loaders
+        _new = new_modality or ('s1' if starting_modality == 's2' else 's2')
+        return get_dfc2020_loaders(
+            batch_size=batch_size, num_workers=num_workers,
+            starting_modality=starting_modality, new_modality=_new,
+        )
     else:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Valid: 'eurosat', 'benv2', 'pastis'")
+        raise ValueError(f"Unknown dataset: {dataset!r}. Valid: 'eurosat', 'benv2', 'pastis', 'dfc2020'")
 
 
 def _get_eurosat_loaders(starting_modality, new_modality, batch_size, num_workers):

@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 EUROSAT_MODALITIES = ['rgb', 'vre', 'nir', 'swir', 'aw']
 BENV2_MODALITIES   = ['s2', 's1']
 PASTIS_MODALITIES  = ['s2', 's1', 'rgb']
+DFC2020_MODALITIES = ['s2', 's1']
 
 
 def get_task_config_and_loaders(dataset, modality, batch_size, num_workers, data_normalizer=None, num_time_steps=10):
@@ -34,7 +35,7 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers, data
 def main():
     parser = argparse.ArgumentParser(description='Stage 0: Train EVAN on a single modality (using train1 split)')
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=['eurosat', 'benv2', 'pastis'],
+                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020'],
                         help='Dataset to train on')
     parser.add_argument('--modality', type=str, required=True,
                         help='Modality to train on. '
@@ -72,6 +73,7 @@ def main():
         'eurosat': EUROSAT_MODALITIES,
         'benv2':   BENV2_MODALITIES,
         'pastis':  PASTIS_MODALITIES,
+        'dfc2020': DFC2020_MODALITIES,
     }[args.dataset]
     if args.modality not in valid_modalities:
         parser.error(f"--modality {args.modality!r} is not valid for --dataset {args.dataset}. "

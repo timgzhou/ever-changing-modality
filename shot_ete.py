@@ -24,12 +24,12 @@ def main():
     parser = argparse.ArgumentParser(description='End to end training for SHOT model.')
     # IMPORTANT
     parser.add_argument('--dataset', type=str, default='eurosat',
-                        choices=['eurosat', 'benv2', 'pastis'],
+                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020'],
                         help='Dataset to train on (default: eurosat)')
     parser.add_argument('--stage0_checkpoint', type=str, required=True,
                         help='Path to stage 0 checkpoint (required)')
     parser.add_argument('--new_mod_group', type=str, required=True,
-                        help='New modality to add (eurosat: vre/nir/swir/rgb; benv2/pastis: s1/s2)')
+                        help='New modality to add (eurosat: vre/nir/swir/rgb; benv2/pastis/dfc2020: s1/s2)')
     parser.add_argument('--mae_mask_ratio', type=float, default=0.75,
                         help='Mask ratio for MAE training (default: 0.75)')
     parser.add_argument('--modality_dropout', type=float, default=0.3,

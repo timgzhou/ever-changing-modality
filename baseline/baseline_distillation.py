@@ -636,7 +636,7 @@ def distillation_training_loop(
 def main():
     parser = argparse.ArgumentParser(description='Baseline Distillation: Train student using teacher soft labels')
     parser.add_argument('--dataset', type=str, default='eurosat',
-                        choices=['eurosat', 'benv2', 'pastis'],
+                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020'],
                         help='Dataset to train on (default: eurosat)')
     parser.add_argument('--teacher_checkpoint', type=str, required=True,
                         help='Path to teacher checkpoint file')
