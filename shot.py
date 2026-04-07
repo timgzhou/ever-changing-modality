@@ -5,11 +5,10 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 from einops import rearrange
 from data_utils import create_multimodal_batch
-from train_utils import SequenceProjector, _compute_map, compute_miou, hallucinate_intermediate_features, merge_intermediate_features
+from train_utils import SequenceProjector, _compute_map, compute_miou, hallucinate_intermediate_features, merge_intermediate_features, make_scheduler
 import wandb
 import numpy as np
 
@@ -718,41 +717,20 @@ def compute_addition_agreement(model, teacher, evan, val_loader, device, modalit
     return 100.0 * agree / total
 
 
-def set_mfla_training_mode(evan, hallucinated_modalities, all_modalities, in_warmup=False):
+def set_mfla_training_mode(evan, hallucinated_modalities, all_modalities):
     """
     Toggle requires_grad based on which modalities are hallucinated.
 
-    Args:
-        evan: EVAN model
-        hallucinated_modalities: Set of modality names that are hallucinated
-        all_modalities: List of all modality names
-        in_warmup: If True, backbone stays trainable even during hallucination
-
-    Behavior:
-        Warmup phase (in_warmup=True):
-          - Backbone fusion blocks: always trainable
-          - MFLA for hallucinated mods: trainable
-          - MFLA for real mods: frozen
-
-        Freeze phase (in_warmup=False):
-          - When hallucination: backbone frozen, only hallucinated MFLA trains
-          - When no hallucination: backbone trains, all MFLAs frozen
+    When hallucination: backbone frozen, only hallucinated MFLA trains.
+    When no hallucination: backbone trains, all MFLAs frozen.
     """
     has_hallucination = len(hallucinated_modalities) > 0
-
-    # Toggle backbone fusion blocks
-    if in_warmup:
-        # Warmup: backbone always trainable
-        backbone_trainable = True
-    else:
-        # Freeze phase: backbone frozen when hallucinating
-        backbone_trainable = not has_hallucination
+    backbone_trainable = not has_hallucination
 
     for i in range(evan.tz_fusion_time, len(evan.blocks)):
         for param in evan.blocks[i].parameters():
             param.requires_grad = backbone_trainable
 
-    # Toggle MFLAs: only train hallucinated modality's MFLA
     for mod in all_modalities:
         for param in evan.modality_fusion_lora_adaptors[mod].parameters():
             param.requires_grad = (mod in hallucinated_modalities)
@@ -820,7 +798,7 @@ def _compute_ce_loss(student_fused, labels, model, ce_fn, segmentation, device):
 def _labeled_batch_step(
     batch, evan, model, teacher_classifier, latent_projectors,
     active_losses, starting_modality, newmod_list, all_modalities,
-    modality_bands_dict, mse_fn, ce_fn, use_mfla, in_warmup,
+    modality_bands_dict, mse_fn, ce_fn, use_mfla,
     multilabel, label_key, segmentation, device,
 ):
     """Process one labeled (monomodal) batch. Returns (total_loss, loss_dict)."""
@@ -843,7 +821,7 @@ def _labeled_batch_step(
 
     hallucinated_mods = set(newmod_list) if use_mfla else set()
     if use_mfla:
-        set_mfla_training_mode(evan, hallucinated_mods, all_modalities, in_warmup=in_warmup)
+        set_mfla_training_mode(evan, hallucinated_mods, all_modalities)
 
     student_fused = evan.forward_fusion_from_modality_features(
         prefusion_features,
@@ -878,7 +856,7 @@ def _unlabeled_batch_step(
     mae_decoders, active_losses, starting_modality, newmod_list, all_modalities,
     latent_reconstruct_modalities, mae_modalities, modality_bands_dict,
     mae_mask_ratio, modality_dropout,entr_frequency, mse_fn,
-    distillation_temperature, use_mfla, in_warmup, teacher_is_peeking,
+    distillation_temperature, use_mfla, teacher_is_peeking,
     effective_labeled_freq, patch_size, segmentation, device,
     label_key='label', ignore_index=-100,
 ):
@@ -931,7 +909,7 @@ def _unlabeled_batch_step(
 
     hallucinated_mods = {mod for mod, dropped in modality_dropped.items() if dropped} if use_mfla else set()
     if use_mfla:
-        set_mfla_training_mode(evan, hallucinated_mods, all_modalities, in_warmup=in_warmup)
+        set_mfla_training_mode(evan, hallucinated_mods, all_modalities)
 
     # cross projector produces [B, 1+n_patches, D] for dropped mods — fusion needs to know prefix is smaller
     dropped_mods = {mod for mod, dropped in modality_dropped.items() if dropped} if evan.intermediate_projector_type == "cross" else set()
@@ -1168,7 +1146,7 @@ def train_shot(
     val_weights=None,                   # {'peeking': 0.5, 'teacher_agreement': 0.5}
     # MFLA training options
     use_mfla: bool = False,             # Enable MFLA training for hallucinated modalities
-    mfla_warmup_epochs: int = 0,        # Epochs where backbone + MFLA train together before freezing backbone
+    warmup_epochs: int = 1,             # Linear LR warmup epochs for cosine scheduler
     # Dataset options
     multilabel: bool = False,           # Use BCEWithLogitsLoss instead of CrossEntropyLoss
     label_key: str = 'label',           # Batch key for labels
@@ -1199,7 +1177,6 @@ def train_shot(
         - 0.5: start labeled mixing at 50% of training
         - 1.0: never use labeled mixing
     - use_mfla: Enable MFLA training for hallucinated modalities
-    - mfla_warmup_epochs: Epochs where backbone + MFLA train together before freezing backbone
     """
     # Compute epoch at which labeled mixing starts
     labeled_start_epoch = int(args.epochs * labeled_start_fraction)
@@ -1209,7 +1186,7 @@ def train_shot(
     print(f"  MAE modalities (pixel reconstruction): {mae_modalities}")
     print(f"  Latent modalities (feature matching): {latent_reconstruct_modalities}")
     if use_mfla:
-        print(f"  MFLA training: enabled (warmup_epochs={mfla_warmup_epochs})")
+        print(f"  MFLA training: enabled")
     if labeled_train_loader is not None and labeled_frequency > 0:
         print(f"  Mixed training mode: labeled_frequency={labeled_frequency:.2f}")
         print(f"    - labeled_start_fraction={labeled_start_fraction:.2f} (starts at epoch {labeled_start_epoch + 1}/{args.epochs})")
@@ -1287,7 +1264,7 @@ def train_shot(
     print(f"Total trainable parameters: {sum(p.numel() for p in params):,}")
 
     optimizer = torch.optim.AdamW(params, lr=args.ssl_lr, weight_decay=weight_decay)
-    scheduler = ReduceLROnPlateau(optimizer, factor=0.7, patience=8, min_lr=1e-6)
+    scheduler = make_scheduler(optimizer, args.epochs, warmup_epochs=warmup_epochs)
     mse_fn = nn.MSELoss()
 
     starting_modality = evan.starting_modality
@@ -1328,7 +1305,6 @@ def train_shot(
         mae_decoders.train()
         latent_projectors.train()
 
-        in_warmup = (epoch < mfla_warmup_epochs) if use_mfla else False
         effective_labeled_freq = labeled_frequency if epoch >= labeled_start_epoch else 0.0
 
         epoch_losses = {'total': 0.0, 'mae': 0.0, 'latent': 0.0, 'prefusion': 0.0, 'distill': 0.0, 'entr':0.0, 'ce': 0.0}
@@ -1353,7 +1329,7 @@ def train_shot(
                 total_loss, loss_dict = _labeled_batch_step(
                     batch, evan, model, teacher_classifier, latent_projectors,
                     active_losses, starting_modality, newmod_list, all_modalities,
-                    modality_bands_dict, mse_fn, ce_fn, use_mfla, in_warmup,
+                    modality_bands_dict, mse_fn, ce_fn, use_mfla,
                     multilabel, label_key, segmentation, device,
                 )
                 labeled_count += 1
@@ -1363,7 +1339,7 @@ def train_shot(
                     mae_decoders, active_losses, starting_modality, newmod_list, all_modalities,
                     latent_reconstruct_modalities, mae_modalities, modality_bands_dict,
                     args.mae_mask_ratio, args.modality_dropout, args.entr_frequency, mse_fn,
-                    distillation_temperature, use_mfla, in_warmup, teacher_is_peeking,
+                    distillation_temperature, use_mfla, teacher_is_peeking,
                     effective_labeled_freq, patch_size, segmentation, device,
                     label_key=label_key, ignore_index=ignore_index,
                 )
@@ -1422,7 +1398,7 @@ def train_shot(
         avg_ce = epoch_losses['ce'] / max(labeled_count, 1)
         labeled_ratio = labeled_count / train_count if train_count > 0 else 0
 
-        scheduler.step(avg_total)
+        scheduler.step()
         epoch_time = time.time() - epoch_start
         print(f"\nEpoch {epoch+1}/{args.epochs} ({epoch_time:.1f}s):")
         print(f"  Train - Total: {avg_total:.4f}, MAE: {avg_mae:.4f}, Latent: {avg_latent:.4f}, Pre-fusion: {avg_prefusion:.4f}, Distill: {avg_distill:.4f}, Entr: {avg_entr:.4f}, CE: {avg_ce:.4f}")

@@ -17,6 +17,7 @@ VALID_NEW_MODS = {
     'eurosat': ['vre', 'nir', 'swir', 'rgb'],
     'benv2':   ['s1', 's2'],
     'pastis':  ['s1', 's2'],
+    'dfc2020': ['s1', 's2'],
 }
 
 
@@ -46,8 +47,8 @@ def main():
                         help='Which losses to activate (default: all)')
     parser.add_argument('--use_mfla', action='store_true',
                         help='Enable MFLA training for hallucinated modalities')
-    parser.add_argument('--mfla_warmup_epochs', type=int, default=0,
-                        help='Epochs where backbone + MFLA train together before freezing backbone (default: 0)')
+    parser.add_argument('--warmup_epochs', type=int, default=1,
+                        help='Linear LR warmup epochs before cosine decay (default: 1)')
     parser.add_argument('--replace_teacher_w_peek', action='store_true',
                         help='When student peeking surpasses teacher, replace teacher and use peeking mode for distillation')
     parser.add_argument('--results_csv', type=str, required=True,
@@ -209,7 +210,7 @@ def main():
         val_unlabeled_loader=val2_loader,
         val_labeled_loader=val1_loader,
         use_mfla=args.use_mfla,
-        mfla_warmup_epochs=args.mfla_warmup_epochs,
+        warmup_epochs=args.warmup_epochs,
         multilabel=task_config.multilabel,
         label_key=task_config.label_key,
         segmentation=(task_config.task_type == 'segmentation'),
@@ -256,7 +257,7 @@ def main():
     fieldnames = [
         "dataset", "starting_modality", "new_modality", "ssl_lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction", "entr_frequency",
-        "trainable_params", "active_losses", "use_mfla", "mfla_warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
+        "trainable_params", "active_losses", "use_mfla", "warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
         "transfer_metric", "peeking_metric", "addition_metric", "addition_ens_metric",
         "valchecked_transfer", "valchecked_peek", "valchecked_add", "valchecked_add_ens",
         "stage0_checkpoint", "shote2e_checkpoint"
@@ -287,7 +288,7 @@ def main():
             trainable_total,
             active_losses_str,
             args.use_mfla,
-            args.mfla_warmup_epochs,
+            args.warmup_epochs,
             args.intermediate_projector_type,
             args.tz_fusion_time,
             metric_name,

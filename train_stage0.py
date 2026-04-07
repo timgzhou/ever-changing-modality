@@ -66,6 +66,8 @@ def main():
                         help='Number of timestamps to sample per PASTIS image before temporal aggregation.')
     parser.add_argument('--val_per_epoch', type=int, default=1,
                         help='Run validation every N epochs (and always on the last epoch).')
+    parser.add_argument('--warmup_epochs', type=int, default=1,
+                        help='Linear LR warmup epochs before cosine decay (default: 1).')
     args = parser.parse_args()
 
     # Validate modality against dataset
@@ -219,6 +221,7 @@ def main():
         val_loader=val1_loader,
         best_checkpoint_path=checkpoint_path,
         val_per_epoch=args.val_per_epoch,
+        warmup_epochs=args.warmup_epochs,
     )
 
     # Patch normalization into checkpoint config so shot_ete.py can read it back

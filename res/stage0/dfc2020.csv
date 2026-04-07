@@ -8,3 +8,4 @@ dfc2020,evan_small,s2,fft,32,fft,0.0001,22587272,16,39.41,mIoU,checkpoints/benv2
 dfc2020,evan_small,s1,fft,32,fft,0.0001,21505928,16,45.11,mIoU,checkpoints/benv2_s1_dinov3init.pt,clstoken
 dfc2020,evan_small,s2,fft,32,fft,0.0001,22578056,16,52.45,mIoU,checkpoints/benv2_s2_dino_s2dinoinit.pt,clstoken
 dfc2020,evan_small,s1,fft,32,fft,0.0001,21505928,32,36.81,mIoU,checkpoints/benv2_s1_randominit.pt,clstoken
+dfc2020,evan_small,s2,fft,32,fft,0.0001,22587272,1,29.53,mIoU,checkpoints/dfc2020_s2_s0_refactor_test.pt,clstoken
