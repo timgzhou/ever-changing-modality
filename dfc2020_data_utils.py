@@ -154,7 +154,7 @@ def get_dfc2020_loaders(
     data_root: str = 'datasets/GFM-Bench/DFC2020/DFC2020',
     seed: int = 42,
     starting_modality: str = 's2',
-    new_modality: str = 's1',
+    new_modality: str | None = 's1',
     val_fraction: float = 0.0,
 ) -> tuple:
     """
@@ -174,8 +174,23 @@ def get_dfc2020_loaders(
     Returns:
         train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config
     """
-    assert starting_modality in ('s2', 's1'), \
-        f"starting_modality must be 's2' or 's1', got {starting_modality!r}"
+    # Slices into the 15-channel stacked image: S2 first, S1 second
+    # S2 band order: B1,B2,B3,B4,B5,B6,B7,B8,B8A,B9,B10,B11,B12 (idx 0-12)
+    # Sub-band groups match EuroSAT groupings: rgb/vre/nir/swir/aw
+    modality_bands_dict = {
+        's2':      slice(0, 13),
+        's1':      slice(13, 15),
+        's2_rgb':  [3, 2, 1],     # B4, B3, B2
+        's2_vre':  slice(4, 7),   # B5, B6, B7
+        's2_nir':  slice(7, 9),   # B8, B8A
+        's2_swir': slice(10, 13), # B10, B11, B12
+        's2_aw':   [0, 9],        # B1, B9
+    }
+    
+    assert starting_modality in modality_bands_dict, \
+        f"starting_modality must be one of {list(modality_bands_dict)}, got {starting_modality!r}"
+    assert new_modality is None or new_modality in modality_bands_dict, \
+        f"new_modality must be one of {list(modality_bands_dict)} or None, got {new_modality!r}"
 
     test_ds = DFC2020Dataset(data_root, split='test')
 
@@ -229,16 +244,13 @@ def get_dfc2020_loaders(
     val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
 
-    # Slices into the 15-channel stacked image: S2 first, S1 second
-    modality_bands_dict = {
-        's2': slice(0, 13),
-        's1': slice(13, 15),
-    }
+    def _bands_len(spec):
+        if isinstance(spec, slice):
+            return len(range(*spec.indices(15)))
+        return len(spec)
 
-    s2_ch = 13
-    s1_ch = 2
-    start_ch = s2_ch if starting_modality == 's2' else s1_ch
-    new_ch   = s1_ch if starting_modality == 's2' else s2_ch
+    start_ch = _bands_len(modality_bands_dict[starting_modality])
+    new_ch   = _bands_len(modality_bands_dict[new_modality]) if new_modality is not None else 0
 
     task_config = TaskConfig(
         dataset_name='dfc2020',

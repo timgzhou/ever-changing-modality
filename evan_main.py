@@ -149,8 +149,8 @@ class EVAN(nn.Module):
         tz_modality_fusion_layer_augmenter: Literal["lora","none"] = "none",
         tz_fusion_time: int = 3,
         tz_lora_rank: int=32,
-        starting_modality: str='rgb',
-        starting_n_chans: int = 3,
+        starting_modality: 'str | list[str]' = 'rgb',
+        starting_n_chans: 'int | list[int]' = 3,
         intermediate_projector_type: Literal["self", "cross"] = "self",
         intermediate_projector_num_layers: int = 2,
         **ignored_kwargs,
@@ -172,7 +172,11 @@ class EVAN(nn.Module):
         self.tz_lora_rank = tz_lora_rank
         self.tz_modality_specific_layer_augmenter = tz_modality_specific_layer_augmenter
         self.tz_modality_fusion_layer_augmenter = tz_modality_fusion_layer_augmenter
-        self.starting_modality=starting_modality
+        # Normalize starting_modality/starting_n_chans to lists; first element is primary.
+        if isinstance(starting_modality, str):
+            starting_modality = [starting_modality]
+            starting_n_chans = [starting_n_chans]
+        self.starting_modality = starting_modality[0]
         self.n_storage_tokens = n_storage_tokens
         self.intermediate_projector_type = intermediate_projector_type
         self.intermediate_projector_num_layers = intermediate_projector_num_layers
@@ -207,8 +211,8 @@ class EVAN(nn.Module):
 
         # ============ EVAN-Specific Components ============
         # Initialize multimodal components
-        self.supported_modalities=[starting_modality]
-        self.supported_modalities_in_chans=[starting_n_chans]
+        self.supported_modalities=[starting_modality[0]]
+        self.supported_modalities_in_chans=[starting_n_chans[0]]
         self.patch_embedders = nn.ModuleDict()
         self.cls_tokens = nn.ParameterDict()
         self.storage_tokens = nn.ParameterDict()
@@ -220,15 +224,20 @@ class EVAN(nn.Module):
         if self.intermediate_projector_type == "cross":
             self.projector_queries = nn.ParameterDict()
 
-        # Initialize modality-specific components for starting_modality (starting_n_chans)
-        self.add_new_patch_embedders(starting_modality,starting_n_chans)
-        self.add_new_cls_token(starting_modality)
-        if self.n_storage_tokens > 0: self.add_new_storage_tokens(starting_modality)
-        self.add_new_msla(starting_modality)
-        self.add_modality_encoding(starting_modality)
+        # Initialize modality-specific components for primary modality
+        self.add_new_patch_embedders(starting_modality[0], starting_n_chans[0])
+        self.add_new_cls_token(starting_modality[0])
+        if self.n_storage_tokens > 0: self.add_new_storage_tokens(starting_modality[0])
+        self.add_new_msla(starting_modality[0])
+        self.add_modality_encoding(starting_modality[0])
         if self.tz_modality_fusion_layer_augmenter!="none":
-            self.add_new_mfla(starting_modality)
-        self.add_new_intermediate_projectors(starting_modality)
+            self.add_new_mfla(starting_modality[0])
+        self.add_new_intermediate_projectors(starting_modality[0])
+        print(f"Initialized primary modality: '{starting_modality[0]}' ({starting_n_chans[0]} channels)")
+
+        # Register any additional modalities passed at construction time
+        for mod, n_ch in zip(starting_modality[1:], starting_n_chans[1:]):
+            self.create_modality_components(mod, n_ch)
 
     # Helper Functions to initialize and add new component as modality comes in.
     def initialize_rope_embed(self):
@@ -497,10 +506,26 @@ class EVAN(nn.Module):
             # RoPE periods buffer: computed deterministically from hyperparameters, not in HF checkpoint
             if key == 'rope_embed.periods':
                 return True
+            # Storage tokens: DINO has no register tokens
+            if key.startswith('storage_tokens.'):
+                return True
+            # Components of extra modalities (not the primary): no pretrained weights for these
+            primary = self.starting_modality
+            for prefix in ('patch_embedders.', 'cls_tokens.', 'modality_specific_layer_adaptors.'):
+                if key.startswith(prefix):
+                    mod = key[len(prefix):].split('.')[0]
+                    if mod != primary:
+                        return True
             if self.tz_modality_specific_layer_augmenter == "lora":
                 if 'modality_specific_layer_adaptors' in key:
                     return True
-            if any(pattern in key for pattern in ['modality_encoders', 'modality_fusion_lora_adaptors']):
+            # FFT mode: extra modality MSLA blocks don't get DINO copies
+            if self.tz_modality_specific_layer_augmenter == "fft":
+                if key.startswith('modality_specific_layer_adaptors.'):
+                    mod = key[len('modality_specific_layer_adaptors.'):].split('.')[0]
+                    if mod != primary:
+                        return True
+            if any(pattern in key for pattern in ['modality_encodings', 'modality_fusion_lora_adaptors']):
                 return True
             if key.startswith('intermediate_projectors.') or key.startswith('projector_queries.'):
                 return True
@@ -628,10 +653,22 @@ class EVAN(nn.Module):
                 return True
             if key.startswith('storage_tokens.'):  # no reg tokens in torchgeo ViT
                 return True
+            # Components of extra modalities: no pretrained weights for these
+            primary = self.starting_modality
+            for prefix in ('patch_embedders.', 'cls_tokens.', 'modality_specific_layer_adaptors.'):
+                if key.startswith(prefix):
+                    mod = key[len(prefix):].split('.')[0]
+                    if mod != primary:
+                        return True
             if self.tz_modality_specific_layer_augmenter == "lora":
                 if 'modality_specific_layer_adaptors' in key:
                     return True
-            if any(p in key for p in ['modality_encoders', 'modality_fusion_lora_adaptors']):
+            if self.tz_modality_specific_layer_augmenter == "fft":
+                if key.startswith('modality_specific_layer_adaptors.'):
+                    mod = key[len('modality_specific_layer_adaptors.'):].split('.')[0]
+                    if mod != primary:
+                        return True
+            if any(p in key for p in ['modality_encodings', 'modality_fusion_lora_adaptors']):
                 return True
             if key.startswith('intermediate_projectors.') or key.startswith('projector_queries.'):
                 return True
@@ -1402,9 +1439,7 @@ class EVANClassifier(EvanPredictor):
         if classifier_strategy == 'mean':
             # Average CLS tokens from all modalities, then classify
             self.head = nn.Sequential(
-                nn.Linear(embed_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, num_classes)
+                nn.Linear(embed_dim, num_classes)
             )
             self.modality_heads = None
         elif classifier_strategy == 'ensemble':
@@ -1450,9 +1485,8 @@ class EVANClassifier(EvanPredictor):
         embed_dim = self.evan.embed_dim
 
         classifier = nn.Sequential(
-            nn.Linear(embed_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim, self.num_classes)
+            nn.BatchNorm1d(embed_dim, affine=False),
+            nn.Linear(embed_dim, self.num_classes)
         )
 
         classifier = classifier.to(self.device)
@@ -1602,66 +1636,6 @@ class EVANClassifier(EvanPredictor):
         return model
 
 
-class UNetDecoder(nn.Module):
-    """
-    UNet-style decoder that upsamples patch tokens to full image resolution.
-
-    Takes patch tokens [B, N, embed_dim], reshapes to a spatial grid, and applies
-    4 ConvTranspose2d stages to upsample back to img_size.
-
-    For PASTIS (img_size=128, patch_size=16): 8×8 → 16 → 32 → 64 → 128.
-    """
-
-    def __init__(self, embed_dim: int, num_classes: int, patch_hw: int):
-        """
-        Args:
-            embed_dim: EVAN embedding dimension (e.g. 768).
-            num_classes: Number of segmentation classes.
-            patch_hw: Spatial size of the patch grid (img_size // patch_size), e.g. 8.
-        """
-        super().__init__()
-        self.patch_hw = patch_hw
-
-        # 4 upsampling stages, each doubles spatial resolution.
-        # kernel=4, stride=2, padding=1 → output = 2 * input exactly.
-        self.up1 = nn.Sequential(
-            nn.ConvTranspose2d(embed_dim, embed_dim // 2, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(embed_dim // 2),
-            nn.ReLU(inplace=True),
-        )
-        self.up2 = nn.Sequential(
-            nn.ConvTranspose2d(embed_dim // 2, embed_dim // 4, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(embed_dim // 4),
-            nn.ReLU(inplace=True),
-        )
-        self.up3 = nn.Sequential(
-            nn.ConvTranspose2d(embed_dim // 4, embed_dim // 8, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(embed_dim // 8),
-            nn.ReLU(inplace=True),
-        )
-        self.up4 = nn.Sequential(
-            nn.ConvTranspose2d(embed_dim // 8, embed_dim // 16, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(embed_dim // 16),
-            nn.ReLU(inplace=True),
-        )
-        self.head = nn.Conv2d(embed_dim // 16, num_classes, kernel_size=1)
-
-    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            patch_tokens: [B, N, embed_dim] patch token sequence.
-        Returns:
-            logits: [B, num_classes, H, W] where H = W = patch_hw * 16.
-        """
-        B, N, D = patch_tokens.shape
-        x = patch_tokens.permute(0, 2, 1).reshape(B, D, self.patch_hw, self.patch_hw)
-        x = self.up1(x)
-        x = self.up2(x)
-        x = self.up3(x)
-        x = self.up4(x)
-        return self.head(x)
-
-
 class EvanSegmenter(EvanPredictor):
     """
     Segmentation head on top of EVAN.
@@ -1670,7 +1644,6 @@ class EvanSegmenter(EvanPredictor):
     in shot_ete.py, shot.py, and train_stage0.py when task_type == 'segmentation'.
 
     decoder_type='linear' (default): 1×1 Conv2d on patch tokens + bilinear upsample.
-    decoder_type='unet': 4-stage ConvTranspose2d UNetDecoder.
     """
 
     def __init__(
@@ -1687,8 +1660,7 @@ class EvanSegmenter(EvanPredictor):
             num_classes: Number of segmentation classes (e.g. 19 for PASTIS).
             decoder_strategy: 'mean' (shared decoder on averaged patch tokens) or
                               'ensemble' (per-modality decoders, average logits).
-            decoder_type: 'linear' (1×1 Conv2d + bilinear upsample) or
-                          'unet' (UNetDecoder with 4 ConvTranspose2d stages).
+            decoder_type: 'linear' (1×1 Conv2d + bilinear upsample)
             device: Target device.
         """
         super().__init__(evan_model, num_classes, decoder_strategy, device)
@@ -1769,14 +1741,16 @@ class EvanSegmenter(EvanPredictor):
     def _make_decoder(self, embed_dim: int) -> nn.Module:
         """Return a decoder head according to decoder_type."""
         if self.decoder_type == 'unet':
-            return UNetDecoder(embed_dim, self.num_classes, self._patch_hw)
+            raise NotImplementedError("UNET decoder not supported for ViT")
         else:  # 'linear'
-            return nn.Conv2d(embed_dim, self.num_classes, kernel_size=1)
+            return nn.Sequential(
+                nn.BatchNorm2d(embed_dim, affine=False),
+                nn.Conv2d(embed_dim, self.num_classes, kernel_size=1))
 
     def _apply_decoder(self, dec: nn.Module, patch_tokens: torch.Tensor) -> torch.Tensor:
         """Run patch_tokens [B, N, D] through dec and return [B, C, H, W]."""
         if self.decoder_type == 'unet':
-            return dec(patch_tokens)
+            raise NotImplementedError("UNET decoder not supported for ViT")
         # linear: reshape to spatial map, apply 1×1 conv, bilinear upsample
         B, N, D = patch_tokens.shape
         feat_map = patch_tokens.permute(0, 2, 1).reshape(B, D, self._patch_hw, self._patch_hw)

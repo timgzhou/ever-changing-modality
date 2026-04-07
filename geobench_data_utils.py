@@ -254,6 +254,7 @@ def get_benv2_loaders(
     data_root: str = 'datasets/geoben2/benv2',
     seed: int = 42,
     starting_modality: str = 's2',
+    new_modality: str | None = None,
 ) -> tuple:
     """
     Create 5 dataloaders for BEN-v2 matching the SHOT interface.
@@ -278,7 +279,7 @@ def get_benv2_loaders(
         test_loader:   S2+S1, labeled (for evaluation)
         task_config:   TaskConfig describing this dataset/task
     """
-    assert starting_modality in ('s2', 's1'), f"starting_modality must be 's2' or 's1', got {starting_modality!r}"
+    assert starting_modality in ('s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_aw', 's2_swir'), f"starting_modality unrecognized, got {starting_modality!r}"
     root = Path(data_root)
 
     band_orders = {'s2': list(BENV2_S2_BANDS), 's1': list(BENV2_S1_BANDS)}
@@ -321,7 +322,6 @@ def get_benv2_loaders(
     val1_ds   = StackedModalityDataset(Subset(val_full, val1_indices),   modality_stack_order=['s2', 's1'], target_size=128)
     val2_ds   = StackedModalityDataset(Subset(val_full, val2_indices),   modality_stack_order=['s2', 's1'], target_size=128)
 
-    new_modality = 's1' if starting_modality == 's2' else 's2'
     print(f"BEN-v2 — Train1: {len(train1_ds)}, Train2: {len(train2_ds)}, Test: {len(test_ds)} (S2+S1)")
     print(f"BEN-v2 — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
 
@@ -335,8 +335,29 @@ def get_benv2_loaders(
     _ = train1_ds[0]
     modality_slices = train1_ds.modality_slices  # {'s2': slice(0,12), 's1': slice(12,14)}
 
-    start_channels = len(band_orders[starting_modality])
-    new_channels   = len(band_orders[new_modality])
+    # Add S2 sub-band groups (match EuroSAT rgb/vre/nir/swir/aw groupings)
+    # BEN-v2 S2 order: B01,B02,B03,B04,B05,B06,B07,B08,B8A,B09,B11,B12 (idx 0-11 within s2 slice)
+    # Absolute indices in stacked tensor (s2 starts at 0):
+    modality_slices['s2_rgb']  = [3, 2, 1]     # B04, B03, B02
+    modality_slices['s2_vre']  = slice(4, 7)   # B05, B06, B07
+    modality_slices['s2_nir']  = slice(7, 9)   # B08, B8A
+    modality_slices['s2_swir'] = slice(10, 12) # B11, B12 (no B10 in BEN-v2)
+    modality_slices['s2_aw']   = [0, 9]        # B01, B09
+
+    assert starting_modality in modality_slices, \
+        f"starting_modality must be one of {list(modality_slices)}, got {starting_modality!r}"
+    assert new_modality is None or new_modality in modality_slices, \
+        f"new_modality must be one of {list(modality_slices)} or None, got {new_modality!r}"
+
+    def _bands_len(spec, total_ch):
+        if isinstance(spec, slice):
+            return len(range(*spec.indices(total_ch)))
+        return len(spec)
+
+    total_ch = train1_ds[0]['image'].shape[0]
+    start_channels = _bands_len(modality_slices[starting_modality], total_ch)
+    new_channels   = _bands_len(modality_slices[new_modality], total_ch) if new_modality is not None else 0
+
     task_config = TaskConfig(
         dataset_name='benv2',
         task_type='multilabel',
@@ -393,7 +414,7 @@ def get_pastis_loaders(
     temporal_aggregation: str = 'median',
     num_time_steps: int = 10,
     starting_modality: str = 's2',
-    new_modality: str='s1',
+    new_modality: str | None = 's1',
     data_normalizer=None,
 ) -> tuple:
     """
@@ -505,15 +526,29 @@ def get_pastis_loaders(
     if 'rgb' not in modality_slices:
         modality_slices['rgb'] = [2, 1, 0]  # absolute indices into stacked image
 
-    if starting_modality == 's2':
-        start_channels = len(PASTIS_S2_BANDS)
-        new_channels   = n_s1
-    elif starting_modality == 'rgb':
-        start_channels = len(PASTIS_S2_RGB_BANDS)
-        new_channels   = n_s1
-    else:  # s1
-        start_channels = n_s1
-        new_channels   = len(PASTIS_S2_BANDS)
+    # Add S2 sub-band groups (match EuroSAT rgb/vre/nir/swir groupings)
+    # PASTIS S2 order: B02,B03,B04,B05,B06,B07,B08,B8A,B11,B12 (idx 0-9 within s2 slice)
+    # Absolute indices in stacked tensor (s2 starts at 0):
+    modality_slices['s2_rgb']  = [2, 1, 0]   # B04, B03, B02 (same as 'rgb')
+    modality_slices['s2_vre']  = slice(3, 6)  # B05, B06, B07
+    modality_slices['s2_nir']  = slice(6, 8)  # B08, B8A
+    modality_slices['s2_swir'] = slice(8, 10) # B11, B12 (no B10 in PASTIS)
+    # no s2_aw: B01/B09 not in PASTIS S2
+
+    assert starting_modality in modality_slices, \
+        f"starting_modality must be one of {list(modality_slices)}, got {starting_modality!r}"
+    assert new_modality is None or new_modality in modality_slices, \
+        f"new_modality must be one of {list(modality_slices)} or None, got {new_modality!r}"
+
+    def _bands_len(spec, total_ch):
+        if isinstance(spec, slice):
+            return len(range(*spec.indices(total_ch)))
+        return len(spec)
+
+    total_ch = train1_ds[0]['image'].shape[0]
+    start_channels = _bands_len(modality_slices[starting_modality], total_ch)
+    new_channels   = _bands_len(modality_slices[new_modality], total_ch) if new_modality is not None else 0
+
     task_config = TaskConfig(
         dataset_name='pastis',
         task_type='segmentation',

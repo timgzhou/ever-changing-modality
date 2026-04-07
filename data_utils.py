@@ -24,9 +24,9 @@ class TaskConfig:
     dataset_name: str           # 'eurosat', 'benv2', 'pastis', 'dfc2020'
     task_type: str              # 'classification', 'multilabel', 'segmentation'
     modality_a: str             # starting modality key, e.g. 's2'
-    modality_b: str             # new modality key, e.g. 's1'
+    modality_b: str | None      # new modality key, e.g. 's1'; None = stage-0 only
     modality_a_channels: int
-    modality_b_channels: int
+    modality_b_channels: int    # 0 when modality_b is None
     num_classes: int
     multilabel: bool
     label_key: str              # 'label' or 'mask'
@@ -144,22 +144,20 @@ def get_loaders(
         from geobench_data_utils import get_benv2_loaders
         return get_benv2_loaders(
             batch_size=batch_size, num_workers=num_workers,
-            starting_modality=starting_modality,
+            starting_modality=starting_modality, new_modality=new_modality,
         )
     elif dataset == 'pastis':
         from geobench_data_utils import get_pastis_loaders
-        _new = new_modality or ('s1' if starting_modality == 's2' else 's2')
         return get_pastis_loaders(
             batch_size=batch_size, num_workers=num_workers,
-            starting_modality=starting_modality, new_modality=_new,
+            starting_modality=starting_modality, new_modality=new_modality,
             data_normalizer=data_normalizer, num_time_steps=num_time_steps,
         )
     elif dataset == 'dfc2020':
         from dfc2020_data_utils import get_dfc2020_loaders
-        _new = new_modality or ('s1' if starting_modality == 's2' else 's2')
         return get_dfc2020_loaders(
             batch_size=batch_size, num_workers=num_workers,
-            starting_modality=starting_modality, new_modality=_new,
+            starting_modality=starting_modality, new_modality=new_modality,
         )
     else:
         raise ValueError(f"Unknown dataset: {dataset!r}. Valid: 'eurosat', 'benv2', 'pastis', 'dfc2020'")

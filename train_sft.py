@@ -15,21 +15,32 @@ from train_utils import single_modality_training_loop
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 EUROSAT_MODALITIES = ['rgb', 'vre', 'nir', 'swir', 'aw']
-BENV2_MODALITIES   = ['s2', 's1']
-PASTIS_MODALITIES  = ['s2', 's1', 'rgb']
-DFC2020_MODALITIES = ['s2', 's1']
+BENV2_MODALITIES   = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
+PASTIS_MODALITIES  = ['s2', 's1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir']
+DFC2020_MODALITIES = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
 
 
-def get_task_config_and_loaders(dataset, modality, batch_size, num_workers, data_normalizer=None, num_time_steps=10):
-    """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict)."""
+def get_task_config_and_loaders(dataset, modalities, batch_size, num_workers, data_normalizer=None, num_time_steps=10):
+    """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict).
+
+    modalities: list of modality names; first is primary (used for loaders).
+    """
     from data_utils import get_loaders
+    primary = modalities[0]
     train1, val1, _, _, test, task_config = get_loaders(
-        dataset, modality, batch_size, num_workers,
+        dataset, primary, batch_size, num_workers,
         data_normalizer=data_normalizer, num_time_steps=num_time_steps,
         new_modality=None,
     )
-    modality_bands_dict = {modality: task_config.modality_bands_dict[modality]}
+    modality_bands_dict = {m: task_config.modality_bands_dict[m] for m in modalities}
     return train1, val1, test, task_config, modality_bands_dict
+
+
+def _n_chans(entry) -> int:
+    """Return channel count for a modality_bands_dict entry (slice or list)."""
+    if isinstance(entry, slice):
+        return entry.stop - entry.start
+    return len(entry)  # list of indices
 
 
 def main():
@@ -37,9 +48,10 @@ def main():
     parser.add_argument('--dataset', type=str, required=True,
                         choices=['eurosat', 'benv2', 'pastis', 'dfc2020'],
                         help='Dataset to train on')
-    parser.add_argument('--modality', type=str, required=True,
-                        help='Modality to train on. '
-                             'EuroSAT: rgb/vre/nir/swir/aw. GeoBench: s2/s1.')
+    parser.add_argument('--modalities', type=str, nargs='+', required=True,
+                        help='Modalities to train on (first is primary). '
+                             'EuroSAT: rgb/vre/nir/swir/aw. '
+                             'GeoBench/DFC2020: s2/s1/s2_rgb/s2_vre/s2_nir/s2_swir/s2_aw.')
     parser.add_argument('--model', type=str, default='evan_small', choices=['evan_small', 'evan_base', 'evan_large'])
     parser.add_argument('--use_dino_weights', action='store_true')
     parser.add_argument('--use_s2dino_weights', action='store_true',
@@ -70,19 +82,21 @@ def main():
                         help='Linear LR warmup epochs before cosine decay (default: 1).')
     args = parser.parse_args()
 
-    # Validate modality against dataset
+    # Validate modalities against dataset
     valid_modalities = {
         'eurosat': EUROSAT_MODALITIES,
         'benv2':   BENV2_MODALITIES,
         'pastis':  PASTIS_MODALITIES,
         'dfc2020': DFC2020_MODALITIES,
     }[args.dataset]
-    if args.modality not in valid_modalities:
-        parser.error(f"--modality {args.modality!r} is not valid for --dataset {args.dataset}. "
-                     f"Valid choices: {valid_modalities}")
+    for m in args.modalities:
+        if m not in valid_modalities:
+            parser.error(f"--modalities {m!r} is not valid for --dataset {args.dataset}. "
+                         f"Valid choices: {valid_modalities}")
+    primary_modality = args.modalities[0]
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Dataset: {args.dataset}, Modality: {args.modality}")
+    print(f"Dataset: {args.dataset}, Modalities: {args.modalities}")
     print(f"Using device: {device}")
     print(f"Model: {args.model}, Batch size: {args.batch_size}, LR: {args.lr}, Epochs: {args.epochs}")
 
@@ -91,34 +105,35 @@ def main():
     data_normalizer = None
     normalization = 'zscore'
     if args.dataset == 'pastis' and (
-        args.use_s2dino_weights or (args.use_dino_weights and args.modality == 'rgb')
+        args.use_s2dino_weights or (args.use_dino_weights and primary_modality == 'rgb')
     ):
         from geobench_data_utils import make_div10000_normalizer
         data_normalizer = make_div10000_normalizer()
         normalization = 'div10000'
         print("Using /10000 normalizer to match torchgeo DINO pretraining.")
     train1_loader, val1_loader, test_loader, task_config, modality_bands_dict = get_task_config_and_loaders(
-        args.dataset, args.modality, args.batch_size, args.num_workers, data_normalizer=data_normalizer,
+        args.dataset, args.modalities, args.batch_size, args.num_workers, data_normalizer=data_normalizer,
         num_time_steps=args.num_time_steps,
     )
 
     # Model
     print("\n=== Creating EVAN model ===")
+    all_n_chans = [_n_chans(modality_bands_dict[m]) for m in args.modalities]
     common_kwargs = dict(
         tz_fusion_time=args.tz_fusion_time,
         tz_lora_rank=args.tz_lora_rank,
         tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
         n_storage_tokens=4,
-        starting_modality=args.modality,
-        starting_n_chans=task_config.modality_a_channels,
+        starting_modality=args.modalities,
+        starting_n_chans=all_n_chans,
         img_size=task_config.img_size,
         device=device,
     )
     if args.use_s2dino_weights:
         if args.model != 'evan_small':
             parser.error('--use_s2dino_weights is only supported with --model evan_small')
-        if args.modality != 's2':
-            parser.error('--use_s2dino_weights requires --modality s2 (teacher is an S2 model)')
+        if primary_modality != 's2':
+            parser.error('--use_s2dino_weights requires primary modality s2 (teacher is an S2 model)')
         if args.dataset == 'eurosat':
             parser.error('--use_s2dino_weights is not compatible with --dataset eurosat')
         from torchgeo.models import ViTSmall16_Weights
@@ -151,20 +166,17 @@ def main():
         )
     model = model.to(device)
 
-    # Freeze / unfreeze according to train_mode
+    # Freeze / unfreeze according to train_mode (apply to all modalities)
     model.freeze_all()
     if args.train_mode == 'fft':
         model.set_requires_grad('backbone', blocks=True, norm=True)
-        model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, modality_encoders=True, head=True)
+        model.set_requires_grad('all', patch_embedders=True, clsreg=True, msla=True, modality_encoders=True, head=True)
         print("Mode=fft: training full backbone layers + head.")
-    elif args.train_mode == 'adaptor':
-        model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, modality_encoders=True, head=True)
-        print("Mode=adaptor: training embedder, LoRA/FFT adaptors + head.")
     elif args.train_mode == 'probe':
-        model.set_requires_grad(args.modality, head=True)
+        model.set_requires_grad('all', head=True)
         print("Mode=probe: training head only.")
     elif args.train_mode == 'emb+probe':
-        model.set_requires_grad(args.modality, patch_embedders=True, head=True)
+        model.set_requires_grad('all', patch_embedders=True, head=True)
         print("Mode=emb+probe: training embedder + head.")
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -183,10 +195,11 @@ def main():
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
 
     if args.wandb_project:
+        modalities_str = '+'.join(args.modalities)
         wandb.init(
             project=args.wandb_project,
             config=vars(args),
-            name=f"stage0_{args.dataset}_{args.modality}_{args.train_mode}",
+            name=f"stage0_{args.dataset}_{modalities_str}_{args.train_mode}",
         )
 
     print(f"\n=== Training for {args.epochs} epochs ===")
@@ -203,13 +216,14 @@ def main():
     if args.checkpoint_name:
         checkpoint_path = os.path.join(args.checkpoint_dir, f'{args.checkpoint_name}.pt')
     else:
+        modalities_str = '+'.join(args.modalities)
         checkpoint_path = os.path.join(args.checkpoint_dir,
-                                       f'evan_{args.dataset}_stage0_{args.modality}_{timestamp}.pt')
+                                       f'evan_{args.dataset}_stage0_{modalities_str}_{timestamp}.pt')
 
     train_metric, test_metric, best_val_metric, best_val_test_metric = single_modality_training_loop(
         model, train1_loader, test_loader, device,
         modality_bands_dict, criterion, optimizer, args.epochs,
-        modality=args.modality,
+        modality=primary_modality,
         phase_name="Stage 0",
         use_wandb=bool(args.wandb_project),
         wandb_prefix='stage0',
@@ -250,7 +264,7 @@ def main():
         if not file_exists:
             writer.writerow(fieldnames)
         writer.writerow([
-            args.dataset, args.model, args.modality, args.train_mode,
+            args.dataset, args.model, '+'.join(args.modalities), args.train_mode,
             args.tz_lora_rank, args.tz_modality_specific_layer_augmenter,
             args.lr, trainable_params, args.epochs,
             f"{best_val_test_metric:.2f}" if best_val_test_metric is not None else "",
@@ -269,20 +283,26 @@ if __name__ == '__main__':
 # DRYRUN examples
 """
 # EuroSAT RGB (original behaviour)
-python -u train_stage0.py --dataset eurosat --modality rgb --epochs 5 --checkpoint_name eurosat_rgb_s0
+python -u train_stage0.py --dataset eurosat --modalities rgb --epochs 5 --checkpoint_name eurosat_rgb_s0
 
 # BEN-v2 S2 (random init)
-python -u train_stage0.py --dataset benv2 --modality s2 --epochs 2 --checkpoint_name benv2_s2_s0
+python -u train_stage0.py --dataset benv2 --modalities s2 --epochs 2 --checkpoint_name benv2_s2_s0
 
 # BEN-v2 S2 (init from torchgeo S2-DINO)
-python -u train_stage0.py --dataset benv2 --modality s2 --epochs 2 --checkpoint_name benv2_s2dino_s0 --use_s2dino_weights
+python -u train_stage0.py --dataset benv2 --modalities s2 --epochs 2 --checkpoint_name benv2_s2dino_s0 --use_s2dino_weights
 
 # BEN-v2 S1 (start from S1 instead)
-python -u train_stage0.py --dataset benv2 --modality s1 --epochs 2 --checkpoint_name benv2_s1_s0
+python -u train_stage0.py --dataset benv2 --modalities s1 --epochs 2 --checkpoint_name benv2_s1_s0
+
+# BEN-v2 S2 + S1 together
+python -u train_stage0.py --dataset benv2 --modalities s2 s1 --epochs 2 --checkpoint_name benv2_s2s1_s0
+
+# BEN-v2 S2_RGB sub-band only
+python -u train_stage0.py --dataset benv2 --modalities s2_rgb --epochs 2 --checkpoint_name benv2_s2rgb_s0
 
 # PASTIS S2
-python -u train_stage0.py --dataset pastis --modality s2 --epochs 2 --batch_size 16 --checkpoint_name pastis_s2_s0 --num_workers 4 --use_dino_weights 
-python -u train_stage0.py --dataset pastis --modality s2 --epochs 16 --batch_size 16 --checkpoint_name pastis_s2_s0 --num_workers 4  --use_s2dino_weights
+python -u train_stage0.py --dataset pastis --modalities s2 --epochs 2 --batch_size 16 --checkpoint_name pastis_s2_s0 --num_workers 4 --use_dino_weights
+python -u train_stage0.py --dataset pastis --modalities s2 --epochs 16 --batch_size 16 --checkpoint_name pastis_s2_s0 --num_workers 4 --use_s2dino_weights
 
 # PASTIS RGB (init from DINOv3, 3-channel B04/B03/B02 subset of S2)
 python -u train_stage0.py --dataset pastis --modality rgb --epochs 16 --batch_size 16 --checkpoint_name pastis_rgb_s0 --num_workers 4 --use_dino_weights
