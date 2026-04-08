@@ -383,12 +383,14 @@ def evaluate_multimodal(
     (agreement = student pred matches teacher pred).
 
     If with_labels is True (loader has ground-truth labels), computes accuracy/mAP for all paths.
-    If with_labels is False, only teacher-agreement metrics are computed (needs teacher).
+    If with_labels is False, only peeking-agreement metrics are computed.
 
     Returns dict with keys present based on what was computed:
       'transfer_acc', 'peeking_acc', 'addition_acc', 'ens_acc'  (with_labels=True)
-      'transfer_agree', 'addition_agree'                         (teacher provided)
+      'transfer_agree', 'addition_agree'                         (always; agreement with peeking path)
     'ens_acc' is the ensemble of peeking+transfer (averaged logits before argmax).
+    'transfer_agree'/'addition_agree': fraction of samples where transfer/addition predictions match
+    peeking predictions. Used with val1 peeking accuracy to lower-bound transfer/addition performance.
     All values are percentages.
     """
     model.eval()
@@ -397,8 +399,12 @@ def evaluate_multimodal(
 
     newmod_modalities = list(newmod_modalities)
     all_mods = list(all_modalities)
-    hallucinated_newmod = set(newmod_modalities) if use_mfla else None
-    hallucinated_startmod = {starting_modality} if use_mfla else None
+    is_cross = evan.intermediate_projector_type == "cross"
+    # Cross projector outputs [B, 1+n_patches, D] (no storage tokens) — fusion must
+    # always know which modalities are hallucinated so it uses the right prefix size.
+    # use_mfla controls gradient routing (set_mfla_training_mode), not this flag.
+    hallucinated_newmod = set(newmod_modalities) if (is_cross or use_mfla) else None
+    hallucinated_startmod = {starting_modality} if (is_cross or use_mfla) else None
 
     # Label-based accumulators
     total = 0
@@ -425,12 +431,6 @@ def evaluate_multimodal(
 
             # Single modality-specific forward pass
             intermediate = evan.forward_modality_specific_features(mm_batch)
-
-            # Teacher predictions (once per batch)
-            teacher_preds = None
-            if teacher is not None:
-                teacher_batch = {starting_modality: mm_batch[starting_modality]}
-                teacher_preds = teacher(teacher_batch).argmax(dim=1)  # [B] or [B,H,W]
 
             # Labels (if available)
             labels = None
@@ -496,19 +496,20 @@ def evaluate_multimodal(
                     addition_correct += (addition_sv.argmax(1) == labels).sum().item()
                     ens_correct += (ens_sv.argmax(1) == labels).sum().item()
 
-            # Accumulate teacher agreement
-            if teacher_preds is not None:
-                if segmentation:
-                    # pixel-level agreement, count valid (non-ignored) pixels
-                    valid = teacher_preds != ignore_index
-                    transfer_agree += (transfer_sv.argmax(1) == teacher_preds)[valid].sum().item()
-                    addition_agree += (addition_sv.argmax(1) == teacher_preds)[valid].sum().item()
-                    total_pixels += valid.sum().item()
-                else:
-                    transfer_agree += (transfer_sv.argmax(1) == teacher_preds).sum().item()
-                    addition_agree += (addition_sv.argmax(1) == teacher_preds).sum().item()
-                if not with_labels:
-                    total += teacher_preds.shape[0]
+            # Accumulate peeking agreement: how often transfer/addition match peeking
+            # (peeking is the ground-truth anchor via val_peek on labeled val1)
+            if not with_labels:
+                total += peeking_sv.shape[0]
+            peek_preds = peeking_sv.argmax(1)
+            if segmentation:
+                # exclude pixels where peeking predicts the ignored class
+                valid = peek_preds != ignore_index
+                transfer_agree += (transfer_sv.argmax(1) == peek_preds)[valid].sum().item()
+                addition_agree += (addition_sv.argmax(1) == peek_preds)[valid].sum().item()
+                total_pixels += valid.sum().item()
+            else:
+                transfer_agree += (transfer_sv.argmax(1) == peek_preds).sum().item()
+                addition_agree += (addition_sv.argmax(1) == peek_preds).sum().item()
 
     results = {}
     if with_labels:
@@ -530,10 +531,9 @@ def evaluate_multimodal(
             results['transfer_acc'] = 100.0 * transfer_correct / total
             results['addition_acc'] = 100.0 * addition_correct / total
             results['ens_acc'] = 100.0 * ens_correct / total
-    if teacher is not None:
-        denom = total_pixels if segmentation else total
-        results['transfer_agree'] = 100.0 * transfer_agree / denom if denom > 0 else 0.0
-        results['addition_agree'] = 100.0 * addition_agree / denom if denom > 0 else 0.0
+    denom = total_pixels if segmentation else total
+    results['transfer_agree'] = 100.0 * transfer_agree / denom if denom > 0 else 0.0
+    results['addition_agree'] = 100.0 * addition_agree / denom if denom > 0 else 0.0
     return results
 
 
@@ -579,7 +579,8 @@ def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dic
                 (starting_modality,), tuple(newmod_modalities)
             )
 
-            hallucinated_mods = set(newmod_modalities) if use_mfla else None
+            is_cross = evan.intermediate_projector_type == "cross"
+            hallucinated_mods = set(newmod_modalities) if (is_cross or use_mfla) else None
             fused_output = evan.forward_fusion_from_modality_features(
                 fusion_input,
                 hallucinated_modalities=hallucinated_mods
@@ -653,7 +654,7 @@ def compute_teacher_agreement(model, teacher, evan, val_loader, device, modality
             )
 
             # Forward through fusion + classifier (transfer: starting_mod is hallucinated)
-            hallucinated_mods = {starting_modality} if use_mfla else None
+            hallucinated_mods = {starting_modality} if (evan.intermediate_projector_type == "cross" or use_mfla) else None
             fused_output = evan.forward_fusion_from_modality_features(
                 fusion_input,
                 hallucinated_modalities=hallucinated_mods
@@ -797,7 +798,7 @@ def _compute_ce_loss(student_fused, labels, model, ce_fn, segmentation, device):
 
 def _labeled_batch_step(
     batch, evan, model, teacher_classifier, latent_projectors,
-    active_losses, starting_modality, newmod_list, all_modalities,
+    active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
     modality_bands_dict, mse_fn, ce_fn, use_mfla,
     multilabel, label_key, segmentation, device,
 ):
@@ -819,13 +820,20 @@ def _labeled_batch_step(
         key = f"{starting_modality}_to_{newmod}"
         prefusion_features[newmod] = evan._project_sequence(src_seq_norm, key, newmod)
 
-    hallucinated_mods = set(newmod_list) if use_mfla else set()
+    # Cross projector outputs [B, 1+n_patches, D] (no storage tokens) — fusion must
+    # know these are hallucinated so it uses n_prefix=1 instead of 1+n_storage.
+    # Self projector outputs the full sequence, so no special handling needed.
+    if evan.intermediate_projector_type == "cross":
+        hallucinated_mods = set(newmod_list)
+    else:
+        hallucinated_mods = set()
+
     if use_mfla:
         set_mfla_training_mode(evan, hallucinated_mods, all_modalities)
 
     student_fused = evan.forward_fusion_from_modality_features(
         prefusion_features,
-        hallucinated_modalities=hallucinated_mods if use_mfla else None
+        hallucinated_modalities=hallucinated_mods,
     )
 
     total_loss = torch.tensor(0.0, device=device)
@@ -840,22 +848,22 @@ def _labeled_batch_step(
             latent_reconstruct_modalities=[starting_modality],
             mse_fn=mse_fn, device=device,
         )
-        total_loss = total_loss + latent_loss
+        total_loss = total_loss + loss_weights['latent'] * latent_loss
         latent_loss_val = latent_loss.item()
 
     if 'ce' in active_losses:
         ce_loss = _compute_ce_loss(student_fused, labels, model, ce_fn, segmentation, device)
-        total_loss = total_loss + ce_loss
+        total_loss = total_loss + loss_weights['ce'] * ce_loss
         ce_loss_val = ce_loss.item()
 
-    return total_loss, {'mae': 0.0, 'latent': latent_loss_val, 'prefusion': 0.0, 'distill': 0.0, 'entr': 0.0, 'ce': ce_loss_val}
+    return total_loss, {'mae': 0.0, 'latent': latent_loss_val, 'prefusion': 0.0, 'distill': 0.0, 'ce': ce_loss_val}
 
 
 def _unlabeled_batch_step(
     batch, evan, model, teacher_classifier, latent_projectors,
-    mae_decoders, active_losses, starting_modality, newmod_list, all_modalities,
+    mae_decoders, active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
     latent_reconstruct_modalities, mae_modalities, modality_bands_dict,
-    mae_mask_ratio, modality_dropout,entr_frequency, mse_fn,
+    mae_mask_ratio, modality_dropout, mse_fn,
     distillation_temperature, use_mfla, teacher_is_peeking,
     effective_labeled_freq, patch_size, segmentation, device,
     label_key='label', ignore_index=-100,
@@ -882,7 +890,7 @@ def _unlabeled_batch_step(
                 _src_norm = F.layer_norm(_src, [_src.shape[-1]])
                 key = f"{starting_modality}_to_{_newmod}"
                 t_prefusion[_newmod] = teacher_classifier.evan._project_sequence(_src_norm, key, _newmod)
-            _hal_mods = set(newmod_list) if use_mfla else None
+            _hal_mods = set(newmod_list) if (teacher_classifier.evan.intermediate_projector_type == "cross" or use_mfla) else None
             teacher_out = teacher_classifier.evan.forward_fusion_from_modality_features(
                 t_prefusion, hallucinated_modalities=_hal_mods
             )
@@ -918,11 +926,10 @@ def _unlabeled_batch_step(
         hallucinated_modalities=dropped_mods | (hallucinated_mods if use_mfla else set())
     )
 
-    total_loss = prefusion_loss
+    total_loss = loss_weights['prefusion'] * prefusion_loss
     mae_loss_val = 0.0
     latent_loss_val = 0.0
     distill_loss_val = 0.0
-    entr_loss_val = 0.0
 
     if 'mae' in active_losses:
         for mod in mae_modalities:
@@ -934,7 +941,7 @@ def _unlabeled_batch_step(
             target_img = full_multimodal_input[mod]
             target_patches = patchify(target_img, patch_size)
             mae_loss = mae_reconstruction_loss(pred_pixels, target_patches, mask_float)
-            total_loss = total_loss + mae_loss
+            total_loss = total_loss + loss_weights['mae'] * mae_loss
             mae_loss_val += mae_loss.item()
 
     if 'latent' in active_losses:
@@ -943,21 +950,16 @@ def _unlabeled_batch_step(
             latent_reconstruct_modalities=latent_reconstruct_modalities,
             mse_fn=mse_fn, device=device,
         )
-        total_loss = total_loss + latent_loss
+        total_loss = total_loss + loss_weights['latent'] * latent_loss
         latent_loss_val = latent_loss.item()
 
     if 'distill' in active_losses:
         distill_loss = torch.tensor(0.0, device=device)
-        entr_loss = torch.tensor(0.0, device=device)
         distill_count = 0
-        entr_count = 0
         for mod in student_fused.keys():
             if segmentation and model.modality_decoders is not None and mod in model.modality_decoders:
                 patch_tokens = student_fused[mod]['x_norm_patchtokens']
                 mod_logits = model._apply_decoder(model.modality_decoders[mod], patch_tokens)
-                if 'entr' in active_losses:
-                    entr_loss = entr_loss + entropy_loss(mod_logits)
-                    entr_count += 1
                 distill_loss = distill_loss + distillation_loss(
                     mod_logits, teacher_logits, distillation_temperature,
                     ignore_index=ignore_index, labels=seg_labels,
@@ -966,30 +968,20 @@ def _unlabeled_batch_step(
             elif not segmentation and mod in model.modality_classifiers:
                 cls_token = student_fused[mod]['x_norm_clstoken']
                 mod_logits = model.modality_classifiers[mod](cls_token)
-                if 'entr' in active_losses:
-                    entr_loss = entr_loss + entropy_loss(mod_logits)
-                    entr_count += 1
                 distill_loss = distill_loss + distillation_loss(mod_logits, teacher_logits, distillation_temperature)
                 distill_count += 1
         if distill_count > 0:
             distill_loss = distill_loss / distill_count
-        if entr_count > 0:
-            entr_loss = entr_loss / entr_count
-        total_loss = total_loss + distill_loss + entr_loss
+        total_loss = total_loss + loss_weights['distill'] * distill_loss
         distill_loss_val = distill_loss.item()
-        entr_loss_val = entr_loss.item()
 
     masking_info = {'modality_dropped': modality_dropped, 'mae_mask_ratio': mae_mask_ratio}
     return (
         total_loss,
-        {'mae': mae_loss_val, 'latent': latent_loss_val, 'prefusion': prefusion_loss_val, 'distill': distill_loss_val, 'entr': entr_loss_val, 'ce': 0.0},
+        {'mae': mae_loss_val, 'latent': latent_loss_val, 'prefusion': prefusion_loss_val, 'distill': distill_loss_val, 'ce': 0.0},
         masking_info,
     )
 
-def entropy_loss(x):
-    b = F.softmax(x, dim=1) * F.log_softmax(x, dim=1)
-    return -b.sum()
-        
 def _run_periodic_eval(
     epoch, model, evan, teacher_classifier,
     test_loader, val_unlabeled_loader, val_labeled_loader,
@@ -997,9 +989,8 @@ def _run_periodic_eval(
     use_mfla, multilabel, label_key, segmentation, num_classes, ignore_index, device,
     checkpoint_selection, val_weights, best_val_metric, best_checkpoint_state,
     best_checkpoints, mae_decoders, latent_projectors,
-    teacher_val_acc, teacher_is_peeking, replace_teacher_w_peek,
 ):
-    """Run periodic eval, update checkpoints, optionally replace teacher. Returns updated state."""
+    """Run periodic eval, update checkpoints. Returns updated state."""
     metric_label = "mIoU" if segmentation else ("mAP" if multilabel else "accuracy")
 
     test_results = evaluate_multimodal(
@@ -1039,14 +1030,13 @@ def _run_periodic_eval(
             starting_modality=starting_modality,
             newmod_modalities=newmod_list,
             all_modalities=all_modalities,
-            teacher=teacher_classifier,
             use_mfla=use_mfla, with_labels=False, desc="Val (multimodal)",
             segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
         )
-        val_metrics['teacher_agreement'] = val_mm_results['transfer_agree']
+        val_metrics['transfer_agreement'] = val_mm_results['transfer_agree']
         val_metrics['addition'] = val_mm_results['addition_agree']
-        print(f"  Val transfer agreement: {val_metrics['teacher_agreement']:.2f}%")
-        print(f"  Val addition agreement: {val_metrics['addition']:.2f}%")
+        print(f"  Val transfer agreement (with peeking): {val_metrics['transfer_agreement']:.2f}%")
+        print(f"  Val addition agreement (with peeking): {val_metrics['addition']:.2f}%")
 
     if val_labeled_loader is not None:
         peeking_acc = compute_peeking_accuracy(
@@ -1060,10 +1050,21 @@ def _run_periodic_eval(
         val_metrics['peeking'] = peeking_acc
         print(f"  Val peeking {metric_label}: {peeking_acc:.2f}%")
 
-    if 'peeking' in val_metrics and 'teacher_agreement' in val_metrics:
-        ens_addition = (val_metrics['peeking'] + val_metrics['teacher_agreement']) / 2
+    # transfer_score = val_peek(val1) * transfer_agree_with_peeking(val2) / 100
+    # addition_score = val_peek(val1) * addition_agree_with_peeking(val2) / 100
+    # Lower-bounds transfer/addition: if peeking is accurate AND transfer/addition agrees with
+    # peeking, both paths must be doing well.
+    if 'peeking' in val_metrics and 'transfer_agreement' in val_metrics:
+        val_metrics['transfer_score'] = val_metrics['peeking'] * val_metrics['transfer_agreement'] / 100.0
+        print(f"  Val transfer_score (peek * transfer_agree / 100): {val_metrics['transfer_score']:.2f}%")
+    if 'peeking' in val_metrics and 'addition' in val_metrics:
+        val_metrics['addition_score'] = val_metrics['peeking'] * val_metrics['addition'] / 100.0
+        print(f"  Val addition_score (peek * addition_agree / 100): {val_metrics['addition_score']:.2f}%")
+
+    if 'transfer_score' in val_metrics and 'addition_score' in val_metrics:
+        ens_addition = (val_metrics['transfer_score'] + val_metrics['addition_score']) / 2
         val_metrics['ens_addition'] = ens_addition
-        print(f"  Val ens_addition (peeking+transfer)/2: {ens_addition:.2f}%")
+        print(f"  Val ens_addition (transfer_score + addition_score)/2: {ens_addition:.2f}%")
 
     if checkpoint_selection == 'combined':
         current_metric = sum(val_weights.get(k, 0) * val_metrics.get(k, 0) for k in val_weights)
@@ -1082,9 +1083,9 @@ def _run_periodic_eval(
         print(f"  >> New best model checkpoint (val {checkpoint_selection}: {current_metric:.2f})")
 
     checkpoint_criteria = {
-        'best_transfer':     'teacher_agreement',
+        'best_transfer':     'transfer_score',
         'best_peeking':      'peeking',
-        'best_addition':     'addition',
+        'best_addition':     'addition_score',
         'best_ens_addition': 'ens_addition',
     }
     new_records = []
@@ -1114,14 +1115,16 @@ def _run_periodic_eval(
 
     wandb.log({
         'val/peeking_acc': val_metrics.get('peeking', 0),
-        'val/teacher_agreement': val_metrics.get('teacher_agreement', 0),
+        'val/transfer_agreement': val_metrics.get('transfer_agreement', 0),
         'val/addition_agreement': val_metrics.get('addition', 0),
+        'val/transfer_score': val_metrics.get('transfer_score', 0),
+        'val/addition_score': val_metrics.get('addition_score', 0),
         'val/ens_addition': val_metrics.get('ens_addition', 0),
         'val/combined': sum(val_weights.get(k, 0) * val_metrics.get(k, 0) for k in val_weights),
         'epoch': epoch + 1
     })
 
-    return best_val_metric, best_checkpoint_state, best_checkpoints, teacher_classifier, teacher_val_acc, teacher_is_peeking
+    return best_val_metric, best_checkpoint_state, best_checkpoints, teacher_classifier
 
 
 # SHOT_TRAINING!
@@ -1138,12 +1141,13 @@ def train_shot(
     labeled_frequency: float = 0.0,
     labeled_start_fraction: float = 0.0,
     active_losses: list[str] = None,
+    loss_weights: dict = None,              # Per-loss scaling: {'mae': 0.5, ...}, default all 1.0
     weight_decay: float = 0.01,
     # Validation-based checkpoint selection
-    val_unlabeled_loader=None,          # val2 (unlabeled multimodal) for teacher agreement
+    val_unlabeled_loader=None,          # val2 (unlabeled multimodal) for peeking agreement
     val_labeled_loader=None,            # val1 (labeled monomodal) for peeking accuracy
-    checkpoint_selection='combined',    # 'combined', 'peeking', 'teacher_agreement'
-    val_weights=None,                   # {'peeking': 0.5, 'teacher_agreement': 0.5}
+    checkpoint_selection='combined',    # 'combined', 'peeking', 'transfer_score', 'addition_score'
+    val_weights=None,                   # {'peeking': 0.5, 'transfer_score': 0.5}
     # MFLA training options
     use_mfla: bool = False,             # Enable MFLA training for hallucinated modalities
     warmup_epochs: int = 1,             # Linear LR warmup epochs for cosine scheduler
@@ -1154,7 +1158,6 @@ def train_shot(
     num_classes: int = None,            # Required when segmentation=True, for mIoU computation
     ignore_index: int = -100,           # Label value to ignore in mIoU (e.g. 19 for PASTIS void_label)
     # Teacher replacement options
-    replace_teacher_w_peek: bool = False,       # When teacher is replaced by student, use peeking mode for distillation
     # External teacher (e.g. PanopticonTeacher) — skip deepcopy from student when provided
     teacher_classifier=None,
     teacher_latent_dim: int = None,             # Teacher embed_dim (e.g. 768 for Panopticon) if != student embed_dim
@@ -1193,12 +1196,19 @@ def train_shot(
         print(f"    - Unlabeled batches (train2): MAE + latent + pre-fusion + distillation losses")
         print(f"    - Labeled batches (train1): CE + latent losses (newmod hallucinated)")
 
-    all_loss_names = ['mae', 'latent', 'prefusion', 'distill', 'entr','ce']
+    all_loss_names = ['mae', 'latent', 'prefusion', 'distill', 'ce']
     if active_losses is None:
         active_losses = all_loss_names
     elif set(active_losses) - set(all_loss_names):
         raise ValueError(f"Invalid loss names: {set(active_losses) - set(all_loss_names)}. Valid: {all_loss_names}")
     print(f"  Active losses: {active_losses}")
+
+    _default_loss_weights = {k: 1.0 for k in all_loss_names}
+    if loss_weights is None:
+        loss_weights = _default_loss_weights
+    else:
+        loss_weights = {**_default_loss_weights, **loss_weights}
+    print(f"  Loss weights: {loss_weights}")
 
     all_modalities = list(set(mae_modalities + latent_reconstruct_modalities))
 
@@ -1263,18 +1273,18 @@ def train_shot(
         params += list(latent_projectors.parameters())
     print(f"Total trainable parameters: {sum(p.numel() for p in params):,}")
 
-    optimizer = torch.optim.AdamW(params, lr=args.ssl_lr, weight_decay=weight_decay)
+    optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=weight_decay)
     scheduler = make_scheduler(optimizer, args.epochs, warmup_epochs=warmup_epochs)
     mse_fn = nn.MSELoss()
 
     starting_modality = evan.starting_modality
     newmod_list = [m for m in all_modalities if m != starting_modality]
-    ce_fn = nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss()
+    ce_fn = nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss(ignore_index=ignore_index)
 
     best_val_metric = -float('inf')
     best_checkpoint_state = None
     if val_weights is None:
-        val_weights = {'peeking': 0.5, 'teacher_agreement': 0.5}
+        val_weights = {'peeking': 0.5, 'transfer_score': 0.5}
     best_checkpoints = {
         'best_transfer':     {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
         'best_peeking':      {'metric': -float('inf'), 'epoch': None, 'test_accs': None},
@@ -1284,18 +1294,20 @@ def train_shot(
 
     teacher_is_peeking = False
     teacher_val_acc = None
-    # for loader,set_name in zip([val_labeled_loader, test_loader],["val(labeled)","test"]):
-    #     if loader is not None:
-    #         from train_utils import evaluate as _eval_fn
-    #         _, teacher_val_acc = _eval_fn(
-    #             teacher_classifier, loader,
-    #             nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss(),
-    #             device, modality_bands_dict, modalities_to_use=(starting_modality,),
-    #             multilabel=multilabel, label_key=label_key,
-    #             segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
-    #         )
-    #         _metric_label = "mIoU" if segmentation else ("mAP" if multilabel else "accuracy")
-    #         print(f"\nTeacher baseline {set_name} {_metric_label} (starting modality only): {teacher_val_acc:.2f}%")
+    teacher_baselines = {}
+    for loader, set_name in zip([val_labeled_loader, test_loader], ["val(labeled)", "test"]):
+        if loader is not None:
+            from train_utils import evaluate as _eval_fn
+            _, teacher_val_acc = _eval_fn(
+                teacher_classifier, loader,
+                nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss(ignore_index=ignore_index),
+                device, modality_bands_dict, modalities_to_use=(starting_modality,),
+                multilabel=multilabel, label_key=label_key,
+                segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
+            )
+            _metric_label = "mIoU" if segmentation else ("mAP" if multilabel else "accuracy")
+            print(f"\nTeacher baseline {set_name} {_metric_label} (starting modality only): {teacher_val_acc:.2f}%")
+            teacher_baselines[set_name] = teacher_val_acc
 
     global_step = 0
     for epoch in range(args.epochs):
@@ -1307,7 +1319,7 @@ def train_shot(
 
         effective_labeled_freq = labeled_frequency if epoch >= labeled_start_epoch else 0.0
 
-        epoch_losses = {'total': 0.0, 'mae': 0.0, 'latent': 0.0, 'prefusion': 0.0, 'distill': 0.0, 'entr':0.0, 'ce': 0.0}
+        epoch_losses = {'total': 0.0, 'mae': 0.0, 'latent': 0.0, 'prefusion': 0.0, 'distill': 0.0, 'ce': 0.0}
         train_count = labeled_count = unlabeled_count = 0
         train_drop_count = {mod: 0 for mod in all_modalities}
         train_token_mask_sum = {mod: 0.0 for mod in all_modalities}
@@ -1328,7 +1340,7 @@ def train_shot(
             if is_labeled:
                 total_loss, loss_dict = _labeled_batch_step(
                     batch, evan, model, teacher_classifier, latent_projectors,
-                    active_losses, starting_modality, newmod_list, all_modalities,
+                    active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
                     modality_bands_dict, mse_fn, ce_fn, use_mfla,
                     multilabel, label_key, segmentation, device,
                 )
@@ -1336,9 +1348,9 @@ def train_shot(
             else:
                 total_loss, loss_dict, masking_info = _unlabeled_batch_step(
                     batch, evan, model, teacher_classifier, latent_projectors,
-                    mae_decoders, active_losses, starting_modality, newmod_list, all_modalities,
+                    mae_decoders, active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
                     latent_reconstruct_modalities, mae_modalities, modality_bands_dict,
-                    args.mae_mask_ratio, args.modality_dropout, args.entr_frequency, mse_fn,
+                    args.mae_mask_ratio, args.modality_dropout, mse_fn,
                     distillation_temperature, use_mfla, teacher_is_peeking,
                     effective_labeled_freq, patch_size, segmentation, device,
                     label_key=label_key, ignore_index=ignore_index,
@@ -1357,7 +1369,7 @@ def train_shot(
             optimizer.step()
 
             epoch_losses['total'] += total_loss.item()
-            for k in ('mae', 'latent', 'prefusion', 'distill', 'entr', 'ce'):
+            for k in ('mae', 'latent', 'prefusion', 'distill', 'ce'):
                 epoch_losses[k] += loss_dict[k]
             train_count += 1
             global_step += 1
@@ -1368,7 +1380,6 @@ def train_shot(
                 'latent': f"{loss_dict['latent']:.4f}",
                 'pre_fus': f"{loss_dict['prefusion']:.4f}",
                 'distill': f"{loss_dict['distill']:.4f}",
-                'entr': f"{loss_dict['entr']:.4f}",
                 'ce': f"{loss_dict['ce']:.4f}",
                 'L/U': f'{labeled_count}/{unlabeled_count}'
             })
@@ -1394,14 +1405,13 @@ def train_shot(
         avg_latent = epoch_losses['latent'] / train_count
         avg_prefusion = epoch_losses['prefusion'] / max(unlabeled_count, 1)
         avg_distill = epoch_losses['distill'] / max(unlabeled_count, 1)
-        avg_entr = epoch_losses['entr'] / max(unlabeled_count, 1)
         avg_ce = epoch_losses['ce'] / max(labeled_count, 1)
         labeled_ratio = labeled_count / train_count if train_count > 0 else 0
 
         scheduler.step()
         epoch_time = time.time() - epoch_start
         print(f"\nEpoch {epoch+1}/{args.epochs} ({epoch_time:.1f}s):")
-        print(f"  Train - Total: {avg_total:.4f}, MAE: {avg_mae:.4f}, Latent: {avg_latent:.4f}, Pre-fusion: {avg_prefusion:.4f}, Distill: {avg_distill:.4f}, Entr: {avg_entr:.4f}, CE: {avg_ce:.4f}")
+        print(f"  Train - Total: {avg_total:.4f}, MAE: {avg_mae:.4f}, Latent: {avg_latent:.4f}, Pre-fusion: {avg_prefusion:.4f}, Distill: {avg_distill:.4f}, CE: {avg_ce:.4f}")
         print(f"  Batches - Labeled: {labeled_count}, Unlabeled: {unlabeled_count}, Ratio: {labeled_ratio:.2f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
 
         if eval_every_n_epochs is not None and test_loader is not None and (epoch + 1) % eval_every_n_epochs == 0:
@@ -1409,14 +1419,13 @@ def train_shot(
             model.eval()
 
             (best_val_metric, best_checkpoint_state, best_checkpoints,
-             teacher_classifier, teacher_val_acc, teacher_is_peeking) = _run_periodic_eval(
+             teacher_classifier) = _run_periodic_eval(
                 epoch, model, evan, teacher_classifier,
                 test_loader, val_unlabeled_loader, val_labeled_loader,
                 modality_bands_dict, starting_modality, newmod_list, all_modalities,
                 use_mfla, multilabel, label_key, segmentation, num_classes, ignore_index, device,
                 checkpoint_selection, val_weights, best_val_metric, best_checkpoint_state,
                 best_checkpoints, mae_decoders, latent_projectors,
-                teacher_val_acc, teacher_is_peeking, replace_teacher_w_peek,
             )
 
             model.train()
@@ -1450,4 +1459,4 @@ def train_shot(
             print(f"  test/ens: {test_accs.get('ens', 0):.2f}%")
 
     print("\n=== Phase 2 (Fusion MAE Training) complete ===")
-    return trainable_total, best_checkpoints, best_checkpoint_summary
+    return trainable_total, best_checkpoints, best_checkpoint_summary, teacher_baselines

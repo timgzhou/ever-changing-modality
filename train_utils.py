@@ -462,7 +462,7 @@ class Trainer:
                     self.model, teacher_model, val2_loader, self.device,
                     student_modality_bands_dict, teacher_modality_bands_dict,
                     student_modality, teacher_modality, label_key,
-                    segmentation=segmentation,
+                    segmentation=segmentation, ignore_index=ignore_index,
                 )
                 print(f"  Val2 teacher-agreement: {agreement:.2f}%")
                 if best_checkpoint_path is not None and agreement > best_agreement:
@@ -588,6 +588,7 @@ def _compute_teacher_agreement(
     student_modality_bands_dict, teacher_modality_bands_dict,
     student_modality, teacher_modality, label_key,
     segmentation: bool = False,
+    ignore_index: int = -100,
 ) -> float:
     """
     Compute fraction of val2 samples where student prediction matches teacher prediction.
@@ -617,9 +618,10 @@ def _compute_teacher_agreement(
             if segmentation:
                 s_preds = student_logits.argmax(dim=1)
                 t_preds = teacher_logits.argmax(dim=1)
-                # agreement on non-ignored pixels
-                agree += (s_preds == t_preds).sum().item()
-                total += s_preds.numel()
+                # exclude pixels where teacher predicts the ignored class
+                valid = t_preds != ignore_index
+                agree += (s_preds == t_preds)[valid].sum().item()
+                total += valid.sum().item()
             else:
                 s_preds = student_logits.argmax(dim=1)
                 t_preds = teacher_logits.argmax(dim=1)

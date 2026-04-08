@@ -424,13 +424,16 @@ class EVAN(nn.Module):
             new_key = new_key.replace('.layer_scale1.lambda1', '.ls1.gamma')
             new_key = new_key.replace('.layer_scale2.lambda1', '.ls2.gamma')
             # EVAN multi-modality compatibility: Remap patch_embed.* to patch_embedders.<starting_modality>.*
-            # Only copy patch embedder weights if starting_modality is 'rgb' (DINO was trained on RGB)
-            # For other modalities, skip patch embedder weights (random init instead)
+            # DINO patch embedder is 3-channel RGB; copy weights only when starting modality
+            # is also 3-channel RGB (rgb, s2_rgb, or any *_rgb variant).
+            # For other modalities (s2, s1, etc.) the patch embedder must be randomly init'd.
             if 'patch_embed.' in new_key:
-                if self.starting_modality == 'rgb':
+                is_rgb_modality = (self.starting_modality == 'rgb' or
+                                   self.starting_modality.endswith('_rgb'))
+                if is_rgb_modality:
                     new_key = new_key.replace('patch_embed.', f'patch_embedders.{self.starting_modality}.')
                 else:
-                    continue  # Skip patch embedder weights for non-rgb starting modalities
+                    continue  # Skip patch embedder weights for non-RGB modalities
             checkpoint[new_key] = value
         # Handle QKV weight merging (HF has separate q,k,v; DINOv3 has combined qkv)
         # Find all layer indices

@@ -1,12 +1,11 @@
 dataset,model_type,modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,test_metric,metric_name,saved_checkpoint,global_rep
-dfc2020,evan_small,s2_rgb,fft,32,fft,0.0001,21604232,2,28.70,mIoU,checkpoints/dfc2020_s2rgb_s0.pt,clstoken
-dfc2020,evan_small,s2_rgb,fft,32,fft,0.0001,21604232,2,40.06,mIoU,checkpoints/dfc2020_s2rgb_s0.pt,clstoken
-dfc2020,evan_small,s2_rgb,fft,32,fft,0.0001,21604232,8,36.08,mIoU,checkpoints/dfc2020_s2rgb_s0.pt,clstoken
 dfc2020,evan_small,s1+s2,fft,32,fft,0.0001,28112264,16,40.46,mIoU,checkpoints/dfc2020_s1s2_randominit_sft.pt,clstoken
-dfc2020,evan_small,s2,fft,32,fft,0.0001,22587272,16,37.28,mIoU,checkpoints/dfc2020_s2_randominit_sft.pt,clstoken
 dfc2020,evan_small,s1+s2,fft,32,fft,0.0001,28112264,16,44.96,mIoU,checkpoints/dfc2020_s1s2_dinov3init_sft.pt,clstoken
+dfc2020,evan_small,s2,fft,32,fft,0.0001,22587272,16,37.28,mIoU,checkpoints/dfc2020_s2_randominit_sft.pt,clstoken
 dfc2020,evan_small,s2,fft,32,fft,0.0001,22587272,16,38.35,mIoU,checkpoints/dfc2020_s2_dinov3init_sft.pt,clstoken
 dfc2020,evan_small,s2,fft,32,fft,0.0001,22578056,16,45.67,mIoU,checkpoints/dfc2020_s2_dino_s2dinoinit_sft.pt,clstoken
 dfc2020,evan_small,s1,fft,32,fft,0.0001,21505928,16,40.71,mIoU,checkpoints/dfc2020_s1_randominit_sft.pt,clstoken
 dfc2020,evan_small,s1,fft,32,fft,0.0001,21505928,16,40.90,mIoU,checkpoints/dfc2020_s1_dinov3init_sft.pt,clstoken
 dfc2020,evan_small,s2_rgb,fft,32,fft,0.0001,21604232,16,35.27,mIoU,checkpoints/dfc2020_s2rgb_randominit_sft.pt,clstoken
+dfc2020,evan_small,s2_rgb,fft,32,fft,0.0001,21604232,16,36.63,mIoU,checkpoints/dfc2020_s2rgb_dinov3init_sft.pt,clstoken
+dfc2020,evan_small,s2_rgb,fft,32,fft,0.0001,21604232,16,45.74,mIoU,checkpoints/dfc2020_s2rgb_dinov3init_sft.pt,clstoken

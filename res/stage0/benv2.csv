@@ -6,3 +6,5 @@ benv2,evan_small,s2,fft,32,fft,0.0001,22483987,16,61.83,mAP,checkpoints/benv2_s2
 benv2,evan_small,s2,fft,32,fft,0.0001,22493203,16,59.58,mAP,checkpoints/benv2_s2_dinov3init_sft.pt,clstoken
 benv2,evan_small,s1,fft,32,fft,0.0001,21510163,16,41.99,mAP,checkpoints/benv2_s1_randominit_sft.pt,clstoken
 benv2,evan_small,s1,fft,32,fft,0.0001,21510163,16,48.31,mAP,checkpoints/benv2_s1_dinov3init_sft.pt,clstoken
+benv2,evan_small,s2_rgb,fft,32,fft,0.0001,21608467,16,47.55,mAP,checkpoints/benv2_s2rgb_randominit_sft.pt,clstoken
+benv2,evan_small,s2_rgb,fft,32,fft,0.0001,21608467,16,52.85,mAP,checkpoints/benv2_s2rgb_dinov3init_sft.pt,clstoken

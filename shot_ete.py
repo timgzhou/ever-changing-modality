@@ -40,17 +40,19 @@ def main():
                         help='Frequency of labeled monomodal batches from train1 (0-1, default: 0.3)')
     parser.add_argument('--labeled_start_fraction', type=float, default=0.0,
                         help='Fraction of training before labeled mixing starts (0=start, 0.5=halfway, 1=never)')
-    parser.add_argument('--entr_frequency', type=float, default=0,
-                        help='Frequency of entropy minimization instead of distillation on unlabeled batches')
     parser.add_argument('--active_losses', type=str, nargs='+', default=None,
                         choices=['mae', 'latent', 'prefusion', 'distill', 'ce'],
                         help='Which losses to activate (default: all)')
+    parser.add_argument('--lambda_mae', type=float, default=1.0, help='Weight for MAE loss (default: 1.0)')
+    parser.add_argument('--lambda_latent', type=float, default=1.0, help='Weight for latent loss (default: 1.0)')
+    parser.add_argument('--lambda_prefusion', type=float, default=1.0, help='Weight for prefusion loss (default: 1.0)')
+    parser.add_argument('--lambda_distill', type=float, default=1.0, help='Weight for distillation loss (default: 1.0)')
+    parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for CE loss (default: 1.0)')
     parser.add_argument('--use_mfla', action='store_true',
                         help='Enable MFLA training for hallucinated modalities')
     parser.add_argument('--warmup_epochs', type=int, default=1,
                         help='Linear LR warmup epochs before cosine decay (default: 1)')
-    parser.add_argument('--replace_teacher_w_peek', action='store_true',
-                        help='When student peeking surpasses teacher, replace teacher and use peeking mode for distillation')
+
     parser.add_argument('--results_csv', type=str, required=True,
                         help='Path to results CSV file')
     parser.add_argument('--intermediate_projector_type', type=str, default='cross',
@@ -67,7 +69,7 @@ def main():
     parser.add_argument('--num_workers', type=int, default=2)
     parser.add_argument('--epochs', type=int, default=4)
     parser.add_argument('--eval_every_n_epochs', type=int, default=4)
-    parser.add_argument('--ssl_lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=0.001)
     parser.add_argument('--wandb_project', type=str, default='delulu-reBEN')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
@@ -87,8 +89,6 @@ def main():
     is_panopticon = not isinstance(raw_ckpt, dict) or 'config' not in raw_ckpt
 
     if is_panopticon:
-        if args.replace_teacher_w_peek:
-            parser.error("--replace_teacher_w_peek is not supported with Panopticon teacher checkpoints.")
         m = re.search(r'panopticon_lp_benv2_(\w+)_s0', args.stage0_checkpoint)
         starting_modality = m.group(1) if m else args.new_mod_group
         config = {'normalization': 'zscore', 'evan_config': {'starting_modality': starting_modality}}
@@ -192,7 +192,7 @@ def main():
             print(f"requiring mae from newmod only.")
             mae_modalities = [newmod]
 
-    trainable_total, _, best_checkpoint_summary = train_shot(
+    trainable_total, _, best_checkpoint_summary, teacher_baselines = train_shot(
         model=model,
         train_loader=train2_loader,
         device=device,
@@ -206,6 +206,11 @@ def main():
         labeled_frequency=args.labeled_frequency,
         labeled_start_fraction=args.labeled_start_fraction,
         active_losses=args.active_losses,
+        loss_weights={
+            'mae': args.lambda_mae, 'latent': args.lambda_latent,
+            'prefusion': args.lambda_prefusion, 'distill': args.lambda_distill,
+            'ce': args.lambda_ce,
+        },
         weight_decay=args.weight_decay,
         val_unlabeled_loader=val2_loader,
         val_labeled_loader=val1_loader,
@@ -216,7 +221,7 @@ def main():
         segmentation=(task_config.task_type == 'segmentation'),
         num_classes=task_config.num_classes,
         ignore_index=getattr(task_config, 'ignore_index', -100),
-        replace_teacher_w_peek=args.replace_teacher_w_peek,
+
         teacher_classifier=panopticon_teacher,
         teacher_latent_dim=teacher_latent_dim,
         teacher_n_patches=teacher_n_patches,
@@ -228,6 +233,14 @@ def main():
         metric_name = "mAP"
     else:
         metric_name = "Acc"
+
+    # Log teacher baselines
+    if teacher_baselines:
+        print(f"\n=== Teacher Baselines ({metric_name}, starting modality only) ===")
+        for set_name, acc in teacher_baselines.items():
+            print(f"  {set_name}: {acc:.2f}%")
+        wandb.log({f"teacher_baseline/{k.replace('(','').replace(')','').replace(' ','_')}": v
+                   for k, v in teacher_baselines.items()})
 
     # Metrics already computed during training at best val epoch — use those directly
     best = best_checkpoint_summary.get('best_ens_addition', best_checkpoint_summary.get('best_addition', {}))
@@ -255,8 +268,8 @@ def main():
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
     fieldnames = [
-        "dataset", "starting_modality", "new_modality", "ssl_lr", "weight_decay", "epochs",
-        "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction", "entr_frequency",
+        "dataset", "starting_modality", "new_modality", "lr", "weight_decay", "epochs",
+        "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
         "trainable_params", "active_losses", "use_mfla", "warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
         "transfer_metric", "peeking_metric", "addition_metric", "addition_ens_metric",
         "valchecked_transfer", "valchecked_peek", "valchecked_add", "valchecked_add_ens",
@@ -277,14 +290,13 @@ def main():
             args.dataset,
             starting_modality,
             newmod,
-            args.ssl_lr,
+            args.lr,
             args.weight_decay,
             args.epochs,
             args.mae_mask_ratio,
             args.modality_dropout,
             args.labeled_frequency,
             args.labeled_start_fraction,
-            args.entr_frequency,
             trainable_total,
             active_losses_str,
             args.use_mfla,

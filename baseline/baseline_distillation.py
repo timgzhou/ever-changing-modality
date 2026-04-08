@@ -17,16 +17,14 @@ from tqdm import tqdm
 
 from evan_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
-from eurosat_data_utils import get_modality_bands_dict
-from train_utils import _compute_map, compute_miou, evaluate, distillation_loss, feature_distillation_loss
+from train_utils import _compute_map, compute_miou, evaluate
 
 VALID_NEW_MODS = {
     'eurosat': ['vre', 'nir', 'swir', 'rgb'],
     'benv2':   ['s1', 's2'],
     'pastis':  ['s1', 's2'],
+    'dfc2020': ['s1', 's2', 's2_rgb'],
 }
-
-
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
@@ -215,8 +213,12 @@ def evaluate_ensemble(student_model, teacher_model, test_loader, device,
             if ensemble_mode == 'avg':
                 ensemble_logits = (student_logits + teacher_logits) / 2
             elif ensemble_mode == 'avg_softmax':
-                student_probs = F.softmax(student_logits, dim=softmax_dim)
-                teacher_probs = F.softmax(teacher_logits, dim=softmax_dim)
+                if multilabel:
+                    student_probs = torch.sigmoid(student_logits)
+                    teacher_probs = torch.sigmoid(teacher_logits)
+                else:
+                    student_probs = F.softmax(student_logits, dim=softmax_dim)
+                    teacher_probs = F.softmax(teacher_logits, dim=softmax_dim)
                 ensemble_logits = (student_probs + teacher_probs) / 2
             else:
                 raise ValueError(f"Unknown ensemble_mode: {ensemble_mode}")
@@ -550,6 +552,7 @@ def main():
             config=vars(args),
             name=f"{args.dataset}_distill_{args.distillation_mode}_{teacher_modality}->{args.modality}_{args.train_mode}"
         )
+        wandb.log({f"teacher_baseline/test_{metric_name}": teacher_test_metric})
 
     print(f"Model: {args.model}, Batch size: {args.batch_size}, LR: {args.lr}, Epochs: {args.epochs}")
 
@@ -724,7 +727,7 @@ def main():
     fieldnames = ["model_type", "teacher_modality", "student_modality", "train_mode", "tz_lora_rank",
                   "tz_modality_specific_layer_augmenter", "learning_rate", "trainable_params",
                   "epoch", "temperature", "alpha", "distillation_mode", "kl_type",
-                  "metric_name", "test_metric", "best_test_metric(oracle)", "best_epoch",
+                  "metric_name", "teacher_test_metric", "test_metric", "best_test_metric(oracle)", "best_epoch",
                   "ensemble_metric_logits", "ensemble_metric_softmax",
                   "teacher_classifier_acc", "supervised_classifier_acc", "supervised_classifier_best_acc",
                   "saved_checkpoint", "global_rep", "teacher_checkpoint"]
@@ -736,7 +739,7 @@ def main():
             args.model, teacher_modality, args.modality, args.train_mode, args.tz_lora_rank,
             args.tz_modality_specific_layer_augmenter, args.lr, trainable_params,
             num_epochs, args.temperature, args.alpha, args.distillation_mode, args.kl_type, metric_name,
-            f"{test_metric:.2f}", f"{best_test_metric:.2f}", best_epoch,
+            f"{teacher_test_metric:.2f}", f"{test_metric:.2f}", f"{best_test_metric:.2f}", best_epoch,
             f"{ensemble_metric_avg:.2f}", f"{ensemble_metric_softmax:.2f}",
             f"{teacher_classifier_acc:.2f}" if teacher_classifier_acc is not None else "",
             f"{supervised_classifier_acc:.2f}" if supervised_classifier_acc is not None else "",

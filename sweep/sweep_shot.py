@@ -7,6 +7,11 @@ Usage:
     wandb agent <sweep-id>
 """
 
+import sys
+import os
+# Ensure repo root is on the path regardless of cwd or how the process was spawned
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from shot import train_shot
 import torch
 import logging
@@ -16,19 +21,21 @@ import csv
 from datetime import datetime
 import wandb
 
-from evan_main import EVANClassifier
+from evan_main import EVANClassifier, EvanSegmenter
 from data_utils import get_loaders
-from eurosat_data_utils import get_modality_bands_dict
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 
 def main():
     # Parse fixed args that won't be swept
     parser = argparse.ArgumentParser(description='Hyperparameter sweep for SHOT training.')
+    parser.add_argument('--dataset', type=str, default='eurosat',
+                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020'],
+                        help='Dataset to train on (default: eurosat)')
     parser.add_argument('--stage0_checkpoint', type=str, required=True,
                         help='Path to stage 0 checkpoint (required)')
-    parser.add_argument('--new_mod_group', type=str, required=True, choices=['vre', 'nir', 'swir', 'rgb'],
-                        help='New modality group to train')
+    parser.add_argument('--new_mod_group', type=str, required=True,
+                        help='New modality to add (valid values depend on dataset)')
     parser.add_argument('--results_csv', type=str, default='res/sweep_results.csv',
                         help='Path to results CSV file')
     parser.add_argument('--batch_size', type=int, default=64,
@@ -47,10 +54,15 @@ def main():
     parser.add_argument('--modality_dropout', type=float, default=0.3)
     parser.add_argument('--labeled_frequency', type=float, default=0.3)
     parser.add_argument('--labeled_start_fraction', type=float, default=0.0)
-    parser.add_argument('--ssl_lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=0.01)
     parser.add_argument('--use_mae', type=lambda x: x.lower() == 'true', default=True)
     parser.add_argument('--use_latent', type=lambda x: x.lower() == 'true', default=True)
+    parser.add_argument('--lambda_mae', type=float, default=1.0)
+    parser.add_argument('--lambda_latent', type=float, default=1.0)
+    parser.add_argument('--lambda_prefusion', type=float, default=1.0)
+    parser.add_argument('--lambda_distill', type=float, default=1.0)
+    parser.add_argument('--lambda_ce', type=float, default=1.0)
     args = parser.parse_args()
 
     # Initialize wandb - sweep will override config
@@ -62,10 +74,15 @@ def main():
     modality_dropout = args.modality_dropout
     labeled_frequency = args.labeled_frequency
     labeled_start_fraction = args.labeled_start_fraction
-    ssl_lr = args.ssl_lr
+    lr = args.lr
     weight_decay = args.weight_decay
     use_mae = args.use_mae
     use_latent = args.use_latent
+    loss_weights = {
+        'mae': args.lambda_mae, 'latent': args.lambda_latent,
+        'prefusion': args.lambda_prefusion, 'distill': args.lambda_distill,
+        'ce': args.lambda_ce,
+    }
 
     # Build active_losses based on labeled_frequency and optional losses
     # Base losses: prefusion + distill always, +ce when using labeled data
@@ -85,7 +102,7 @@ def main():
     print(f"  modality_dropout: {modality_dropout}")
     print(f"  labeled_frequency: {labeled_frequency}")
     print(f"  labeled_start_fraction: {labeled_start_fraction}")
-    print(f"  ssl_lr: {ssl_lr}")
+    print(f"  lr: {lr}")
     print(f"  weight_decay: {weight_decay}")
     print(f"  use_mae: {use_mae}")
     print(f"  use_latent: {use_latent}")
@@ -96,7 +113,7 @@ def main():
         pass
 
     train_args = Args()
-    train_args.ssl_lr = ssl_lr
+    train_args.lr = lr
     train_args.epochs = args.epochs
     train_args.mae_mask_ratio = mae_mask_ratio
     train_args.modality_dropout = modality_dropout
@@ -105,10 +122,15 @@ def main():
     print(f"\n=== Loading Stage 0 checkpoint from: {args.stage0_checkpoint} ===")
     checkpoint = torch.load(args.stage0_checkpoint, map_location='cpu')
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = EVANClassifier.from_checkpoint(args.stage0_checkpoint, device)
     model_config = checkpoint['config']
     evan_config = model_config['evan_config']
     starting_modality = evan_config['starting_modality']
+    is_segmentation = (model_config.get('task_type') == 'segmentation'
+                       or args.dataset in ('pastis', 'dfc2020'))
+    if is_segmentation:
+        model = EvanSegmenter.from_checkpoint(args.stage0_checkpoint, device)
+    else:
+        model = EVANClassifier.from_checkpoint(args.stage0_checkpoint, device)
 
     print(f"Stage 0 config:")
     for k, v in model_config.items():
@@ -128,12 +150,12 @@ def main():
         'stage0_checkpoint': args.stage0_checkpoint,
     }, allow_val_change=True)
 
-    wandb.run.name = f"{starting_modality}+={newmod}_lr{ssl_lr:.0e}_wd{weight_decay:.0e}_lf{labeled_frequency}"
+    wandb.run.name = f"{starting_modality}+={newmod}_lr{lr:.0e}_wd{weight_decay:.0e}_lf{labeled_frequency}"
 
     # Create datasets
     print("\n=== Creating datasets ===")
     train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = get_loaders(
-        'eurosat', starting_modality, args.batch_size, args.num_workers, new_modality=newmod
+        args.dataset, starting_modality, args.batch_size, args.num_workers, new_modality=newmod
     )
     modality_bands_dict = task_config.modality_bands_dict
     bands_newmod = modality_bands_dict[newmod]
@@ -141,7 +163,8 @@ def main():
     evan = model.evan
     model = model.to(device)
 
-    num_newmod_channels = len(bands_newmod)
+    bands_spec = bands_newmod
+    num_newmod_channels = (bands_spec.stop - bands_spec.start) if isinstance(bands_spec, slice) else len(bands_spec)
     if newmod not in evan.patch_embedders:
         print(f"  Creating {newmod} modality components...")
         evan.create_modality_components(newmod, num_newmod_channels)
@@ -155,7 +178,7 @@ def main():
 
     # ========================================== TRAIN SHOT ===========================================
     print(f"\n=== Training with SHOT ===")
-    trainable_total, best_checkpoints, _ = train_shot(
+    trainable_total, best_checkpoints, _, teacher_baselines = train_shot(
         model=model,
         train_loader=train2_loader,
         device=device,
@@ -169,10 +192,21 @@ def main():
         labeled_frequency=labeled_frequency,
         labeled_start_fraction=labeled_start_fraction,
         active_losses=active_losses,
+        loss_weights=loss_weights,
         weight_decay=weight_decay,
         val_unlabeled_loader=val2_loader,
         val_labeled_loader=val1_loader,
+        multilabel=task_config.multilabel,
+        label_key=task_config.label_key,
+        segmentation=is_segmentation,
+        num_classes=task_config.num_classes if is_segmentation else None,
+        ignore_index=getattr(task_config, 'ignore_index', -100),
     )
+
+    # Log teacher baselines to wandb
+    teacher_test_metric = teacher_baselines.get('test')
+    if teacher_test_metric is not None:
+        wandb.run.summary['teacher_test_metric'] = teacher_test_metric
 
     # Log best checkpoint test accuracies to wandb summary
     for ckpt_name, ckpt_data in best_checkpoints.items():
@@ -194,7 +228,7 @@ def main():
             'modality_dropout': modality_dropout,
             'labeled_frequency': labeled_frequency,
             'labeled_start_fraction': labeled_start_fraction,
-            'ssl_lr': ssl_lr,
+            'lr': lr,
             'weight_decay': weight_decay,
             'use_mae': use_mae,
             'use_latent': use_latent,
@@ -207,25 +241,28 @@ def main():
     # ========================================= CSV LOGGING =====================================
     # Extract val metrics and test accuracies from best checkpoints
     # Each objective uses its own best checkpoint (by validation metric)
-    def get_ckpt_data(ckpt_name, metric_key, test_key):
+    def get_ckpt_data(ckpt_name, test_key):
         ckpt = best_checkpoints.get(ckpt_name, {})
         val_metric = ckpt.get('metric')
         test_accs = ckpt.get('test_accs')
         test_acc = test_accs.get(test_key) if test_accs else None
         return val_metric, test_acc
 
-    val_transfer, test_transfer = get_ckpt_data('best_transfer', 'metric', 'transfer')
-    val_peeking, test_peeking = get_ckpt_data('best_peeking', 'metric', 'peeking')
-    val_addition, test_addition = get_ckpt_data('best_addition', 'metric', 'addition')
-    val_ens_addition, test_ens_addition = get_ckpt_data('best_ens_addition', 'metric', 'addition_ens')
+    val_transfer, test_transfer = get_ckpt_data('best_transfer', 'transfer')
+    val_peeking, test_peeking = get_ckpt_data('best_peeking', 'peeking')
+    val_addition, test_addition = get_ckpt_data('best_addition', 'addition')
+    val_ens_addition, test_ens_addition = get_ckpt_data('best_ens_addition', 'ens')
 
     filename = args.results_csv
     file_exists = os.path.isfile(filename)
     fieldnames = [
-        "wandb_run_id", "starting_modality", "new_modality",
-        "ssl_lr", "weight_decay", "epochs",
+        "wandb_run_id", "dataset", "starting_modality", "new_modality",
+        "teacher_test_metric",
+        "lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
-        "use_mae", "use_latent", "trainable_params", "active_losses",
+        "use_mae", "use_latent",
+        "lambda_mae", "lambda_latent", "lambda_prefusion", "lambda_distill", "lambda_ce",
+        "trainable_params", "active_losses",
         "val_transfer", "test_transfer",
         "val_peeking", "test_peeking",
         "val_addition", "test_addition",
@@ -239,9 +276,11 @@ def main():
         active_losses_str = "+".join(active_losses)
         writer.writerow([
             wandb.run.id,
+            args.dataset,
             starting_modality,
             newmod,
-            ssl_lr,
+            f"{teacher_test_metric:.2f}" if teacher_test_metric is not None else "",
+            lr,
             weight_decay,
             args.epochs,
             mae_mask_ratio,
@@ -250,6 +289,11 @@ def main():
             labeled_start_fraction,
             use_mae,
             use_latent,
+            loss_weights['mae'],
+            loss_weights['latent'],
+            loss_weights['prefusion'],
+            loss_weights['distill'],
+            loss_weights['ce'],
             trainable_total,
             active_losses_str,
             f"{val_transfer:.2f}" if val_transfer is not None else "",
