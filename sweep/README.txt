@@ -46,6 +46,7 @@ Optionally paste it into sweep_registry.txt as a personal log.
 Step 2: Submit to the cluster
 ------------------------------
 sbatch sweep/run_sweep.sh tgz/delulu-sweep-dfc2020-s2_rgb-s1/<sweep_id>
+for i in {1..4}; do sbatch sweep/run_sweep.sh tgz/delulu-sweep-dfc2020-s2_rgb-s1/<sweep_id>; done
 
 To smoke-test locally (single trial, no SLURM):
   wandb agent tgz/delulu-sweep-dfc2020-s2_rgb-s1/<sweep_id> --count 1

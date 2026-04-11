@@ -1,0 +1,2 @@
+model_type,modality,train_mode,learning_rate,weight_decay,trainable_params,epochs,lambda_u,lambda_e,ema_momentum,temperature,metric_name,test_metric,best_val_metric,best_val_test_metric,saved_checkpoint,global_rep,use_dino_weights,use_s2dino_weights
+evan_small,s2,fft,0.0001,0.0001,22587272,10,1.0,0.01,0.999,0.5,mIoU,40.19,56.56,40.19,checkpoints/evan_freematch_dfc2020_s2_20260408_144508.pt,clstoken,True,False

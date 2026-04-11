@@ -14,13 +14,14 @@ from train_utils import single_modality_training_loop
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
-EUROSAT_MODALITIES = ['rgb', 'vre', 'nir', 'swir', 'aw']
-BENV2_MODALITIES   = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
-PASTIS_MODALITIES  = ['s2', 's1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir']
-DFC2020_MODALITIES = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
+EUROSAT_MODALITIES    = ['rgb', 'vre', 'nir', 'swir', 'aw']
+BENV2_MODALITIES      = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
+BENV2FULL_MODALITIES  = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
+PASTIS_MODALITIES     = ['s2', 's1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir']
+DFC2020_MODALITIES    = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
 
 
-def get_task_config_and_loaders(dataset, modalities, batch_size, num_workers, data_normalizer=None, num_time_steps=10):
+def get_task_config_and_loaders(dataset, modalities, batch_size, num_workers, data_normalizer=None, num_time_steps=10, data_root=None):
     """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict).
 
     modalities: list of modality names; first is primary (used for loaders).
@@ -30,7 +31,7 @@ def get_task_config_and_loaders(dataset, modalities, batch_size, num_workers, da
     train1, val1, _, _, test, task_config = get_loaders(
         dataset, primary, batch_size, num_workers,
         data_normalizer=data_normalizer, num_time_steps=num_time_steps,
-        new_modality=None,
+        new_modality=None, data_root=data_root,
     )
     modality_bands_dict = {m: task_config.modality_bands_dict[m] for m in modalities}
     return train1, val1, test, task_config, modality_bands_dict
@@ -44,9 +45,9 @@ def _n_chans(entry) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Stage 0: Train EVAN on a single modality (using train1 split)')
+    parser = argparse.ArgumentParser(description='Train EVAN on a single modality (using train1 split)')
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020'],
+                        choices=['eurosat', 'benv2', 'benv2full', 'pastis', 'dfc2020'],
                         help='Dataset to train on')
     parser.add_argument('--modalities', type=str, nargs='+', required=True,
                         help='Modalities to train on (first is primary). '
@@ -80,14 +81,18 @@ def main():
                         help='Run validation every N epochs (and always on the last epoch).')
     parser.add_argument('--warmup_epochs', type=int, default=1,
                         help='Linear LR warmup epochs before cosine decay (default: 1).')
+    parser.add_argument('--data_root', type=str, default=None,
+                        help='Root directory for benv2full dataset. Should contain BigEarthNet-S2 and BigEarthNet-S1 subdirs. '
+                             'Default: looks in current dir.')
     args = parser.parse_args()
 
     # Validate modalities against dataset
     valid_modalities = {
-        'eurosat': EUROSAT_MODALITIES,
-        'benv2':   BENV2_MODALITIES,
-        'pastis':  PASTIS_MODALITIES,
-        'dfc2020': DFC2020_MODALITIES,
+        'eurosat':   EUROSAT_MODALITIES,
+        'benv2':     BENV2_MODALITIES,
+        'benv2full': BENV2FULL_MODALITIES,
+        'pastis':    PASTIS_MODALITIES,
+        'dfc2020':   DFC2020_MODALITIES,
     }[args.dataset]
     for m in args.modalities:
         if m not in valid_modalities:
@@ -113,7 +118,7 @@ def main():
         print("Using /10000 normalizer to match torchgeo DINO pretraining.")
     train1_loader, val1_loader, test_loader, task_config, modality_bands_dict = get_task_config_and_loaders(
         args.dataset, args.modalities, args.batch_size, args.num_workers, data_normalizer=data_normalizer,
-        num_time_steps=args.num_time_steps,
+        num_time_steps=args.num_time_steps, data_root=args.data_root,
     )
 
     # Model

@@ -576,8 +576,259 @@ class Trainer:
 
         return test_metric, best_val_test_metric
 
-    def train_semi_supervised(self, *args, **kwargs):
-        raise NotImplementedError
+    def train_freematch(
+        self,
+        train1_loader,
+        train2_loader,
+        val1_loader,
+        test_loader,
+        num_epochs: int,
+        modality: str,
+        *,
+        weak_aug,
+        strong_aug,
+        freematch_state,
+        temperature: float = 0.5,
+        lambda_u: float = 1.0,
+        lambda_e: float = 0.01,
+        best_checkpoint_path: str | None = None,
+        val_per_epoch: int = 1,
+    ) -> tuple:
+        """
+        FreeMatch semi-supervised training loop.
+
+        Uses train1_loader as labeled source, train2_loader as unlabeled source
+        (labels ignored). Checkpoint selection via val1_loader (labeled).
+
+        An epoch = one full pass through train2_loader (unlabeled).
+        train1_loader is cycled if shorter.
+
+        Returns:
+            (train_metric, test_metric, best_val_metric, best_val_test_metric)
+        """
+        tc = self.task_config
+        label_key = tc.label_key
+        segmentation = (tc.task_type == 'segmentation')
+        multilabel = tc.multilabel
+        num_classes = tc.num_classes
+        ignore_index = getattr(tc, 'ignore_index', -100)
+        modality_bands_dict = tc.modality_bands_dict
+
+        criterion = make_criterion(tc)
+        scheduler = make_scheduler(self.optimizer, num_epochs, self.warmup_epochs)
+        accum = self._make_accumulator()
+        mod_upper = modality.upper()
+
+        best_val_metric = 0.0 if val1_loader is not None else None
+        best_val_test_metric = None
+        if val1_loader is not None and best_checkpoint_path is not None:
+            pass  # will save best checkpoint
+
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        global_step = 0
+
+        eval_kwargs = dict(
+            modality_bands_dict=modality_bands_dict,
+            modalities_to_use=(modality,),
+            multilabel=multilabel,
+            label_key=label_key,
+            segmentation=segmentation,
+            num_classes=num_classes if segmentation else None,
+            ignore_index=ignore_index,
+        )
+
+        train_metric = test_metric = 0.0
+
+        for epoch in range(num_epochs):
+            self.model.train()
+            accum.reset()
+            labeled_iter = iter(train1_loader)
+            epoch_sup_loss = 0.0
+            epoch_unsup_loss = 0.0
+            epoch_ent_loss = 0.0
+            epoch_mask_ratio = 0.0
+            n_steps = 0
+
+            pbar = tqdm(train2_loader,
+                        desc=f"FreeMatch Epoch {epoch+1}/{num_epochs} [{mod_upper}]")
+
+            for unlabeled_batch in pbar:
+                # --- Labeled batch (cycle if exhausted) ---
+                try:
+                    labeled_batch = next(labeled_iter)
+                except StopIteration:
+                    labeled_iter = iter(train1_loader)
+                    labeled_batch = next(labeled_iter)
+
+                labels = labeled_batch[label_key].to(self.device)
+                if multilabel:
+                    labels = labels.float()
+
+                x_l = create_multimodal_batch(
+                    labeled_batch, modality_bands_dict=modality_bands_dict,
+                    modalities=(modality,),
+                )
+                x_l = {k: v.to(self.device) for k, v in x_l.items()}
+
+                # Supervised loss
+                logits_l = self.model(x_l)
+                sup_loss = criterion(logits_l, labels)
+                accum.update(logits_l.detach(), labels.detach())
+
+                # --- Unlabeled batch ---
+                x_u = create_multimodal_batch(
+                    unlabeled_batch, modality_bands_dict=modality_bands_dict,
+                    modalities=(modality,),
+                )
+                x_u_tensor = x_u[modality].to(self.device)
+
+                # Apply augmentations (kornia, on GPU)
+                x_weak = weak_aug(x_u_tensor)
+                x_strong = strong_aug(x_u_tensor)
+
+                # Weak forward → pseudo-labels (no grad)
+                with torch.no_grad():
+                    logits_weak = self.model({modality: x_weak})
+
+                    if multilabel:
+                        probs = torch.sigmoid(logits_weak / temperature)  # [B, C]
+                        pseudo_labels = (probs > 0.5).float()
+                        confidence = torch.abs(probs - 0.5) * 2  # [B, C]
+                        max_probs = confidence
+                        pred_classes = None
+                        probs_for_update = probs
+                    elif segmentation:
+                        probs = F.softmax(logits_weak / temperature, dim=1)  # [B, C, H, W]
+                        max_probs_spatial, pseudo_labels = probs.max(dim=1)  # [B, H, W]
+                        # Flatten for EMA update
+                        B, C_dim, H, W = probs.shape
+                        probs_flat = probs.permute(0, 2, 3, 1).reshape(-1, C_dim)
+                        max_probs_flat = max_probs_spatial.reshape(-1)
+                        pred_flat = pseudo_labels.reshape(-1)
+                        probs_for_update = probs_flat
+                        max_probs = max_probs_flat
+                        pred_classes = pred_flat
+                    else:
+                        probs = F.softmax(logits_weak / temperature, dim=1)  # [B, C]
+                        max_probs, pseudo_labels = probs.max(dim=1)  # [B]
+                        pred_classes = pseudo_labels
+                        probs_for_update = probs
+
+                # Update EMA state + compute mask
+                freematch_state.update(probs_for_update, max_probs, pred_classes)
+                if segmentation:
+                    mask = freematch_state.compute_mask(max_probs_spatial.reshape(-1),
+                                                        pseudo_labels.reshape(-1))
+                    mask = mask.reshape(max_probs_spatial.shape)  # [B, H, W]
+                else:
+                    mask = freematch_state.compute_mask(max_probs, pred_classes)
+
+                # Strong forward → unsupervised loss
+                logits_strong = self.model({modality: x_strong})
+
+                if multilabel:
+                    unsup_loss_raw = F.binary_cross_entropy_with_logits(
+                        logits_strong, pseudo_labels, reduction='none',
+                    )  # [B, C]
+                    unsup_loss = (unsup_loss_raw * mask).mean()
+                elif segmentation:
+                    unsup_loss_raw = F.cross_entropy(
+                        logits_strong, pseudo_labels,
+                        ignore_index=ignore_index, reduction='none',
+                    )  # [B, H, W]
+                    unsup_loss = (unsup_loss_raw * mask).mean()
+                else:
+                    unsup_loss_raw = F.cross_entropy(
+                        logits_strong, pseudo_labels, reduction='none',
+                    )  # [B]
+                    unsup_loss = (unsup_loss_raw * mask).mean()
+
+                # Entropy fairness loss
+                if lambda_e > 0:
+                    ent_loss = freematch_state.entropy_loss(
+                        logits_strong.detach() if False else logits_strong,
+                        mask, segmentation=segmentation,
+                    )
+                else:
+                    ent_loss = torch.tensor(0.0, device=self.device)
+
+                # Total loss
+                total_loss = sup_loss + lambda_u * unsup_loss + lambda_e * ent_loss
+
+                self.optimizer.zero_grad()
+                grad_norm = self._step(total_loss, trainable_params)
+
+                # Track stats
+                mask_ratio = mask.float().mean().item()
+                epoch_sup_loss += sup_loss.item()
+                epoch_unsup_loss += unsup_loss.item()
+                epoch_ent_loss += ent_loss.item()
+                epoch_mask_ratio += mask_ratio
+                n_steps += 1
+
+                pbar_postfix = {
+                    'sup': f'{sup_loss.item():.3f}',
+                    'unsup': f'{unsup_loss.item():.3f}',
+                    'mask': f'{mask_ratio:.2f}',
+                    'tp': f'{freematch_state.time_p.mean().item():.3f}',
+                }
+                pbar.set_postfix(pbar_postfix)
+
+                if self.use_wandb and self.wandb_prefix:
+                    wandb.log({
+                        f'{self.wandb_prefix}/sup_loss': sup_loss.item(),
+                        f'{self.wandb_prefix}/unsup_loss': unsup_loss.item(),
+                        f'{self.wandb_prefix}/ent_loss': ent_loss.item(),
+                        f'{self.wandb_prefix}/mask_ratio': mask_ratio,
+                        f'{self.wandb_prefix}/time_p': freematch_state.time_p.mean().item(),
+                        f'{self.wandb_prefix}/total_loss': total_loss.item(),
+                        f'{self.wandb_prefix}/grad_norm': float(grad_norm),
+                        f'{self.wandb_prefix}/step': global_step,
+                    })
+                global_step += 1
+
+            # End of epoch
+            n_steps = max(n_steps, 1)
+            train_metric = accum.compute()
+            scheduler.step()
+
+            print(f"  Epoch {epoch+1}: sup_loss={epoch_sup_loss/n_steps:.4f}, "
+                  f"unsup_loss={epoch_unsup_loss/n_steps:.4f}, "
+                  f"ent_loss={epoch_ent_loss/n_steps:.4f}, "
+                  f"mask_ratio={epoch_mask_ratio/n_steps:.3f}, "
+                  f"time_p={freematch_state.time_p.mean().item():.4f}")
+
+            do_eval = ((epoch + 1) % val_per_epoch == 0) or (epoch + 1 == num_epochs)
+            test_loss = val_loss = test_metric_ep = val_metric = None
+
+            if do_eval:
+                test_loss, test_metric_ep = evaluate(
+                    self.model, test_loader, criterion, self.device, **eval_kwargs
+                )
+                test_metric = test_metric_ep
+
+                if val1_loader is not None:
+                    val_loss, val_metric = evaluate(
+                        self.model, val1_loader, criterion, self.device, **eval_kwargs
+                    )
+
+                metric_name = accum.metric_name
+                print(f"  Train ({mod_upper}): {metric_name}={train_metric:.2f}%")
+                print(f"  Test  ({mod_upper}): Loss={test_loss:.4f}, {metric_name}={test_metric:.2f}%")
+                if val_metric is not None:
+                    print(f"  Val   ({mod_upper}): Loss={val_loss:.4f}, {metric_name}={val_metric:.2f}%")
+                    if val_metric > best_val_metric:
+                        print(f"    New val record: {val_metric:.2f} > {best_val_metric:.2f} — saving checkpoint")
+                        best_val_metric = val_metric
+                        best_val_test_metric = test_metric
+                        if best_checkpoint_path is not None:
+                            self.model.save_checkpoint(best_checkpoint_path)
+
+            self._log_epoch(epoch, epoch_sup_loss / n_steps, train_metric,
+                            accum.metric_name, self.optimizer.param_groups[0]['lr'],
+                            test_loss, test_metric_ep, val_loss, val_metric)
+
+        return train_metric, test_metric, best_val_metric, best_val_test_metric
 
     def train_shot(self, *args, **kwargs):
         raise NotImplementedError

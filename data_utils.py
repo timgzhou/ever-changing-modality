@@ -112,6 +112,7 @@ def get_loaders(
     data_normalizer=None,
     num_time_steps: int = 10,
     new_modality: str = None,
+    data_root: str = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader, DataLoader, DataLoader, TaskConfig]:
     """
     Return the standard 5-loader tuple plus TaskConfig for a given dataset.
@@ -146,6 +147,17 @@ def get_loaders(
             batch_size=batch_size, num_workers=num_workers,
             starting_modality=starting_modality, new_modality=new_modality,
         )
+    elif dataset == 'benv2full':
+        from benv2full_data_utils import get_bigearthnet_loaders
+        # data_root can be e.g. '$TMPDIR' or 'datasets'; will look for BigEarthNet-{S2,S1} subdirs
+        kwargs = dict(
+            batch_size=batch_size, num_workers=num_workers,
+            starting_modality=starting_modality, new_modality=new_modality,
+        )
+        if data_root:
+            kwargs['s2_root'] = f"{data_root}/BigEarthNet-S2"
+            kwargs['s1_root'] = f"{data_root}/BigEarthNet-S1"
+        return get_bigearthnet_loaders(**kwargs)
     elif dataset == 'pastis':
         from geobench_data_utils import get_pastis_loaders
         return get_pastis_loaders(
@@ -160,7 +172,7 @@ def get_loaders(
             starting_modality=starting_modality, new_modality=new_modality,
         )
     else:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Valid: 'eurosat', 'benv2', 'pastis', 'dfc2020'")
+        raise ValueError(f"Unknown dataset: {dataset!r}. Valid: 'eurosat', 'benv2', 'benv2full', 'pastis', 'dfc2020'")
 
 
 def _get_eurosat_loaders(starting_modality, new_modality, batch_size, num_workers):
