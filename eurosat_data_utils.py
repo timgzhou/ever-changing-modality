@@ -6,7 +6,6 @@ Ensures consistent transformations across train and test sets.
 import torch
 from torchvision import transforms
 import os
-from torchgeo.datasets import EuroSAT
 from torch.utils.data import DataLoader, Subset
 
 
@@ -63,6 +62,7 @@ AW_BAND_NAMES = [
 
 # Modality group key to band names mapping
 MODALITY_BANDS = {
+    's2': ALL_BAND_NAMES,
     'rgb': RGB_BAND_NAMES,
     'vre': VRE_BAND_NAMES,
     'nir': NIR_BAND_NAMES,
@@ -103,6 +103,24 @@ BAND_DESCRIPTIONS = {
     'B12': 'SWIR 3',
 }
 
+# Sentinel-2 band centre wavelengths in nm (for Panopticon compatibility)
+# Used as channel IDs in models like Panopticon that do spectral fusion
+BAND_WAVELENGTHS = {
+    'B01': 442,    # Coastal Aerosol
+    'B02': 492,    # Blue
+    'B03': 559,    # Green
+    'B04': 664,    # Red
+    'B05': 704,    # VRE 1
+    'B06': 740,    # VRE 2
+    'B07': 782,    # VRE 3
+    'B08': 827,    # NIR
+    'B8A': 864,    # NIR (narrow)
+    'B09': 945,    # Water Vapour
+    'B10': 1613,   # SWIR 1
+    'B11': 2203,   # SWIR 2
+    'B12': None,   # SWIR 3 (not in Panopticon's standard list, use 2400 as approximation)
+}
+
 # Per-band min/max statistics for normalization
 BAND_MINS = torch.tensor([
     1013.0, 676.0, 448.0, 247.0, 269.0, 253.0, 243.0,
@@ -129,6 +147,16 @@ class DictTransform:
         return sample
 
 
+class NormalizerWrapper:
+    """Wrapper to apply normalizer to dict samples (image key)."""
+    def __init__(self, normalizer):
+        self.normalizer = normalizer
+
+    def __call__(self, sample):
+        sample['image'] = self.normalizer(sample['image'])
+        return sample
+
+
 def get_band_indices(band_names):
     """
     Get indices for specified bands.
@@ -142,9 +170,148 @@ def get_band_indices(band_names):
     return [ALL_BAND_NAMES.index(b) for b in band_names]
 
 
+def get_band_wavelengths(band_names):
+    """
+    Get wavelengths (in nm) for specified bands (for Panopticon channel IDs).
+
+    Args:
+        band_names: Tuple or list of band names (e.g., ['B04', 'B03', 'B02'])
+
+    Returns:
+        List of wavelengths in nm
+    """
+    wavelengths = []
+    for band in band_names:
+        wl = BAND_WAVELENGTHS.get(band)
+        if wl is None:
+            if band == 'B12':
+                wl = 2400  # Approximation for SWIR 3
+            else:
+                raise ValueError(f"Unknown band: {band}")
+        wavelengths.append(wl)
+    return wavelengths
+
+
+def compute_eurosat_zscore_stats():
+    """
+    Compute z-score statistics (mean, std) from EuroSAT training data.
+
+    Caches results to avoid recomputation. Returns dict of {band_name: (mean, std)}.
+    """
+    import json
+    cache_file = os.path.join(os.path.dirname(__file__), '.eurosat_zscore_stats_cache.json')
+
+    # Check cache first
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r') as f:
+            cached = json.load(f)
+            return {b: tuple(stats) for b, stats in cached.items()}
+
+    # Compute from training data by reading .tif files from disk
+    print("Computing EuroSAT z-score statistics from training data (train1 split)...")
+    import json
+    from rasterio.io import MemoryFile
+    import rasterio
+    import glob
+
+    # Read split indices
+    with open('datasets/eurosat-train1.txt', 'r') as f:
+        train1_samples = set(line.strip().replace('.jpg', '.tif') for line in f)
+
+    # Accumulate statistics per band
+    sums = torch.zeros(13)
+    sq_sums = torch.zeros(13)
+    count = 0
+    processed = 0
+
+    # Find all .tif files in EuroSAT directory structure
+    tif_files = sorted(glob.glob('ds_ers/ds/images/remote_sensing/otherDatasets/sentinel_2/tif/*/*.tif'))
+    if not tif_files:
+        raise FileNotFoundError(
+            "No .tif files found in EuroSAT structure. "
+            "Please ensure EuroSAT is downloaded to ds_ers/"
+        )
+
+    for tif_path in tif_files:
+        filename = os.path.basename(tif_path)
+        if filename not in train1_samples:
+            continue
+
+        try:
+            with rasterio.open(tif_path) as src:
+                image = torch.tensor(src.read(), dtype=torch.float32)  # [13, H, W]
+                sums += image.sum(dim=(1, 2))
+                sq_sums += (image ** 2).sum(dim=(1, 2))
+                count += image.shape[1] * image.shape[2]
+                processed += 1
+        except Exception as e:
+            print(f"Warning: Failed to read {tif_path}: {e}")
+            continue
+
+    if processed == 0:
+        raise RuntimeError(
+            f"No training samples processed. Found {len(train1_samples)} samples in split, "
+            f"but couldn't read any from {len(tif_files)} .tif files."
+        )
+
+    print(f"Processed {processed} training images.")
+    means = sums / count
+    variances = (sq_sums / count) - (means ** 2)
+    stds = torch.sqrt(torch.clamp(variances, min=1e-8))
+
+    # Build result dict and cache
+    result = {}
+    for i, band in enumerate(ALL_BAND_NAMES):
+        result[band] = (means[i].item(), stds[i].item())
+
+    with open(cache_file, 'w') as f:
+        json.dump(result, f, indent=2)
+
+    print(f"Cached z-score stats to {cache_file}")
+    return result
+
+
+class ZScoreNormalizer:
+    """Simple z-score normalizer for EuroSAT data."""
+
+    def __init__(self, stats_dict=None):
+        """
+        Args:
+            stats_dict: Dict of {band_name: (mean, std)}. If None, computes from training data.
+        """
+        if stats_dict is None:
+            stats_dict = compute_eurosat_zscore_stats()
+        self.stats = stats_dict
+        self.band_names = ALL_BAND_NAMES
+
+    def __call__(self, image):
+        """
+        Apply z-score normalization to image tensor.
+
+        Args:
+            image: Tensor of shape [13, H, W] or [B, 13, H, W]
+
+        Returns:
+            Z-score normalized tensor
+        """
+        is_batched = image.ndim == 4
+        if not is_batched:
+            image = image.unsqueeze(0)
+
+        normalized = image.clone().float()
+        for i, band in enumerate(self.band_names):
+            mean, std = self.stats[band]
+            normalized[:, i] = (normalized[:, i] - mean) / (std + 1e-8)
+
+        if not is_batched:
+            normalized = normalized.squeeze(0)
+
+        return normalized
+
+
 def normalize_bands(image, band_indices, mins=BAND_MINS, maxs=BAND_MAXS):
     """
-    Normalize bands to [0, 1] using min-max normalization.
+    Normalize bands to [0, 1] using min-max normalization (DEPRECATED - use z-score instead).
 
     Args:
         image: Tensor of shape [B, C, H, W] or [C, H, W]
@@ -420,6 +587,8 @@ def get_loaders_with_val(bs=32, nw=4, seed=42):
     Stage 1 (self-supervised on multimodal): uses train2, validated on val2
     Stage 2 (pseudo-supervised on monomodal): uses train1, validated on val1
 
+    Data is z-score normalized for consistency with BEN-v2, PASTIS, and DFC2020.
+
     Args:
         bs: Batch size
         nw: Number of workers
@@ -433,15 +602,22 @@ def get_loaders_with_val(bs=32, nw=4, seed=42):
         test_loader: Test data
     """
     import random
+    from torchgeo.datasets import EuroSAT
 
     bands_full = tuple(ALL_BAND_NAMES)
+    # Apply resize + z-score normalization transforms
     resize_transform = DictTransform(transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True))
+    zscore_normalizer = ZScoreNormalizer()
+    normalizer_transform = NormalizerWrapper(zscore_normalizer)
+
+    # Create a combined transform: resize + z-score normalize
+    combined_transform = lambda sample: normalizer_transform(resize_transform(sample))
 
     train_dataset_full = EuroSAT(
         root='ds_ers',
         split='train',
         bands=bands_full,
-        transforms=resize_transform,
+        transforms=combined_transform,
         download=True,
         checksum=False
     )
@@ -454,7 +630,7 @@ def get_loaders_with_val(bs=32, nw=4, seed=42):
         root='ds_ers',
         split='val',
         bands=bands_full,
-        transforms=resize_transform,
+        transforms=combined_transform,
         download=True,
         checksum=False
     )
@@ -475,7 +651,7 @@ def get_loaders_with_val(bs=32, nw=4, seed=42):
         root='ds_ers',
         split='test',
         bands=bands_full,
-        transforms=resize_transform,
+        transforms=combined_transform,
         download=True,
         checksum=False
     )

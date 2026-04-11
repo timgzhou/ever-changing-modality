@@ -1,0 +1,712 @@
+"""
+Fine-tune Remote Sensing Foundation Models (OlmoEarth, etc.) on split 1 via LP or FFT.
+
+Loads a pretrained model from HuggingFace, trains on split 1 of any supported dataset,
+evaluates on split 2 test.
+
+IMPORTANT: Model Input Format & Wrappers
+
+  Data Flow:
+  - Loaders provide batch['image'] as a stacked tensor [B, C_total, H, W].
+  - For single-modality training (e.g., --modality s2), code slices via modality_bands_dict.
+  - Result: imgs=[B, C_modality, H, W] ready for the model.
+
+  Models & Wrappers:
+  - OlmoEarth (HF): Standard transformer, wrapped in OlmoEarthWrapper
+    → expects [B, C, H, W]
+    → returns output.last_hidden_state (CLS token [B, 768] or feature map [B, D, H, W])
+
+  - Panopticon (torch.hub): Expects special dict interface, wrapped in PanopticonWrapper
+    → PanopticonWrapper automatically builds chn_ids from modality (s2, s1, s2s1)
+    → internally calls model(dict(imgs=[B,C,H,W], chn_ids=[B,C]))
+    → returns [B, 768] L2-normalized CLS token
+
+  Custom models: Add a new ModelWrapper subclass in load_foundation_model().
+
+Supports:
+  - Classification (EuroSAT, BEN-v2)
+  - Multilabel (BEN-v2)
+  - Segmentation (PASTIS)
+
+Architecture:
+  - create_classification_head(): BatchNorm1d + Linear (follows EVANClassifier)
+  - create_segmentation_head(): BatchNorm2d + Conv2d 1×1 (follows EvanSegmenter)
+
+Metrics:
+  - Classification: Accuracy
+  - Multilabel: mAP (average precision per class)
+  - Segmentation: mIoU (Jaccard score)
+
+Usage:
+  # OlmoEarth LP on BEN-v2 S2
+  python rsfm_sft.py --model allenai/OlmoEarth-v1-Base --dataset benv2 --modality s2 --train_mode lp --epochs 50
+
+  # OlmoEarth FFT on PASTIS S2
+  python rsfm_sft.py --model allenai/OlmoEarth-v1-Base --dataset pastis --modality s2 --train_mode fft --epochs 20
+
+  # Panopticon LP on BEN-v2 S2 (to verify against lp_panopticon_benv2.py baseline)
+  python rsfm_sft.py --model panopticon --dataset benv2 --modality s2 --train_mode lp --epochs 50
+
+  # Panopticon LP on BEN-v2 S1
+  python rsfm_sft.py --model panopticon --dataset benv2 --modality s1 --train_mode lp --epochs 50
+
+  # Panopticon LP on BEN-v2 S2+S1
+  python rsfm_sft.py --model panopticon --dataset benv2 --modality s2s1 --train_mode lp --epochs 50
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import logging
+import os
+import argparse
+from datetime import datetime
+import wandb
+import csv
+from typing import Optional
+import warnings
+warnings.filterwarnings('ignore', message='Use of index_put_')
+
+from train_utils import _compute_map, compute_miou
+
+logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+MODALITY_CONFIGS = {
+    'eurosat': ['s2', 'rgb', 'vre', 'nir', 'swir', 'aw'],  # s2 = all 13 bands
+    'benv2': ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
+    'benv2full': ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
+    'pastis': ['s2', 's1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir'],
+    'dfc2020': ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
+}
+
+
+def _n_chans(entry) -> int:
+    """Return channel count for a modality_bands_dict entry (slice or list)."""
+    if isinstance(entry, slice):
+        return entry.stop - entry.start
+    return len(entry)
+
+
+class ModelOutput:
+    """Simple output container to mimic HF transformers output format."""
+
+    def __init__(self, last_hidden_state):
+        self.last_hidden_state = last_hidden_state
+
+
+class ModelWrapper(nn.Module):
+    """Base wrapper to provide consistent [B, C, H, W] → features interface for all models."""
+
+    def forward(self, imgs):
+        raise NotImplementedError
+
+
+class OlmoEarthWrapper(ModelWrapper):
+    """Wraps OlmoEarth to provide standard interface."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, imgs, output_hidden_states=True):
+        """[B, C, H, W] → output with last_hidden_state."""
+        return self.model(imgs, output_hidden_states=output_hidden_states)
+
+
+class PanopticonWrapper(ModelWrapper):
+    """
+    Wraps Panopticon to accept [B, C, H, W] and automatically build chn_ids.
+
+    Channel IDs are Sentinel-2 band centre wavelengths (nm) or synthetic IDs for other datasets.
+    """
+
+    def __init__(self, model, modality='s2', dataset=None):
+        super().__init__()
+        self.model = model
+        self.modality = modality
+        self.dataset = dataset
+
+        # Sentinel-2 Channel IDs (band centre wavelengths in nm)
+        self.S2_CHN_IDS = torch.tensor([442, 492, 559, 664, 704, 740, 782, 827, 864, 945, 1613, 2203],
+                                       dtype=torch.int16)
+        self.S1_CHN_IDS = torch.tensor([-1, -2], dtype=torch.int16)
+        self.S2S1_CHN_IDS = torch.cat([self.S2_CHN_IDS, self.S1_CHN_IDS])
+
+        # Pre-compute channel IDs for EuroSAT if applicable
+        self.eurosat_chn_ids = None
+        if dataset == 'eurosat':
+            from eurosat_data_utils import get_band_wavelengths, MODALITY_BANDS, ALL_BAND_NAMES
+            if modality == 's2':
+                wavelengths = get_band_wavelengths(ALL_BAND_NAMES)
+            elif modality in MODALITY_BANDS:
+                band_names = MODALITY_BANDS[modality]
+                wavelengths = get_band_wavelengths(band_names)
+            else:
+                raise ValueError(f"Unknown EuroSAT modality: {modality}")
+            self.eurosat_chn_ids = torch.tensor(wavelengths, dtype=torch.int16)
+
+    def forward(self, imgs, output_hidden_states=False):
+        """
+        [B, C, H, W] → ModelOutput with last_hidden_state=[B, 768].
+
+        Panopticon's channel fusion layer handles arbitrary channel counts.
+        We provide chn_ids (band wavelengths in nm) for each channel.
+        """
+        B, C, H, W = imgs.shape
+        device = imgs.device
+
+        # Determine channel IDs based on data shape and dataset
+        if C == 14:
+            # S2+S1 stacked
+            chn_ids = self.S2S1_CHN_IDS.to(device)
+        elif C == 2:
+            # S1 only (VV, VH)
+            chn_ids = self.S1_CHN_IDS.to(device)
+        elif C == 12:
+            # S2 only
+            chn_ids = self.S2_CHN_IDS.to(device)
+        elif self.dataset == 'eurosat':
+            # EuroSAT: pre-computed in __init__
+            chn_ids = self.eurosat_chn_ids.to(device)
+        else:
+            # Unknown: use synthetic wavelength IDs
+            chn_ids = torch.linspace(400, 2400, C, dtype=torch.int16).to(device)
+            logger.warning(f"Unknown {C}-channel input; using synthetic wavelength IDs: {chn_ids.tolist()}")
+
+        # Expand to batch
+        chn_ids = chn_ids.unsqueeze(0).expand(B, -1)
+
+        # Call Panopticon with dict interface
+        x_dict = dict(imgs=imgs, chn_ids=chn_ids)
+        features = self.model(x_dict)  # [B, 768] already L2-normalized
+        return ModelOutput(features)
+
+
+def load_foundation_model(model_name: str, device, modality='s2', dataset=None):
+    """
+    Load a foundation model from HuggingFace or torch.hub.
+
+    Supports:
+      - OlmoEarth (HF): 'allenai/OlmoEarth-v1-Base'
+      - Panopticon (torch.hub): 'panopticon'
+
+    Returns (wrapped_model, feature_dim).
+    """
+    print(f"\n=== Loading foundation model: {model_name} ===")
+
+    # Panopticon detection
+    if model_name.lower() == 'panopticon':
+        import sys
+        PANOPTICON_HUB = os.path.expanduser('~/.cache/torch/hub/Panopticon-FM_panopticon_main')
+        if PANOPTICON_HUB not in sys.path:
+            sys.path.insert(0, PANOPTICON_HUB)
+
+        model = torch.hub.load('Panopticon-FM/panopticon', 'panopticon_vitb14', trust_repo=True)
+        model = model.to(device)
+        model.eval()
+        feature_dim = 768  # ViT-B/14
+        wrapped = PanopticonWrapper(model, modality=modality, dataset=dataset)
+        wrapped = wrapped.to(device)
+        print(f"Feature dimension (Panopticon ViT-B/14): {feature_dim}")
+        return wrapped, feature_dim
+
+    # OlmoEarth detection
+    if 'OlmoEarth' in model_name or 'olmoearth' in model_name.lower():
+        try:
+            from transformers import AutoModel
+            model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+            model = model.to(device)
+            model.eval()
+            feature_dim = 768  # OlmoEarth-v1-Base is 768-dim
+            wrapped = OlmoEarthWrapper(model)
+            wrapped = wrapped.to(device)
+            print(f"Feature dimension (OlmoEarth): {feature_dim}")
+            return wrapped, feature_dim
+        except ValueError as e:
+            if "Unrecognized model" in str(e):
+                print("\n✗ OlmoEarth requires special loading (not standard HF transformers).")
+                print("  Install: pip install olmoearth-pretrain")
+                print("  Or use rslearn library: https://github.com/allenai/rslearn")
+                print(f"  Error: {e}\n")
+            raise
+
+    # Generic HF model loading
+    from transformers import AutoModel
+    model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+    model = model.to(device)
+    model.eval()
+
+    # Infer feature dimension
+    feature_dim = getattr(model.config, 'hidden_size', 768)
+    print(f"Feature dimension: {feature_dim}")
+
+    # Wrap in OlmoEarthWrapper for consistency
+    wrapped = OlmoEarthWrapper(model)
+    wrapped = wrapped.to(device)
+    return wrapped, feature_dim
+
+
+def create_classification_head(feature_dim: int, num_classes: int, device):
+    """
+    Create a classification head with BatchNorm + Linear, following EVANClassifier pattern.
+
+    Returns nn.Sequential(BatchNorm1d, Linear)
+    """
+    head = nn.Sequential(
+        nn.BatchNorm1d(feature_dim, affine=False),
+        nn.Linear(feature_dim, num_classes)
+    )
+    return head.to(device)
+
+
+def create_segmentation_head(feature_dim: int, num_classes: int, device):
+    """
+    Create a segmentation head with BatchNorm2d + Conv2d, following EvanSegmenter pattern.
+
+    Returns nn.Sequential(BatchNorm2d, Conv2d(1×1)) for per-patch classification.
+    """
+    head = nn.Sequential(
+        nn.BatchNorm2d(feature_dim, affine=False),
+        nn.Conv2d(feature_dim, num_classes, kernel_size=1)
+    )
+    return head.to(device)
+
+
+@torch.no_grad()
+def extract_features(model, loader, device, modality_slices: dict, modality: str,
+                     cache_path: Optional[str] = None, segmentation: bool = False):
+    """
+    Run frozen foundation model over loader, extract features and labels.
+
+    For classification: features [N, feature_dim], labels [N] or [N, num_classes]
+    For segmentation: features [N, feature_dim, H, W], labels [N, H, W]
+
+    If cache_path exists, load from disk instead of recomputing.
+
+    NOTE: This function assumes the model accepts [B, C, H, W] tensors directly.
+    For models like Panopticon that need special input format (e.g., chn_ids), you'll
+    need to wrap the model call or add model-specific handling here.
+    """
+    if cache_path is not None and os.path.isfile(cache_path):
+        print(f'    loading cached features from {cache_path}')
+        saved = torch.load(cache_path, map_location='cpu')
+        return saved['feats'], saved['labels']
+
+    all_feats = []
+    all_labels = []
+    model.eval()
+
+    # Get modality slice if needed
+    mod_slice = modality_slices.get(modality) if modality_slices else None
+
+    from tqdm import tqdm
+    for batch in tqdm(loader, desc=f'Extracting [{modality}]', leave=False):
+        imgs = batch['image'].to(device)  # [B, C, H, W]
+
+        # Slice to specific modality if needed
+        if mod_slice is not None:
+            imgs = imgs[:, mod_slice, :, :]
+
+        # Forward pass through frozen backbone
+        with torch.no_grad():
+            output = model(imgs, output_hidden_states=True)
+
+            # Handle different output formats
+            if hasattr(output, 'last_hidden_state'):
+                feat = output.last_hidden_state
+            elif isinstance(output, tuple) and len(output) > 0:
+                feat = output[0]
+            else:
+                feat = output
+
+            # Extract features based on dimensionality
+            if feat.dim() == 3:
+                # [B, num_tokens, feature_dim] → extract CLS token [B, feature_dim]
+                features = feat[:, 0, :]
+            elif feat.dim() == 2:
+                # [B, feature_dim] → already pooled
+                features = feat
+            else:
+                # [B, feature_dim, H, W] → global average pool [B, feature_dim]
+                features = feat.mean(dim=(2, 3))
+
+        all_feats.append(features.cpu())
+
+        # Handle labels
+        if segmentation:
+            labels = batch.get('mask', batch.get('label'))
+        else:
+            labels = batch['label']
+        all_labels.append(labels)
+
+    feats = torch.cat(all_feats)
+    labels = torch.cat(all_labels)
+
+    if cache_path is not None:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        torch.save({'feats': feats, 'labels': labels}, cache_path)
+        print(f'    saved features to {cache_path}')
+
+    return feats, labels
+
+
+def get_task_config_and_loaders(dataset, modality, batch_size, num_workers, data_root=None):
+    """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict)."""
+    from data_utils import get_loaders
+
+    train1, val1, _, _, test, task_config = get_loaders(
+        dataset, modality, batch_size, num_workers,
+        data_normalizer=None, num_time_steps=10,
+        new_modality=None, data_root=data_root,
+    )
+    modality_bands_dict = {modality: task_config.modality_bands_dict[modality]}
+    return train1, val1, test, task_config, modality_bands_dict
+
+
+def compute_metrics(logits, labels, task_type='classification', multilabel=False,
+                   num_classes=None, ignore_index=-100):
+    """
+    Compute metrics based on task type, using train_utils functions for consistency.
+
+    Args:
+        logits: Model outputs [B, C] or [B, C, H, W] for segmentation
+        labels: Ground truth [B] or [B, C] for multilabel, [B, H, W] for segmentation
+        task_type: 'classification', 'segmentation'
+        multilabel: If True, compute mAP
+        num_classes: Required for segmentation
+        ignore_index: Label to ignore in segmentation (default -100)
+    """
+    if multilabel:
+        # mAP for multilabel classification (uses train_utils._compute_map)
+        return _compute_map(logits, labels)
+    elif task_type == 'segmentation':
+        # mIoU for segmentation (uses train_utils.compute_miou)
+        preds = logits.argmax(dim=1)  # [B, H, W]
+        return compute_miou(preds, labels, num_classes, ignore_index=ignore_index)
+    else:
+        # Accuracy for classification
+        preds = logits.argmax(dim=1)
+        acc = (preds == labels).float().mean().item()
+        return acc * 100.0
+
+
+def train_head(model, head, train_loader, val_loader, criterion, device,
+               epochs, lr, weight_decay, train_mode='lp', wandb_log=False,
+               segmentation=False, multilabel=False, num_classes=None, ignore_index=-100):
+    """
+    Train the head (+ optionally backbone layers) on train_loader.
+
+    train_mode:
+      'lp'  — freeze backbone, train head only
+      'fft' — train backbone + head with full fine-tuning
+
+    NOTE: This function assumes the model accepts [B, C, H, W] tensors directly.
+    If using a model with special input requirements (e.g., Panopticon with chn_ids),
+    you'll need to wrap the model call or add model-specific preprocessing.
+    """
+
+    # Set up training parameters based on mode
+    if train_mode == 'lp':
+        # Freeze backbone
+        for name, param in model.named_parameters():
+            param.requires_grad = False
+        # Unfreeze head
+        for param in head.parameters():
+            param.requires_grad = True
+        print(f"Mode=lp: training head only.")
+    elif train_mode == 'fft':
+        # Full fine-tuning
+        for param in model.parameters():
+            param.requires_grad = True
+        for param in head.parameters():
+            param.requires_grad = True
+        print(f"Mode=fft: training full backbone + head.")
+    else:
+        raise ValueError(f"Unknown train_mode: {train_mode}")
+
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad) + \
+                       sum(p.numel() for p in head.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters()) + sum(p.numel() for p in head.parameters())
+    print(f"Trainable: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
+
+    optimizer = torch.optim.AdamW(
+        list(filter(lambda p: p.requires_grad, model.parameters())) +
+        list(filter(lambda p: p.requires_grad, head.parameters())),
+        lr=lr, weight_decay=weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs * len(train_loader), eta_min=0
+    )
+
+    best_val_metric = 0.0
+    best_state = None
+    metric_name = "mIoU" if segmentation else ("mAP" if multilabel else "Acc")
+
+    from tqdm import tqdm
+
+    for epoch in range(epochs):
+        model.train() if train_mode == 'fft' else model.eval()
+        head.train()
+
+        train_loss = 0.0
+        for batch in tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs} [train]', leave=False):
+            imgs = batch['image'].to(device)
+            if segmentation:
+                labels = batch.get('mask', batch.get('label')).to(device).long()
+            else:
+                labels = batch['label'].to(device)
+                if multilabel:
+                    labels = labels.float()
+
+            optimizer.zero_grad()
+
+            # Forward pass
+            if train_mode == 'fft':
+                output = model(imgs, output_hidden_states=True)
+                if hasattr(output, 'last_hidden_state'):
+                    feat = output.last_hidden_state
+                else:
+                    feat = output[0] if isinstance(output, tuple) else output
+
+                # Extract features: CLS token for classification, all tokens for segmentation
+                if segmentation:
+                    # [B, num_tokens, D] → reshape to [B, D, H, W]
+                    if feat.dim() == 3:
+                        B, N, D = feat.shape
+                        H = W = int((N - 1) ** 0.5)  # Subtract 1 for CLS token
+                        feat = feat[:, 1:, :].permute(0, 2, 1).reshape(B, D, H, W)
+                    features = feat
+                else:
+                    # Classification: extract from whatever shape we get
+                    if feat.dim() == 3:
+                        features = feat[:, 0, :]  # CLS token from [B, N, D]
+                    elif feat.dim() == 2:
+                        features = feat  # Already pooled [B, D]
+                    else:
+                        features = feat.mean(dim=(2, 3))  # Global average from [B, D, H, W]
+            else:
+                with torch.no_grad():
+                    output = model(imgs, output_hidden_states=True)
+                    if hasattr(output, 'last_hidden_state'):
+                        feat = output.last_hidden_state
+                    else:
+                        feat = output[0] if isinstance(output, tuple) else output
+
+                    if segmentation:
+                        if feat.dim() == 3:
+                            B, N, D = feat.shape
+                            H = W = int((N - 1) ** 0.5)
+                            feat = feat[:, 1:, :].permute(0, 2, 1).reshape(B, D, H, W)
+                        features = feat
+                    else:
+                        if feat.dim() == 3:
+                            features = feat[:, 0, :]
+                        elif feat.dim() == 2:
+                            features = feat
+                        else:
+                            features = feat.mean(dim=(2, 3))
+
+            logits = head(features)
+            loss = criterion(logits, labels)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            train_loss += loss.item()
+
+        train_loss /= len(train_loader)
+
+        # Validation
+        head.eval()
+        val_loss = 0.0
+        all_logits = []
+        all_labels = []
+
+        for batch in tqdm(val_loader, desc=f'Epoch {epoch+1}/{epochs} [val]', leave=False):
+            imgs = batch['image'].to(device)
+            if segmentation:
+                labels = batch.get('mask', batch.get('label')).to(device).long()
+            else:
+                labels = batch['label'].to(device)
+                if multilabel:
+                    labels = labels.float()
+
+            with torch.no_grad():
+                output = model(imgs, output_hidden_states=True)
+                if hasattr(output, 'last_hidden_state'):
+                    feat = output.last_hidden_state
+                else:
+                    feat = output[0] if isinstance(output, tuple) else output
+
+                if segmentation:
+                    if feat.dim() == 3:
+                        B, N, D = feat.shape
+                        H = W = int((N - 1) ** 0.5)
+                        feat = feat[:, 1:, :].permute(0, 2, 1).reshape(B, D, H, W)
+                    features = feat
+                else:
+                    if feat.dim() == 3:
+                        features = feat[:, 0, :]
+                    elif feat.dim() == 2:
+                        features = feat
+                    else:
+                        features = feat.mean(dim=(2, 3))
+
+                logits = head(features)
+                val_loss += criterion(logits, labels).item()
+                all_logits.append(logits.cpu())
+                all_labels.append(labels.cpu())
+
+        val_loss /= len(val_loader)
+        all_logits = torch.cat(all_logits)
+        all_labels = torch.cat(all_labels)
+
+        val_metric = compute_metrics(all_logits, all_labels,
+                                     task_type='segmentation' if segmentation else 'classification',
+                                     multilabel=multilabel,
+                                     num_classes=num_classes,
+                                     ignore_index=ignore_index)
+
+        if val_metric > best_val_metric:
+            best_val_metric = val_metric
+            best_state = {k: v.clone() for k, v in head.state_dict().items()}
+
+        print(f'  Epoch {epoch+1}/{epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  val_{metric_name}={val_metric:.2f}%  (best={best_val_metric:.2f}%)')
+
+        if wandb_log:
+            wandb.log({
+                'epoch': epoch,
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                f'val_{metric_name}': val_metric,
+            })
+
+    if best_state is not None:
+        head.load_state_dict(best_state)
+
+    return head, best_val_metric, trainable_params
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Fine-tune RS foundation model on split 1')
+    parser.add_argument('--model', type=str, required=True,
+                        help='HuggingFace model name (e.g., allenai/OlmoEarth-v1-Base)')
+    parser.add_argument('--dataset', type=str, required=True,
+                        choices=['eurosat', 'benv2', 'benv2full', 'pastis', 'dfc2020'],
+                        help='Dataset to train on')
+    parser.add_argument('--modality', type=str, required=True,
+                        help='Modality to use (e.g., s2, s1, rgb)')
+    parser.add_argument('--train_mode', type=str, default='lp', choices=['lp', 'fft'],
+                        help='Training mode: lp (linear probe) or fft (full fine-tune)')
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--weight_decay', type=float, default=0.0)
+    parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
+    parser.add_argument('--wandb_project', type=str, default=None)
+    parser.add_argument('--results_csv', type=str, default='res/rsfm_results.csv')
+    parser.add_argument('--data_root', type=str, default=None,
+                        help='Root directory for benv2full dataset.')
+    args = parser.parse_args()
+
+    # Validate modality
+    if args.modality not in MODALITY_CONFIGS.get(args.dataset, []):
+        parser.error(f"--modality {args.modality!r} is not valid for --dataset {args.dataset}. "
+                     f"Valid choices: {MODALITY_CONFIGS[args.dataset]}")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Dataset: {args.dataset}, Modality: {args.modality}")
+    print(f"Using device: {device}")
+    print(f"Model: {args.model}, Batch size: {args.batch_size}, LR: {args.lr}, Epochs: {args.epochs}")
+
+    # Data
+    print("\n=== Creating datasets ===")
+    train1_loader, val1_loader, test_loader, task_config, modality_bands_dict = get_task_config_and_loaders(
+        args.dataset, args.modality, args.batch_size, args.num_workers, data_root=args.data_root
+    )
+
+    # Model
+    print("\n=== Loading foundation model ===")
+    fm, feature_dim = load_foundation_model(args.model, device, modality=args.modality, dataset=args.dataset)
+
+    # Head
+    print("\n=== Creating task-specific head ===")
+    is_segmentation = (task_config.task_type == 'segmentation')
+
+    if is_segmentation:
+        head = create_segmentation_head(feature_dim, task_config.num_classes, device)
+    else:
+        head = create_classification_head(feature_dim, task_config.num_classes, device)
+
+    # Loss
+    ignore_index = getattr(task_config, 'ignore_index', -100)
+    if task_config.multilabel:
+        criterion = nn.BCEWithLogitsLoss()
+        metric_name = "mAP"
+    elif is_segmentation:
+        criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        metric_name = "mIoU"
+    else:
+        criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        metric_name = "Acc"
+    print(f"Loss: {criterion.__class__.__name__}")
+
+    if args.wandb_project:
+        wandb.init(
+            project=args.wandb_project,
+            config=vars(args),
+            name=f"rsfm_{args.dataset}_{args.modality}_{args.train_mode}",
+        )
+
+    # Training
+    print(f"\n=== Training for {args.epochs} epochs ===")
+    ignore_index = getattr(task_config, 'ignore_index', -100)
+    head, best_val_metric, trainable_params = train_head(
+        fm, head, train1_loader, val1_loader, criterion, device,
+        epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
+        train_mode=args.train_mode, wandb_log=bool(args.wandb_project),
+        segmentation=is_segmentation, multilabel=task_config.multilabel,
+        num_classes=task_config.num_classes, ignore_index=ignore_index
+    )
+
+    # Save checkpoint
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    checkpoint_path = os.path.join(args.checkpoint_dir,
+                                   f'rsfm_{args.dataset}_{args.modality}_{args.train_mode}_{timestamp}.pt')
+    torch.save(head.state_dict(), checkpoint_path)
+    print(f"\n=== Training complete ===")
+    print(f"Head checkpoint: {checkpoint_path}")
+
+    # CSV logging
+    os.makedirs(os.path.dirname(args.results_csv), exist_ok=True)
+    fieldnames = [
+        'model', 'dataset', 'modality', 'train_mode', 'epochs', 'lr', 'weight_decay',
+        'batch_size', 'metric_name', 'trainable_params', 'saved_checkpoint'
+    ]
+    file_exists = os.path.isfile(args.results_csv)
+    with open(args.results_csv, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({
+            'model': args.model,
+            'dataset': args.dataset,
+            'modality': args.modality,
+            'train_mode': args.train_mode,
+            'epochs': args.epochs,
+            'lr': args.lr,
+            'weight_decay': args.weight_decay,
+            'batch_size': args.batch_size,
+            'metric_name': metric_name,
+            'trainable_params': trainable_params,
+            'saved_checkpoint': checkpoint_path,
+        })
+
+    if args.wandb_project:
+        wandb.finish()
+
+
+if __name__ == '__main__':
+    main()
