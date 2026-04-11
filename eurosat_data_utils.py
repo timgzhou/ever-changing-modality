@@ -272,34 +272,50 @@ def compute_eurosat_zscore_stats():
 
 
 class ZScoreNormalizer:
-    """Simple z-score normalizer for EuroSAT data."""
+    """Z-score normalizer for EuroSAT data (with min-max clipping first)."""
 
-    def __init__(self, stats_dict=None):
+    def __init__(self, stats_dict=None, mins=BAND_MINS, maxs=BAND_MAXS):
         """
         Args:
-            stats_dict: Dict of {band_name: (mean, std)}. If None, computes from training data.
+            stats_dict: Dict of {band_name: (mean, std)} for z-score stats.
+                       If None, computes from training data.
+            mins: Min values for min-max clipping (per band)
+            maxs: Max values for min-max clipping (per band)
         """
         if stats_dict is None:
             stats_dict = compute_eurosat_zscore_stats()
         self.stats = stats_dict
         self.band_names = ALL_BAND_NAMES
+        self.mins = mins
+        self.maxs = maxs
 
     def __call__(self, image):
         """
-        Apply z-score normalization to image tensor.
+        Apply min-max clipping followed by z-score normalization.
+
+        Pipeline:
+        1. Clip to [min, max] per band
+        2. Z-score normalize: (value - mean) / std
 
         Args:
             image: Tensor of shape [13, H, W] or [B, 13, H, W]
 
         Returns:
-            Z-score normalized tensor
+            Normalized tensor
         """
         is_batched = image.ndim == 4
         if not is_batched:
             image = image.unsqueeze(0)
 
         normalized = image.clone().float()
+
         for i, band in enumerate(self.band_names):
+            # Step 1: Min-max clipping
+            min_val = self.mins[i].item() if self.mins.ndim > 0 else self.mins
+            max_val = self.maxs[i].item() if self.maxs.ndim > 0 else self.maxs
+            normalized[:, i] = torch.clamp(normalized[:, i], min_val, max_val)
+
+            # Step 2: Z-score normalization
             mean, std = self.stats[band]
             normalized[:, i] = (normalized[:, i] - mean) / (std + 1e-8)
 

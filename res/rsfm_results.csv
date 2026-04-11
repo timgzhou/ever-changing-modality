@@ -2,3 +2,4 @@ model,dataset,modality,train_mode,epochs,lr,weight_decay,batch_size,metric_name,
 panopticon,benv2,s1,lp,1,0.001,0.0,32,mAP,14611,checkpoints/rsfm_benv2_s1_lp_20260411_153215.pt
 panopticon,eurosat,rgb,lp,5,0.001,0.0,32,Acc,7690,checkpoints/rsfm_eurosat_rgb_lp_20260411_154738.pt
 panopticon,eurosat,s2,lp,2,0.001,0.0,32,Acc,7690,checkpoints/rsfm_eurosat_s2_lp_20260411_155437.pt
+panopticon,eurosat,s2,lp,2,0.001,0.0,32,Acc,7690,checkpoints/rsfm_eurosat_s2_lp_20260411_161215.pt
