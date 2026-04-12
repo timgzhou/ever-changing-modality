@@ -80,6 +80,21 @@ MODALITY_CONFIGS = {
     'dfc2020': ['s2', 's1', 's2s1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
 }
 
+# Short model names → HuggingFace repo IDs for DINOv3 ViT models
+DINO_MODELS = {
+    'dinov3-vitb-lvd': 'facebook/dinov3-vitb16-pretrain-lvd1689m',
+    'dinov3-vitl-lvd': 'facebook/dinov3-vitl16-pretrain-lvd1689m',
+    'dinov3-vitl-sat': 'facebook/dinov3-vitl16-pretrain-sat493m',
+}
+# Per-model normalization stats (applied after min-max [0,1] → z-score)
+# LVD models: standard ImageNet stats; SAT model: satellite-specific stats
+DINO_NORM_STATS = {
+    'dinov3-vitb-lvd': ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    'dinov3-vitl-lvd': ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    'dinov3-vitl-sat': ((0.430, 0.411, 0.296), (0.213, 0.156, 0.143)),
+}
+DINO_RGB_MODALITIES = {'rgb', 's2_rgb'}
+
 
 def _n_chans(entry) -> int:
     """Return channel count for a modality_bands_dict entry (slice or list)."""
@@ -308,6 +323,63 @@ class OlmoEarthWrapper(ModelWrapper):
             return ModelOutput(feat.mean(dim=[2, 3]))  # [B, 768] global avg pool
 
 
+class DinoWrapper(ModelWrapper):
+    """
+    Wraps a HuggingFace DINOv3 ViT to accept raw-DN [B, 3, H, W] RGB tensors.
+
+    Preprocessing (applied internally, so loaders must pass raw_pixels=True):
+      1. Min-max normalize to [0, 1] using per-band EuroSAT BAND_MINS/BAND_MAXS
+         (bands are B04, B03, B02 = Red, Green, Blue in that order)
+      2. Z-score with model-specific mean/std:
+         - LVD models: ImageNet stats (0.485, 0.456, 0.406) / (0.229, 0.224, 0.225)
+         - SAT model:  satellite stats (0.430, 0.411, 0.296) / (0.213, 0.156, 0.143)
+
+    forward() returns ModelOutput with:
+      - output_hidden_states=False: CLS token [B, D]
+      - output_hidden_states=True:  patch tokens [B, N, D]
+    """
+
+    def __init__(self, model, model_key: str, modality: str, dataset: str):
+        super().__init__()
+        self.model = model
+        self.modality = modality
+        self.dataset = dataset
+
+        # Min-max stats for B04, B03, B02 (Red, Green, Blue)
+        # ALL_BAND_NAMES = [B01,B02,B03,B04,...] → indices 3,2,1
+        from eurosat_data_utils import BAND_MINS, BAND_MAXS
+        rgb_indices = [3, 2, 1]  # B04=3, B03=2, B02=1 in ALL_BAND_NAMES
+        self.register_buffer('band_mins', BAND_MINS[rgb_indices].view(1, 3, 1, 1))
+        self.register_buffer('band_maxs', BAND_MAXS[rgb_indices].view(1, 3, 1, 1))
+
+        # Per-model normalization stats
+        mean, std = DINO_NORM_STATS[model_key]
+        self.register_buffer('norm_mean', torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1))
+        self.register_buffer('norm_std',  torch.tensor(std,  dtype=torch.float32).view(1, 3, 1, 1))
+
+    def forward(self, imgs, output_hidden_states=False):
+        """
+        [B, 3, H, W] raw DN → ModelOutput.
+
+        last_hidden_state:
+          - [B, D]    when output_hidden_states=False (CLS token, classification)
+          - [B, N, D] when output_hidden_states=True  (patch tokens, segmentation)
+        """
+        # Step 1: min-max to [0, 1]
+        x = (imgs - self.band_mins) / (self.band_maxs - self.band_mins + 1e-6)
+        x = x.clamp(0.0, 1.0)
+        # Step 2: z-score with model-specific stats
+        x = (x - self.norm_mean) / self.norm_std
+
+        output = self.model(pixel_values=x)
+        # HF DINOv3: last_hidden_state is [B, 1+N, D] (CLS token at index 0)
+        tokens = output.last_hidden_state
+        if output_hidden_states:
+            return ModelOutput(tokens[:, 1:, :])   # patch tokens [B, N, D]
+        else:
+            return ModelOutput(tokens[:, 0, :])    # CLS token [B, D]
+
+
 class PanopticonWrapper(ModelWrapper):
     """
     Wraps Panopticon to accept [B, C, H, W] and automatically build chn_ids.
@@ -455,6 +527,25 @@ def load_foundation_model(model_name: str, device, modality='s2', dataset=None):
         wrapped = wrapped.to(device)
         print(f"Feature dimension (OlmoEarth {model_id}, patch_size={patch_size}): {feature_dim}")
         return wrapped, feature_dim
+
+    # DINOv3 detection
+    if model_name in DINO_MODELS:
+        if modality not in DINO_RGB_MODALITIES:
+            raise ValueError(
+                f"DINOv3 only supports RGB modalities {DINO_RGB_MODALITIES}, got {modality!r}"
+            )
+        from transformers import AutoModel
+        repo_id = DINO_MODELS[model_name]
+        print(f"Loading DINOv3 from {repo_id}")
+        model = AutoModel.from_pretrained(repo_id)
+        model = model.to(device).eval()
+        feature_dim = model.config.hidden_size  # 768 for vitb, 1024 for vitl
+        wrapped = DinoWrapper(model, model_key=model_name, modality=modality, dataset=dataset)
+        wrapped = wrapped.to(device)
+        print(f"Feature dimension (DINOv3 {model_name}): {feature_dim}")
+        return wrapped, feature_dim
+
+    raise ValueError(f"Unknown model: {model_name!r}. Supported: 'panopticon', 'olmoearth', {list(DINO_MODELS)}")
 
 
 def create_classification_head(feature_dim: int, num_classes: int, device):
@@ -861,7 +952,7 @@ def main():
     parser.add_argument('--train_mode', type=str, default='lp', choices=['lp', 'fft'],
                         help='Training mode: lp (linear probe) or fft (full fine-tune)')
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--weight_decay', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--num_workers', type=int, default=4)
@@ -883,12 +974,13 @@ def main():
     print(f"Model: {args.model}, Batch size: {args.batch_size}, LR: {args.lr}, Epochs: {args.epochs}")
 
     is_olmoearth = 'olmoearth' in args.model.lower()
+    is_dino = args.model in DINO_MODELS
 
     # Data
     print("\n=== Creating datasets ===")
     train1_loader, val1_loader, test_loader, task_config, modality_bands_dict = get_task_config_and_loaders(
         args.dataset, args.modality, args.batch_size, args.num_workers,
-        data_root=args.data_root, raw_pixels=is_olmoearth,
+        data_root=args.data_root, raw_pixels=is_olmoearth or is_dino,
     )
 
     # Model

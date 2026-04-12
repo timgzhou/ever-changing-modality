@@ -140,3 +140,6 @@ out_path = os.path.join(os.path.dirname(__file__), '..', 'res', 'rsfm_results.pn
 plt.savefig(out_path, dpi=150, bbox_inches='tight')
 print(f"Saved: {out_path}")
 plt.show()
+
+
+# python plotting/rsfm_results.py
