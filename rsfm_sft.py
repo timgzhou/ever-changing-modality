@@ -103,15 +103,209 @@ class ModelWrapper(nn.Module):
 
 
 class OlmoEarthWrapper(ModelWrapper):
-    """Wraps OlmoEarth to provide standard interface."""
+    """
+    Wraps OlmoEarth encoder to accept raw-DN [B, C, H, W] tensors.
 
-    def __init__(self, model):
+    Applies OlmoEarth per-band clip normalization internally, then builds the
+    MaskedOlmoEarthSample the encoder expects (single timestep, no missing tokens).
+
+    forward() returns ModelOutput with:
+      - classification path (output_hidden_states=False): last_hidden_state [B, 768]
+        (global avg pool of spatial feature map)
+      - segmentation path  (output_hidden_states=True):  last_hidden_state [B, 768, H/p, W/p]
+        (spatial feature map, ready for segmentation head + bilinear upsample)
+    """
+
+    # OlmoEarth band order for sentinel2_l2a (must match normalization config keys)
+    S2_BAND_ORDER_12 = ['B02', 'B03', 'B04', 'B08', 'B05', 'B06', 'B07', 'B8A', 'B11', 'B12', 'B01', 'B09']
+    # DFC2020 has 13 S2 bands (includes B10 at index 10 in DFC2020's layout)
+    # DFC2020 S2 layout: B1,B2,B3,B4,B5,B6,B7,B8,B8A,B9,B10,B11,B12
+    S2_BAND_ORDER_13 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B10', 'B11', 'B12']
+    S1_BAND_ORDER    = ['vv', 'vh']  # OlmoEarth sentinel1 band names
+
+    # For each sub-band modality: which bands are present and their indices in S2_BAND_ORDER_12
+    # S2_BAND_ORDER_12 = [B02,B03,B04,B08,B05,B06,B07,B8A,B11,B12,B01,B09]
+    #                      idx: 0    1    2    3    4    5    6    7    8    9   10   11
+    _S2_SUBBAND_INDICES = {
+        'rgb':    ([2, 1, 0],  ['B04', 'B03', 'B02']),  # input order: B04,B03,B02
+        's2_rgb': ([2, 1, 0],  ['B04', 'B03', 'B02']),
+        'vre':    ([4, 5, 6],  ['B05', 'B06', 'B07']),
+        's2_vre': ([4, 5, 6],  ['B05', 'B06', 'B07']),
+        'nir':    ([3, 7],     ['B08', 'B8A']),
+        's2_nir': ([3, 7],     ['B08', 'B8A']),
+        'swir':   ([8, 9],     ['B11', 'B12']),          # B10 not in OlmoEarth; B11,B12 at 8,9
+        's2_swir':([8, 9],     ['B11', 'B12']),
+        'aw':     ([10, 11],   ['B01', 'B09']),
+        's2_aw':  ([10, 11],   ['B01', 'B09']),
+    }
+
+    def __init__(self, model, patch_size: int = 8, dataset: str = 'benv2', modality: str = 's2'):
         super().__init__()
-        self.model = model
+        self.encoder = model
+        self.patch_size = patch_size
+        self.dataset = dataset
+        self.modality = modality
 
-    def forward(self, imgs, output_hidden_states=True):
-        """[B, C, H, W] → output with last_hidden_state."""
-        return self.model(imgs, output_hidden_states=output_hidden_states)
+        # Load OlmoEarth normalization stats
+        from olmoearth_pretrain.data.normalize import load_computed_config
+        from olmoearth_pretrain.datatypes import MaskValue
+        norm_cfg = load_computed_config()
+        self._maskvalue_online = MaskValue.ONLINE_ENCODER.value
+
+        std_mult = 2.0
+        s2_cfg = norm_cfg['sentinel2_l2a']
+        s1_cfg = norm_cfg['sentinel1']
+
+        # Build per-channel [lo, hi] for clip normalization: (x - lo) / (hi - lo)
+        # s2 — 12-band order (benv2/pastis)
+        lo12 = [s2_cfg[b]['mean'] - std_mult * s2_cfg[b]['std'] for b in self.S2_BAND_ORDER_12]
+        hi12 = [s2_cfg[b]['mean'] + std_mult * s2_cfg[b]['std'] for b in self.S2_BAND_ORDER_12]
+        self.register_buffer('s2_lo12', torch.tensor(lo12, dtype=torch.float32).view(1, -1, 1, 1))
+        self.register_buffer('s2_hi12', torch.tensor(hi12, dtype=torch.float32).view(1, -1, 1, 1))
+
+        # s2 — 13-band order (dfc2020)
+        # B10 has no OlmoEarth stats (not in training data); use B09 stats as fallback
+        s2_13_bands = self.S2_BAND_ORDER_13
+        lo13, hi13 = [], []
+        for b in s2_13_bands:
+            if b in s2_cfg:
+                lo13.append(s2_cfg[b]['mean'] - std_mult * s2_cfg[b]['std'])
+                hi13.append(s2_cfg[b]['mean'] + std_mult * s2_cfg[b]['std'])
+            else:
+                # B10 fallback: use B09 range
+                lo13.append(s2_cfg['B09']['mean'] - std_mult * s2_cfg['B09']['std'])
+                hi13.append(s2_cfg['B09']['mean'] + std_mult * s2_cfg['B09']['std'])
+                logger.warning(f"OlmoEarth norm stats missing for band {b}, using B09 as fallback")
+        self.register_buffer('s2_lo13', torch.tensor(lo13, dtype=torch.float32).view(1, -1, 1, 1))
+        self.register_buffer('s2_hi13', torch.tensor(hi13, dtype=torch.float32).view(1, -1, 1, 1))
+
+        # s1 — OlmoEarth expects dB values; DFC2020 already stores dB, BEN-v2 also stores dB
+        lo_s1 = [s1_cfg[b]['mean'] - std_mult * s1_cfg[b]['std'] for b in self.S1_BAND_ORDER]
+        hi_s1 = [s1_cfg[b]['mean'] + std_mult * s1_cfg[b]['std'] for b in self.S1_BAND_ORDER]
+        self.register_buffer('s1_lo', torch.tensor(lo_s1, dtype=torch.float32).view(1, -1, 1, 1))
+        self.register_buffer('s1_hi', torch.tensor(hi_s1, dtype=torch.float32).view(1, -1, 1, 1))
+
+    def _normalize_clip(self, x, lo, hi):
+        """Clip-normalize: (x - lo) / (hi - lo), clamped to [0, 1]."""
+        return ((x - lo) / (hi - lo + 1e-6)).clamp(0.0, 1.0)
+
+    def _build_sample(self, imgs):
+        """
+        Build MaskedOlmoEarthSample from [B, C, H, W] raw-DN tensor.
+
+        Uses self.modality to know exactly which bands are present:
+          - 's2':    12-band S2 (benv2/pastis layout)
+          - 's2' on dfc2020: 13-band S2
+          - 's1':    2-band S1 only (VV, VH)
+          - 's2s1':  S2 + S1 concatenated
+          - sub-band modalities (rgb, vre, nir, swir, aw, s2_rgb, ...):
+            bands placed into the correct positions of a 12-band S2 tensor;
+            missing bands masked as MISSING so OlmoEarth ignores them
+        """
+        from olmoearth_pretrain.datatypes import MaskedOlmoEarthSample, MaskValue
+        B, C, H, W = imgs.shape
+        device = imgs.device
+        modality = self.modality
+        n_band_sets = 3  # S2 has 3 band sets in OlmoEarth's Modality definition
+
+        kwargs = {}
+
+        if modality == 's1':
+            # S1-only: no S2 input
+            s1_norm = self._normalize_clip(imgs, self.s1_lo, self.s1_hi)
+            kwargs['sentinel1'] = s1_norm.permute(0, 2, 3, 1).unsqueeze(3)  # [B,H,W,1,2]
+            kwargs['sentinel1_mask'] = torch.full(
+                (B, H, W, 1, 1), fill_value=MaskValue.ONLINE_ENCODER.value,
+                dtype=torch.int32, device=device,
+            )
+            # Still need sentinel2_l2a (required field) — mark it all MISSING
+            kwargs['sentinel2_l2a'] = torch.zeros((B, H, W, 1, 12), dtype=torch.float32, device=device)
+            kwargs['sentinel2_l2a_mask'] = torch.full(
+                (B, H, W, 1, n_band_sets), fill_value=MaskValue.MISSING.value,
+                dtype=torch.int32, device=device,
+            )
+
+        elif modality in ('s2', 's2s1'):
+            # Full S2 (12 or 13 bands), optionally followed by S1
+            if self.dataset == 'dfc2020':
+                s2_norm = self._normalize_clip(imgs[:, :13], self.s2_lo13, self.s2_hi13)
+            else:
+                s2_norm = self._normalize_clip(imgs[:, :12], self.s2_lo12, self.s2_hi12)
+            kwargs['sentinel2_l2a'] = s2_norm.permute(0, 2, 3, 1).unsqueeze(3)
+            kwargs['sentinel2_l2a_mask'] = torch.full(
+                (B, H, W, 1, n_band_sets), fill_value=MaskValue.ONLINE_ENCODER.value,
+                dtype=torch.int32, device=device,
+            )
+            if modality == 's2s1':
+                s1_norm = self._normalize_clip(imgs[:, -2:], self.s1_lo, self.s1_hi)
+                kwargs['sentinel1'] = s1_norm.permute(0, 2, 3, 1).unsqueeze(3)
+                kwargs['sentinel1_mask'] = torch.full(
+                    (B, H, W, 1, 1), fill_value=MaskValue.ONLINE_ENCODER.value,
+                    dtype=torch.int32, device=device,
+                )
+
+        elif modality in self._S2_SUBBAND_INDICES:
+            # Sub-band S2 modality: place bands into correct positions, mask the rest as MISSING
+            positions, band_names = self._S2_SUBBAND_INDICES[modality]
+            # Normalize each input channel with its own per-band stats from s2_lo12/s2_hi12
+            s2_full = torch.zeros((B, 12, H, W), dtype=imgs.dtype, device=device)
+            for in_ch, (out_pos, band_name) in enumerate(zip(positions, band_names)):
+                lo = self.s2_lo12[:, out_pos:out_pos+1]
+                hi = self.s2_hi12[:, out_pos:out_pos+1]
+                s2_full[:, out_pos] = self._normalize_clip(imgs[:, in_ch:in_ch+1], lo, hi).squeeze(1)
+            kwargs['sentinel2_l2a'] = s2_full.permute(0, 2, 3, 1).unsqueeze(3)
+            # Mark all band-sets as MISSING, then flip the ones we have to ONLINE
+            s2_mask = torch.full(
+                (B, H, W, 1, n_band_sets), fill_value=MaskValue.MISSING.value,
+                dtype=torch.int32, device=device,
+            )
+            # OlmoEarth band-set assignment for S2_BAND_ORDER_12:
+            # set 0 (10m): B02=0, B03=1, B04=2, B08=3
+            # set 1 (20m): B05=4, B06=5, B07=6, B8A=7, B11=8, B12=9
+            # set 2 (60m): B01=10, B09=11
+            _band_set = [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2]
+            active_sets = {_band_set[p] for p in positions}
+            for s in active_sets:
+                s2_mask[:, :, :, :, s] = MaskValue.ONLINE_ENCODER.value
+            kwargs['sentinel2_l2a_mask'] = s2_mask
+
+        else:
+            raise ValueError(f"OlmoEarthWrapper: unsupported modality '{modality}'")
+
+        # Timestamps: dummy [B, T=1, 3] — day=1, month=0 (Jan), year=2024
+        timestamps = torch.zeros((B, 1, 3), dtype=torch.int32, device=device)
+        timestamps[:, 0, 0] = 1
+        timestamps[:, 0, 2] = 2024
+        kwargs['timestamps'] = timestamps
+
+        return MaskedOlmoEarthSample(**kwargs)
+
+    def forward(self, imgs, output_hidden_states=False):
+        """
+        [B, C, H, W] raw DN → ModelOutput.
+
+        last_hidden_state:
+          - [B, 768]         when output_hidden_states=False (classification: global avg pool)
+          - [B, 768, H/p, W/p] when output_hidden_states=True  (segmentation: spatial map)
+        """
+        sample = self._build_sample(imgs)
+
+        with torch.amp.autocast(device_type=imgs.device.type, dtype=torch.bfloat16):
+            result = self.encoder(sample, fast_pass=True, patch_size=self.patch_size)
+
+        tokens_and_masks = result['tokens_and_masks']
+        if self.modality == 's1':
+            # Pool from sentinel1 tokens: [B, H/p, W/p, T, S, C] → [B, C, H/p, W/p]
+            feat = tokens_and_masks.sentinel1.mean(dim=[3, 4])
+        else:
+            # Pool from sentinel2_l2a tokens: [B, H/p, W/p, T, S, C] → [B, C, H/p, W/p]
+            feat = tokens_and_masks.sentinel2_l2a.mean(dim=[3, 4])
+        feat = feat.permute(0, 3, 1, 2).float()                 # [B, C, H/p, W/p]
+
+        if output_hidden_states:
+            return ModelOutput(feat)  # [B, 768, H/p, W/p]
+        else:
+            return ModelOutput(feat.mean(dim=[2, 3]))  # [B, 768] global avg pool
 
 
 class PanopticonWrapper(ModelWrapper):
@@ -234,39 +428,33 @@ def load_foundation_model(model_name: str, device, modality='s2', dataset=None):
         return wrapped, feature_dim
 
     # OlmoEarth detection
-    if 'OlmoEarth' in model_name or 'olmoearth' in model_name.lower():
-        try:
-            from transformers import AutoModel
-            model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
-            model = model.to(device)
-            model.eval()
-            feature_dim = 768  # OlmoEarth-v1-Base is 768-dim
-            wrapped = OlmoEarthWrapper(model)
-            wrapped = wrapped.to(device)
-            print(f"Feature dimension (OlmoEarth): {feature_dim}")
-            return wrapped, feature_dim
-        except ValueError as e:
-            if "Unrecognized model" in str(e):
-                print("\n✗ OlmoEarth requires special loading (not standard HF transformers).")
-                print("  Install: pip install olmoearth-pretrain")
-                print("  Or use rslearn library: https://github.com/allenai/rslearn")
-                print(f"  Error: {e}\n")
-            raise
-
-    # Generic HF model loading
-    from transformers import AutoModel
-    model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
-    model = model.to(device)
-    model.eval()
-
-    # Infer feature dimension
-    feature_dim = getattr(model.config, 'hidden_size', 768)
-    print(f"Feature dimension: {feature_dim}")
-
-    # Wrap in OlmoEarthWrapper for consistency
-    wrapped = OlmoEarthWrapper(model)
-    wrapped = wrapped.to(device)
-    return wrapped, feature_dim
+    if model_name.lower() in ('olmoearth', 'olmoearth-base') or 'olmoearth' in model_name.lower():
+        from olmoearth_pretrain.model_loader import ModelID, load_model_from_id
+        # Map short names to ModelID
+        _id_map = {
+            'olmoearth': ModelID.OLMOEARTH_V1_BASE,
+            'olmoearth-nano': ModelID.OLMOEARTH_V1_NANO,
+            'olmoearth-tiny': ModelID.OLMOEARTH_V1_TINY,
+            'olmoearth-base': ModelID.OLMOEARTH_V1_BASE,
+            'olmoearth-large': ModelID.OLMOEARTH_V1_LARGE,
+        }
+        model_id = _id_map.get(model_name.lower(), ModelID.OLMOEARTH_V1_BASE)
+        print(f"Loading OlmoEarth model: {model_id}")
+        raw_model = load_model_from_id(model_id)
+        # Select encoder sub-module only (matches rslearn's selector=["encoder"])
+        encoder = raw_model.encoder
+        encoder = encoder.to(device)
+        encoder.eval()
+        _OLMOEARTH_EMBEDDING_SIZES = {
+            'OlmoEarth-v1-Nano': 128, 'OlmoEarth-v1-Tiny': 192,
+            'OlmoEarth-v1-Base': 768, 'OlmoEarth-v1-Large': 1024,
+        }
+        feature_dim = _OLMOEARTH_EMBEDDING_SIZES.get(str(model_id), 768)
+        patch_size = 8  # good balance of spatial resolution vs speed
+        wrapped = OlmoEarthWrapper(encoder, patch_size=patch_size, dataset=dataset, modality=modality)
+        wrapped = wrapped.to(device)
+        print(f"Feature dimension (OlmoEarth {model_id}, patch_size={patch_size}): {feature_dim}")
+        return wrapped, feature_dim
 
 
 def create_classification_head(feature_dim: int, num_classes: int, device):
@@ -373,17 +561,26 @@ def extract_features(model, loader, device, modality_slices: dict, modality: str
     return feats, labels
 
 
-def get_task_config_and_loaders(dataset, modality, batch_size, num_workers, data_root=None):
-    """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict)."""
+def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
+                                data_root=None, raw_pixels=False):
+    """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict).
+
+    Args:
+        raw_pixels: If True, skip dataset-level normalization (for models like OlmoEarth
+                    that apply their own normalization internally).
+    """
     from data_utils import get_loaders
 
     # s2s1 = concatenated all-bands; load with both modalities so the stacked image is available
     starting_modality = 's2' if modality == 's2s1' else modality
     new_modality = 's1' if modality == 's2s1' else None
 
+    # data_normalizer=False signals loaders to skip normalization (OlmoEarth path)
+    data_normalizer = False if raw_pixels else None
+
     train1, val1, _, _, test, task_config = get_loaders(
         dataset, starting_modality, batch_size, num_workers,
-        data_normalizer=None, num_time_steps=10,
+        data_normalizer=data_normalizer, num_time_steps=10,
         new_modality=new_modality, data_root=data_root,
     )
 
@@ -427,6 +624,56 @@ def compute_metrics(logits, labels, task_type='classification', multilabel=False
         return acc * 100.0
 
 
+def eval_head(model, head, loader, criterion, device, segmentation, multilabel,
+              num_classes, ignore_index, desc='Eval', modality_slice=None):
+    """Run model+head over loader, return (metric, loss). Used for val and test."""
+    from tqdm import tqdm
+    model.eval()
+    head.eval()
+    total_loss = 0.0
+    all_logits, all_labels = [], []
+
+    for batch in tqdm(loader, desc=desc, leave=False):
+        imgs = batch['image'].to(device)
+        if modality_slice is not None:
+            imgs = imgs[:, modality_slice]
+        if segmentation:
+            labels = batch.get('mask', batch.get('label')).to(device).long()
+        else:
+            labels = batch['label'].to(device)
+            if multilabel:
+                labels = labels.float()
+
+        with torch.no_grad():
+            output = model(imgs, output_hidden_states=True)
+            feat = output.last_hidden_state if hasattr(output, 'last_hidden_state') \
+                else (output[0] if isinstance(output, tuple) else output)
+
+            if segmentation:
+                features = _patch_tokens_to_spatial(feat)
+            else:
+                if feat.dim() == 3:
+                    features = feat[:, 0, :]
+                elif feat.dim() == 2:
+                    features = feat
+                else:
+                    features = feat.mean(dim=(2, 3))
+
+            logits = head(features)
+            if segmentation and logits.shape[-1] != labels.shape[-1]:
+                logits = F.interpolate(logits, size=labels.shape[-2:], mode='bilinear', align_corners=False)
+            total_loss += criterion(logits, labels).item()
+            all_logits.append(logits.cpu())
+            all_labels.append(labels.cpu())
+
+    metric = compute_metrics(
+        torch.cat(all_logits), torch.cat(all_labels),
+        task_type='segmentation' if segmentation else 'classification',
+        multilabel=multilabel, num_classes=num_classes, ignore_index=ignore_index,
+    )
+    return metric, total_loss / len(loader)
+
+
 def _patch_tokens_to_spatial(feat):
     """
     Convert transformer token sequence to spatial feature map [B, D, H, W].
@@ -454,7 +701,8 @@ def _patch_tokens_to_spatial(feat):
 
 def train_head(model, head, train_loader, val_loader, criterion, device,
                epochs, lr, weight_decay, train_mode='lp', wandb_log=False,
-               segmentation=False, multilabel=False, num_classes=None, ignore_index=-100):
+               segmentation=False, multilabel=False, num_classes=None, ignore_index=-100,
+               modality_slice=None):
     """
     Train the head (+ optionally backbone layers) on train_loader.
 
@@ -513,6 +761,8 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
         train_loss = 0.0
         for batch in tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs} [train]', leave=False):
             imgs = batch['image'].to(device)
+            if modality_slice is not None:
+                imgs = imgs[:, modality_slice]
             if segmentation:
                 labels = batch.get('mask', batch.get('label')).to(device).long()
             else:
@@ -571,53 +821,13 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
         train_loss /= len(train_loader)
 
         # Validation
-        head.eval()
-        val_loss = 0.0
-        all_logits = []
-        all_labels = []
-
-        for batch in tqdm(val_loader, desc=f'Epoch {epoch+1}/{epochs} [val]', leave=False):
-            imgs = batch['image'].to(device)
-            if segmentation:
-                labels = batch.get('mask', batch.get('label')).to(device).long()
-            else:
-                labels = batch['label'].to(device)
-                if multilabel:
-                    labels = labels.float()
-
-            with torch.no_grad():
-                output = model(imgs, output_hidden_states=True)
-                if hasattr(output, 'last_hidden_state'):
-                    feat = output.last_hidden_state
-                else:
-                    feat = output[0] if isinstance(output, tuple) else output
-
-                if segmentation:
-                    features = _patch_tokens_to_spatial(feat)
-                else:
-                    if feat.dim() == 3:
-                        features = feat[:, 0, :]
-                    elif feat.dim() == 2:
-                        features = feat
-                    else:
-                        features = feat.mean(dim=(2, 3))
-
-                logits = head(features)
-                if segmentation and logits.shape[-1] != labels.shape[-1]:
-                    logits = F.interpolate(logits, size=labels.shape[-2:], mode='bilinear', align_corners=False)
-                val_loss += criterion(logits, labels).item()
-                all_logits.append(logits.cpu())
-                all_labels.append(labels.cpu())
-
-        val_loss /= len(val_loader)
-        all_logits = torch.cat(all_logits)
-        all_labels = torch.cat(all_labels)
-
-        val_metric = compute_metrics(all_logits, all_labels,
-                                     task_type='segmentation' if segmentation else 'classification',
-                                     multilabel=multilabel,
-                                     num_classes=num_classes,
-                                     ignore_index=ignore_index)
+        val_metric, val_loss = eval_head(
+            model, head, val_loader, criterion, device,
+            segmentation=segmentation, multilabel=multilabel,
+            num_classes=num_classes, ignore_index=ignore_index,
+            desc=f'Epoch {epoch+1}/{epochs} [val]',
+            modality_slice=modality_slice,
+        )
 
         if val_metric > best_val_metric:
             best_val_metric = val_metric
@@ -672,10 +882,13 @@ def main():
     print(f"Using device: {device}")
     print(f"Model: {args.model}, Batch size: {args.batch_size}, LR: {args.lr}, Epochs: {args.epochs}")
 
+    is_olmoearth = 'olmoearth' in args.model.lower()
+
     # Data
     print("\n=== Creating datasets ===")
     train1_loader, val1_loader, test_loader, task_config, modality_bands_dict = get_task_config_and_loaders(
-        args.dataset, args.modality, args.batch_size, args.num_workers, data_root=args.data_root
+        args.dataset, args.modality, args.batch_size, args.num_workers,
+        data_root=args.data_root, raw_pixels=is_olmoearth,
     )
 
     # Model
@@ -714,12 +927,15 @@ def main():
     # Training
     print(f"\n=== Training for {args.epochs} epochs ===")
     ignore_index = getattr(task_config, 'ignore_index', -100)
-    head, best_val_metric, trainable_params = train_head(
+    # Resolve the slice for the requested modality (loaders always return the full stacked image)
+    modality_slice = modality_bands_dict.get(args.modality)
+    head, _, trainable_params = train_head(
         fm, head, train1_loader, val1_loader, criterion, device,
         epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
         train_mode=args.train_mode, wandb_log=bool(args.wandb_project),
         segmentation=is_segmentation, multilabel=task_config.multilabel,
-        num_classes=task_config.num_classes, ignore_index=ignore_index
+        num_classes=task_config.num_classes, ignore_index=ignore_index,
+        modality_slice=modality_slice,
     )
 
     # Save checkpoint
@@ -731,11 +947,24 @@ def main():
     print(f"\n=== Training complete ===")
     print(f"Head checkpoint: {checkpoint_path}")
 
+    # Test evaluation
+    print(f"\n=== Evaluating best checkpoint on test set ===")
+    test_metric, _ = eval_head(
+        fm, head, test_loader, criterion, device,
+        segmentation=is_segmentation, multilabel=task_config.multilabel,
+        num_classes=task_config.num_classes, ignore_index=ignore_index,
+        desc='Test', modality_slice=modality_slice,
+    )
+    print(f"Test {metric_name}: {test_metric:.2f}%")
+
+    if args.wandb_project:
+        wandb.log({f'test_{metric_name}': test_metric})
+
     # CSV logging
     os.makedirs(os.path.dirname(args.results_csv), exist_ok=True)
     fieldnames = [
         'model', 'dataset', 'modality', 'train_mode', 'epochs', 'lr', 'weight_decay',
-        'batch_size', 'metric_name', 'trainable_params', 'saved_checkpoint'
+        'batch_size', 'metric_name', 'test_metric', 'trainable_params', 'saved_checkpoint'
     ]
     file_exists = os.path.isfile(args.results_csv)
     with open(args.results_csv, 'a', newline='') as f:
@@ -752,6 +981,7 @@ def main():
             'weight_decay': args.weight_decay,
             'batch_size': args.batch_size,
             'metric_name': metric_name,
+            'test_metric': f'{test_metric:.4f}',
             'trainable_params': trainable_params,
             'saved_checkpoint': checkpoint_path,
         })

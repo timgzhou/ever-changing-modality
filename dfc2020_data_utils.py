@@ -91,7 +91,7 @@ class DFC2020Dataset(Dataset):
         batch['mask']:  [96, 96] int64, values 0–7 + 255 (ignore_index)
     """
 
-    def __init__(self, data_root: str | Path, split: str, target_size: int | None = None):
+    def __init__(self, data_root: str | Path, split: str, target_size: int | None = None, normalize: bool = True):
         """
         Args:
             data_root: Path to the extracted DFC2020 directory (contains metadata.csv).
@@ -100,6 +100,7 @@ class DFC2020Dataset(Dataset):
         """
         self.root = Path(data_root)
         self.target_size = target_size
+        self.normalize = normalize
 
         meta = pd.read_csv(self.root / 'metadata.csv')
         self.samples = meta[meta['split'] == split].reset_index(drop=True)
@@ -128,9 +129,9 @@ class DFC2020Dataset(Dataset):
             lbl = lbl[:, :, 0]
         mask = torch.from_numpy(_CLASSES_LUT[lbl.astype(np.int64)].astype(np.int64))  # [96, 96]
 
-        # Z-score normalize
-        s2 = (s2 - self._s2_mean) / (self._s2_std + 1e-6)
-        s1 = (s1 - self._s1_mean) / (self._s1_std + 1e-6)
+        if self.normalize:
+            s2 = (s2 - self._s2_mean) / (self._s2_std + 1e-6)
+            s1 = (s1 - self._s1_mean) / (self._s1_std + 1e-6)
 
         image = torch.cat([s2, s1], dim=0)  # [15, 96, 96]
 
@@ -156,6 +157,7 @@ def get_dfc2020_loaders(
     starting_modality: str = 's2',
     new_modality: str | None = 's1',
     val_fraction: float = 0.0,
+    normalize: bool = True,
 ) -> tuple:
     """
     Create 5 dataloaders for DFC2020 matching the SHOT interface.
@@ -192,11 +194,11 @@ def get_dfc2020_loaders(
     assert new_modality is None or new_modality in modality_bands_dict, \
         f"new_modality must be one of {list(modality_bands_dict)} or None, got {new_modality!r}"
 
-    test_ds = DFC2020Dataset(data_root, split='test')
+    test_ds = DFC2020Dataset(data_root, split='test', normalize=normalize)
 
     if val_fraction > 0.0:
         # Carve val from train deterministically
-        train_full = DFC2020Dataset(data_root, split='train')
+        train_full = DFC2020Dataset(data_root, split='train', normalize=normalize)
         n = len(train_full)
         rng = random.Random(seed)
         indices = list(range(n))
@@ -206,8 +208,8 @@ def get_dfc2020_loaders(
         train_indices = indices[n_val:]
     else:
         # Use metadata-defined splits
-        train_full = DFC2020Dataset(data_root, split='train')
-        val_full   = DFC2020Dataset(data_root, split='val')
+        train_full = DFC2020Dataset(data_root, split='train', normalize=normalize)
+        val_full   = DFC2020Dataset(data_root, split='val', normalize=normalize)
         n_train = len(train_full)
         n_val   = len(val_full)
         rng = random.Random(seed)

@@ -595,7 +595,7 @@ def get_loaders(bs=32,nw=4):
     return train1_loader, train2_loader, test_loader
 
 
-def get_loaders_with_val(bs=32, nw=4, seed=42):
+def get_loaders_with_val(bs=32, nw=4, seed=42, raw_pixels=False):
     """
     Get dataloaders with validation splits.
 
@@ -603,12 +603,14 @@ def get_loaders_with_val(bs=32, nw=4, seed=42):
     Stage 1 (self-supervised on multimodal): uses train2, validated on val2
     Stage 2 (pseudo-supervised on monomodal): uses train1, validated on val1
 
-    Data is z-score normalized for consistency with BEN-v2, PASTIS, and DFC2020.
+    Data is z-score normalized by default. Pass raw_pixels=True to skip normalization
+    and return raw DN values (e.g. for OlmoEarth which applies its own normalization).
 
     Args:
         bs: Batch size
         nw: Number of workers
         seed: Random seed for reproducible val split
+        raw_pixels: If True, skip z-score normalization (return raw DN values)
 
     Returns:
         train1_loader: Labeled training data (monomodal, for stage 2)
@@ -621,13 +623,14 @@ def get_loaders_with_val(bs=32, nw=4, seed=42):
     from torchgeo.datasets import EuroSAT
 
     bands_full = tuple(ALL_BAND_NAMES)
-    # Apply resize + z-score normalization transforms
+    # Apply resize + optional z-score normalization transforms
     resize_transform = DictTransform(transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True))
-    zscore_normalizer = ZScoreNormalizer()
-    normalizer_transform = NormalizerWrapper(zscore_normalizer)
-
-    # Create a combined transform: resize + z-score normalize
-    combined_transform = lambda sample: normalizer_transform(resize_transform(sample))
+    if raw_pixels:
+        combined_transform = resize_transform
+    else:
+        zscore_normalizer = ZScoreNormalizer()
+        normalizer_transform = NormalizerWrapper(zscore_normalizer)
+        combined_transform = lambda sample: normalizer_transform(resize_transform(sample))
 
     train_dataset_full = EuroSAT(
         root='ds_ers',

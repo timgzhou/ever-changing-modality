@@ -30,6 +30,12 @@ from geobench_v2.datasets.pastis import GeoBenchPASTIS
 from geobench_v2.datasets.normalization import ZScoreNormalizer
 
 
+class IdentityNormalizer:
+    """No-op normalizer for models that handle normalization internally (e.g. OlmoEarth)."""
+    def __call__(self, data):
+        return data
+
+
 class GeoBenchPASTISRandom(GeoBenchPASTIS):
     """GeoBenchPASTIS with random temporal subsampling instead of uniform."""
 
@@ -255,6 +261,7 @@ def get_benv2_loaders(
     seed: int = 42,
     starting_modality: str = 's2',
     new_modality: str | None = None,
+    data_normalizer=ZScoreNormalizer,
 ) -> tuple:
     """
     Create 5 dataloaders for BEN-v2 matching the SHOT interface.
@@ -289,17 +296,17 @@ def get_benv2_loaders(
     train_full = GeoBenchBENV2(
         root=root, split='train',
         band_order=full_band_order,
-        data_normalizer=ZScoreNormalizer,
+        data_normalizer=data_normalizer,
     )
     val_full = GeoBenchBENV2(
         root=root, split='val',
         band_order=full_band_order,
-        data_normalizer=ZScoreNormalizer,
+        data_normalizer=data_normalizer,
     )
     test_full = GeoBenchBENV2(
         root=root, split='test',
         band_order=full_band_order,
-        data_normalizer=ZScoreNormalizer,
+        data_normalizer=data_normalizer,
     )
 
     test_ds = StackedModalityDataset(test_full, modality_stack_order=['s2', 's1'], target_size=128)

@@ -140,13 +140,17 @@ def get_loaders(
         task_config:   TaskConfig describing this dataset/task.
     """
     if dataset == 'eurosat':
-        return _get_eurosat_loaders(starting_modality, new_modality, batch_size, num_workers)
+        return _get_eurosat_loaders(starting_modality, new_modality, batch_size, num_workers, data_normalizer=data_normalizer)
     elif dataset == 'benv2':
-        from geobench_data_utils import get_benv2_loaders
-        return get_benv2_loaders(
-            batch_size=batch_size, num_workers=num_workers,
-            starting_modality=starting_modality, new_modality=new_modality,
-        )
+        from geobench_data_utils import get_benv2_loaders, IdentityNormalizer
+        kwargs = dict(batch_size=batch_size, num_workers=num_workers,
+                      starting_modality=starting_modality, new_modality=new_modality)
+        if data_normalizer is False:
+            kwargs['data_normalizer'] = IdentityNormalizer()
+        elif data_normalizer is not None:
+            kwargs['data_normalizer'] = data_normalizer
+        # else: leave default (ZScoreNormalizer) in get_benv2_loaders
+        return get_benv2_loaders(**kwargs)
     elif dataset == 'benv2full':
         from benv2full_data_utils import get_bigearthnet_loaders
         # data_root can be e.g. '$TMPDIR' or 'datasets'; will look for BigEarthNet-{S2,S1} subdirs
@@ -167,21 +171,25 @@ def get_loaders(
         )
     elif dataset == 'dfc2020':
         from dfc2020_data_utils import get_dfc2020_loaders
-        return get_dfc2020_loaders(
-            batch_size=batch_size, num_workers=num_workers,
-            starting_modality=starting_modality, new_modality=new_modality,
-        )
+        kwargs = dict(batch_size=batch_size, num_workers=num_workers,
+                      starting_modality=starting_modality, new_modality=new_modality)
+        if data_normalizer is False:
+            kwargs['normalize'] = False  # raw pixels for OlmoEarth
+        return get_dfc2020_loaders(**kwargs)
     else:
         raise ValueError(f"Unknown dataset: {dataset!r}. Valid: 'eurosat', 'benv2', 'benv2full', 'pastis', 'dfc2020'")
 
 
-def _get_eurosat_loaders(starting_modality, new_modality, batch_size, num_workers):
+def _get_eurosat_loaders(starting_modality, new_modality, batch_size, num_workers, data_normalizer=None):
     from eurosat_data_utils import get_loaders_with_val, get_modality_bands_dict, MODALITY_BANDS
 
-    train1, val1, train2, val2, test = get_loaders_with_val(batch_size, num_workers)
+    raw_pixels = data_normalizer is False
+    train1, val1, train2, val2, test = get_loaders_with_val(batch_size, num_workers, raw_pixels=raw_pixels)
 
+    from eurosat_data_utils import get_band_indices
     mods = (starting_modality,) if new_modality is None else (starting_modality, new_modality)
-    modality_bands_dict = get_modality_bands_dict(*mods)
+    # Convert band name tuples to integer index lists so callers can do imgs[:, indices]
+    modality_bands_dict = {k: get_band_indices(v) for k, v in get_modality_bands_dict(*mods).items()}
 
     task_config = TaskConfig(
         dataset_name='eurosat',

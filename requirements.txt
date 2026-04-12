@@ -14,3 +14,5 @@ seaborn
 geobenchv2
 torchinfo
 scikit-learn
+rslearn
+olmoearth-pretrain
