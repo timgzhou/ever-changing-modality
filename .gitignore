@@ -229,3 +229,4 @@ GEO-Bench-2
 pyrightconfig.json
 one-off/
 cache
+.venv_clean

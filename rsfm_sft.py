@@ -74,10 +74,10 @@ logger = logging.getLogger(__name__)
 
 MODALITY_CONFIGS = {
     'eurosat': ['s2', 'rgb', 'vre', 'nir', 'swir', 'aw'],  # s2 = all 13 bands
-    'benv2': ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
-    'benv2full': ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
-    'pastis': ['s2', 's1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir'],
-    'dfc2020': ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
+    'benv2': ['s2', 's1', 's2s1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
+    'benv2full': ['s2', 's1', 's2s1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
+    'pastis': ['s2', 's1', 's2s1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir'],
+    'dfc2020': ['s2', 's1', 's2s1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
 }
 
 
@@ -128,10 +128,15 @@ class PanopticonWrapper(ModelWrapper):
         self.dataset = dataset
 
         # Sentinel-2 Channel IDs (band centre wavelengths in nm)
+        # 12-band S2 (BEN-v2 / BEN-v2full / PASTIS — no B10)
         self.S2_CHN_IDS = torch.tensor([442, 492, 559, 664, 704, 740, 782, 827, 864, 945, 1613, 2203],
                                        dtype=torch.int16)
+        # 13-band S2 (DFC2020 — includes B10 at ~1375 nm)
+        self.S2_13_CHN_IDS = torch.tensor([442, 492, 559, 664, 704, 740, 782, 827, 864, 945, 1375, 1613, 2203],
+                                          dtype=torch.int16)
         self.S1_CHN_IDS = torch.tensor([-1, -2], dtype=torch.int16)
-        self.S2S1_CHN_IDS = torch.cat([self.S2_CHN_IDS, self.S1_CHN_IDS])
+        self.S2S1_CHN_IDS = torch.cat([self.S2_CHN_IDS, self.S1_CHN_IDS])        # 14ch
+        self.S2S1_13_CHN_IDS = torch.cat([self.S2_13_CHN_IDS, self.S1_CHN_IDS])  # 15ch (DFC2020)
 
         # Pre-compute channel IDs for EuroSAT if applicable
         self.eurosat_chn_ids = None
@@ -148,7 +153,11 @@ class PanopticonWrapper(ModelWrapper):
 
     def forward(self, imgs, output_hidden_states=False):
         """
-        [B, C, H, W] → ModelOutput with last_hidden_state=[B, 768].
+        [B, C, H, W] → ModelOutput.
+
+        last_hidden_state is:
+          - [B, 768] (CLS token) when output_hidden_states=False (classification)
+          - [B, N, 768] (patch tokens) when output_hidden_states=True (segmentation)
 
         Panopticon's channel fusion layer handles arbitrary channel counts.
         We provide chn_ids (band wavelengths in nm) for each channel.
@@ -156,16 +165,22 @@ class PanopticonWrapper(ModelWrapper):
         B, C, H, W = imgs.shape
         device = imgs.device
 
-        # Determine channel IDs based on data shape and dataset
-        if C == 14:
-            # S2+S1 stacked
+        # Determine channel IDs based on channel count / dataset
+        if C == 15:
+            # DFC2020 S2(13ch)+S1(2ch)
+            chn_ids = self.S2S1_13_CHN_IDS.to(device)
+        elif C == 14:
+            # BEN-v2 / PASTIS S2(12ch)+S1(2ch)
             chn_ids = self.S2S1_CHN_IDS.to(device)
+        elif C == 13:
+            # DFC2020 S2-only (13 bands including B10)
+            chn_ids = self.S2_13_CHN_IDS.to(device)
+        elif C == 12:
+            # BEN-v2 / PASTIS S2-only (12 bands, no B10)
+            chn_ids = self.S2_CHN_IDS.to(device)
         elif C == 2:
             # S1 only (VV, VH)
             chn_ids = self.S1_CHN_IDS.to(device)
-        elif C == 12:
-            # S2 only
-            chn_ids = self.S2_CHN_IDS.to(device)
         elif self.dataset == 'eurosat':
             # EuroSAT: pre-computed in __init__
             chn_ids = self.eurosat_chn_ids.to(device)
@@ -177,10 +192,17 @@ class PanopticonWrapper(ModelWrapper):
         # Expand to batch
         chn_ids = chn_ids.unsqueeze(0).expand(B, -1)
 
-        # Call Panopticon with dict interface
         x_dict = dict(imgs=imgs, chn_ids=chn_ids)
-        features = self.model(x_dict)  # [B, 768] already L2-normalized
-        return ModelOutput(features)
+
+        if output_hidden_states:
+            # Segmentation path: return patch tokens [B, N, 768]
+            feat_dict = self.model.forward_features(x_dict)
+            patch_tokens = feat_dict['x_norm_patchtokens']  # [B, N, 768]
+            return ModelOutput(patch_tokens)
+        else:
+            # Classification path: CLS token [B, 768]
+            features = self.model(x_dict)
+            return ModelOutput(features)
 
 
 def load_foundation_model(model_name: str, device, modality='s2', dataset=None):
@@ -355,12 +377,26 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers, data
     """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict)."""
     from data_utils import get_loaders
 
+    # s2s1 = concatenated all-bands; load with both modalities so the stacked image is available
+    starting_modality = 's2' if modality == 's2s1' else modality
+    new_modality = 's1' if modality == 's2s1' else None
+
     train1, val1, _, _, test, task_config = get_loaders(
-        dataset, modality, batch_size, num_workers,
+        dataset, starting_modality, batch_size, num_workers,
         data_normalizer=None, num_time_steps=10,
-        new_modality=None, data_root=data_root,
+        new_modality=new_modality, data_root=data_root,
     )
-    modality_bands_dict = {modality: task_config.modality_bands_dict[modality]}
+
+    if modality == 's2s1':
+        # Build a slice spanning the full stacked image (s2 then s1, already concatenated)
+        mbd = task_config.modality_bands_dict
+        s2_sl = mbd['s2']
+        s1_sl = mbd['s1']
+        s2s1_slice = slice(s2_sl.start, s1_sl.stop)
+        modality_bands_dict = {'s2s1': s2s1_slice}
+    else:
+        modality_bands_dict = {modality: task_config.modality_bands_dict[modality]}
+
     return train1, val1, test, task_config, modality_bands_dict
 
 
@@ -391,6 +427,31 @@ def compute_metrics(logits, labels, task_type='classification', multilabel=False
         return acc * 100.0
 
 
+def _patch_tokens_to_spatial(feat):
+    """
+    Convert transformer token sequence to spatial feature map [B, D, H, W].
+
+    Handles two cases:
+      - Pure patch tokens [B, N, D]: N is a perfect square (e.g. Panopticon x_norm_patchtokens)
+      - CLS + patch tokens [B, N+1, D]: skip index 0, then reshape (e.g. OlmoEarth)
+    Already-spatial [B, D, H, W] tensors are passed through unchanged.
+    """
+    if feat.dim() == 4:
+        return feat  # already [B, D, H, W]
+    if feat.dim() == 3:
+        B, N, D = feat.shape
+        h = int(N ** 0.5)
+        if h * h == N:
+            # Pure patch tokens — no CLS to strip
+            return feat.permute(0, 2, 1).reshape(B, D, h, h)
+        else:
+            # CLS token prepended — skip index 0
+            n_patches = N - 1
+            h = int(n_patches ** 0.5)
+            return feat[:, 1:, :].permute(0, 2, 1).reshape(B, D, h, h)
+    raise ValueError(f"Cannot convert feat with shape {feat.shape} to spatial")
+
+
 def train_head(model, head, train_loader, val_loader, criterion, device,
                epochs, lr, weight_decay, train_mode='lp', wandb_log=False,
                segmentation=False, multilabel=False, num_classes=None, ignore_index=-100):
@@ -409,7 +470,7 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
     # Set up training parameters based on mode
     if train_mode == 'lp':
         # Freeze backbone
-        for name, param in model.named_parameters():
+        for param in model.parameters():
             param.requires_grad = False
         # Unfreeze head
         for param in head.parameters():
@@ -469,14 +530,9 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
                 else:
                     feat = output[0] if isinstance(output, tuple) else output
 
-                # Extract features: CLS token for classification, all tokens for segmentation
+                # Extract features: CLS token for classification, patch tokens for segmentation
                 if segmentation:
-                    # [B, num_tokens, D] → reshape to [B, D, H, W]
-                    if feat.dim() == 3:
-                        B, N, D = feat.shape
-                        H = W = int((N - 1) ** 0.5)  # Subtract 1 for CLS token
-                        feat = feat[:, 1:, :].permute(0, 2, 1).reshape(B, D, H, W)
-                    features = feat
+                    features = _patch_tokens_to_spatial(feat)
                 else:
                     # Classification: extract from whatever shape we get
                     if feat.dim() == 3:
@@ -494,11 +550,7 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
                         feat = output[0] if isinstance(output, tuple) else output
 
                     if segmentation:
-                        if feat.dim() == 3:
-                            B, N, D = feat.shape
-                            H = W = int((N - 1) ** 0.5)
-                            feat = feat[:, 1:, :].permute(0, 2, 1).reshape(B, D, H, W)
-                        features = feat
+                        features = _patch_tokens_to_spatial(feat)
                     else:
                         if feat.dim() == 3:
                             features = feat[:, 0, :]
@@ -508,6 +560,8 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
                             features = feat.mean(dim=(2, 3))
 
             logits = head(features)
+            if segmentation and logits.shape[-1] != labels.shape[-1]:
+                logits = F.interpolate(logits, size=labels.shape[-2:], mode='bilinear', align_corners=False)
             loss = criterion(logits, labels)
             loss.backward()
             optimizer.step()
@@ -539,11 +593,7 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
                     feat = output[0] if isinstance(output, tuple) else output
 
                 if segmentation:
-                    if feat.dim() == 3:
-                        B, N, D = feat.shape
-                        H = W = int((N - 1) ** 0.5)
-                        feat = feat[:, 1:, :].permute(0, 2, 1).reshape(B, D, H, W)
-                    features = feat
+                    features = _patch_tokens_to_spatial(feat)
                 else:
                     if feat.dim() == 3:
                         features = feat[:, 0, :]
@@ -553,6 +603,8 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
                         features = feat.mean(dim=(2, 3))
 
                 logits = head(features)
+                if segmentation and logits.shape[-1] != labels.shape[-1]:
+                    logits = F.interpolate(logits, size=labels.shape[-2:], mode='bilinear', align_corners=False)
                 val_loss += criterion(logits, labels).item()
                 all_logits.append(logits.cpu())
                 all_labels.append(labels.cpu())
@@ -599,7 +651,7 @@ def main():
     parser.add_argument('--train_mode', type=str, default='lp', choices=['lp', 'fft'],
                         help='Training mode: lp (linear probe) or fft (full fine-tune)')
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--num_workers', type=int, default=4)
