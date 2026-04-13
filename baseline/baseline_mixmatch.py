@@ -89,7 +89,7 @@ def main():
     parser.add_argument('--num_time_steps', type=int, default=10,
                         help='Timestamps per PASTIS image (default: 10)')
     parser.add_argument('--tz_fusion_time', type=int, default=3)
-    parser.add_argument('--tz_lora_rank', type=int, default=32)
+    parser.add_argument('--tz_lora_rank', type=int, default=0)
     parser.add_argument('--tz_modality_specific_layer_augmenter', type=str, default='fft',
                         choices=['fft'])
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
@@ -111,8 +111,8 @@ def main():
                         help='Beta distribution parameter for MixUp (default: 0.75)')
     parser.add_argument('--lambda_u', type=float, default=75.0,
                         help='Max unsupervised loss weight; ramped from 0 over warmup_epochs (default: 75.0)')
-    parser.add_argument('--mixmatch_warmup_epochs', type=int, default=5,
-                        help='Epochs over which lambda_u is linearly ramped to its max value (default: 5)')
+    parser.add_argument('--mixmatch_warmup_epochs', type=int, default=4,
+                        help='Epochs over which lambda_u is linearly ramped per-step to its max value (default: 4)')
     args = parser.parse_args()
 
     # Validate modality

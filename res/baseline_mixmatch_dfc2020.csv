@@ -8,3 +8,8 @@ evan_small,s1,fft,0.0001,0.0001,21505928,20,2,0.5,0.75,75.0,5,mIoU,13.21,18.32,1
 evan_small,s2_rgb,fft,0.001,0.0001,21604232,20,2,0.5,0.75,75.0,5,mIoU,14.23,28.48,28.78,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260412_210852.pt,clstoken,False
 evan_small,s2_rgb,fft,0.0003,0.0001,21604232,20,2,0.5,0.75,75.0,5,mIoU,4.53,25.20,29.96,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260412_213823.pt,clstoken,False
 evan_small,s2_rgb,fft,0.0001,0.0001,21604232,20,2,0.5,0.75,75.0,5,mIoU,4.87,26.10,28.12,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260412_220758.pt,clstoken,False
+evan_small,s2,fft,0.001,0.0001,22587272,20,2,0.5,0.75,75.0,5,mIoU,13.37,25.48,25.06,checkpoints/evan_mixmatch_dfc2020_s2_20260412_223700.pt,clstoken,True
+evan_small,s2,fft,0.0003,0.0001,22587272,20,2,0.5,0.75,75.0,5,mIoU,12.74,31.30,16.74,checkpoints/evan_mixmatch_dfc2020_s2_20260412_225955.pt,clstoken,True
+evan_small,s2,fft,0.0001,0.0001,22587272,20,2,0.5,0.75,75.0,5,mIoU,14.68,31.88,20.85,checkpoints/evan_mixmatch_dfc2020_s2_20260412_232248.pt,clstoken,True
+evan_small,s2,fft,0.001,0.0001,22587272,20,2,0.5,0.5,75.0,4,mIoU,3.87,39.82,24.36,checkpoints/evan_mixmatch_dfc2020_s2_20260413_004558.pt,clstoken,False
+evan_small,s2,fft,0.001,0.0001,22587272,20,2,0.5,0.5,100.0,4,mIoU,12.67,36.91,27.64,checkpoints/evan_mixmatch_dfc2020_s2_20260413_011934.pt,clstoken,False

@@ -148,7 +148,7 @@ class EVAN(nn.Module):
         tz_modality_specific_layer_augmenter: Literal["lora", "fft"] = "lora",
         tz_modality_fusion_layer_augmenter: Literal["lora","none"] = "none",
         tz_fusion_time: int = 3,
-        tz_lora_rank: int=32,
+        tz_lora_rank: int=0,
         starting_modality: 'str | list[str]' = 'rgb',
         starting_n_chans: 'int | list[int]' = 3,
         intermediate_projector_type: Literal["self", "cross"] = "self",

@@ -844,7 +844,7 @@ class Trainer:
         temperature: float = 0.5,
         alpha: float = 0.75,
         lambda_u: float = 75.0,
-        warmup_epochs: int = 5,
+        warmup_epochs: int = 4,
         best_checkpoint_path: str | None = None,
         val_per_epoch: int = 1,
     ) -> tuple:
@@ -855,7 +855,8 @@ class Trainer:
         (labels ignored). An epoch = one full pass through train2_loader.
         train1_loader is cycled if shorter.
 
-        lambda_u is linearly ramped from 0 to lambda_u over warmup_epochs.
+        lambda_u is linearly ramped from 0 to lambda_u per-step over the first
+        warmup_epochs epochs (following the original paper's step-level ramp).
 
         Returns:
             (train_metric, test_metric, best_val_metric, best_val_test_metric)
@@ -892,6 +893,7 @@ class Trainer:
         )
 
         train_metric = test_metric = 0.0
+        warmup_steps = warmup_epochs * len(train2_loader)
 
         for epoch in range(num_epochs):
             self.model.train()
@@ -902,13 +904,13 @@ class Trainer:
             epoch_mean_lam = 0.0
             n_steps = 0
 
-            # Lambda_u ramp: 0 → lambda_u over warmup_epochs
-            lam_u = lambda_u * min(1.0, (epoch + 1) / max(1, warmup_epochs))
-
             pbar = tqdm(train2_loader,
-                        desc=f"MixMatch Epoch {epoch+1}/{num_epochs} [{mod_upper}] λ_u={lam_u:.1f}")
+                        desc=f"MixMatch Epoch {epoch+1}/{num_epochs} [{mod_upper}]")
 
             for unlabeled_batch in pbar:
+                # Lambda_u ramp: 0 → lambda_u linearly over warmup_steps (per step)
+                lam_u = lambda_u * min(1.0, global_step / max(1, warmup_steps))
+
                 # --- Labeled batch (cycle if exhausted) ---
                 try:
                     labeled_batch = next(labeled_iter)
@@ -943,7 +945,7 @@ class Trainer:
                         avg_logits = sum(
                             self.model({modality: v}) for v in views
                         ) / K  # [B_u, C, H, W]
-                        avg_prob = F.softmax(avg_logits / temperature, dim=1)  # [B_u, C, H, W]
+                        avg_prob = F.softmax(avg_logits, dim=1)  # [B_u, C, H, W]
                         # Sharpen along class dim
                         sharp = avg_prob.pow(1.0 / temperature)
                         q_spatial = sharp / sharp.sum(dim=1, keepdim=True)  # [B_u, C, H, W]
@@ -979,30 +981,41 @@ class Trainer:
                 else:
                     y_l = F.one_hot(labels.long(), num_classes).float()  # [B_l, C]
 
-                # --- Step 3: Concatenate W = [x_l_aug, view1, view2, ...] ---
+                # --- Step 3: Concatenate W = Shuffle(Concat(X̂, Ũ)) (Algorithm 1, line 12) ---
+                # X̂ = augmented labeled: [B_l, ...]
+                # Ũ = K augmented views of unlabeled each paired with q: [K*B_u, ...]
                 all_x = torch.cat([x_l_aug] + views, dim=0)         # [B_l + K*B_u, ...]
                 all_y = torch.cat([y_l] + [q] * K, dim=0)           # [B_l + K*B_u, ...]
 
-                # Shuffle
+                # Shuffle W
                 perm = torch.randperm(all_x.size(0), device=self.device)
-                all_x_shuf = all_x[perm]
-                all_y_shuf = all_y[perm]
+                W_x = all_x[perm]
+                W_y = all_y[perm]
 
-                # --- Step 4: MixUp ---
-                lam_vals = np.random.beta(alpha, alpha, size=all_x.size(0))
+                # --- Step 4: MixUp (Algorithm 1, lines 13-14) ---
+                # X' = MixUp(X̂, W[:B_l])  — labeled mixed with first B_l entries of W
+                # U' = MixUp(Ũ, W[B_l:])  — unlabeled mixed with remaining entries of W
+                N_total = all_x.size(0)
+                lam_vals = np.random.beta(alpha, alpha, size=N_total)
                 lam_vals = np.maximum(lam_vals, 1 - lam_vals)
                 mean_lam = float(lam_vals.mean())
 
                 lam_x = torch.tensor(lam_vals, dtype=torch.float32, device=self.device)
-                # Reshape for broadcasting over image dims
                 lam_x_img = lam_x.view(-1, *([1] * (all_x.ndim - 1)))
-                lam_y_t = lam_x.view(-1, *([1] * (all_y.ndim - 1)))
+                lam_y_t  = lam_x.view(-1, *([1] * (all_y.ndim - 1)))
 
-                # Pair each sample with the next (roll)
-                roll_x = torch.roll(all_x_shuf, 1, dims=0)
-                roll_y = torch.roll(all_y_shuf, 1, dims=0)
-                mixed_x = lam_x_img * all_x_shuf + (1 - lam_x_img) * roll_x
-                mixed_y = lam_y_t * all_y_shuf + (1 - lam_y_t) * roll_y
+                # MixUp labeled with W[:B_l]
+                mixed_x_l = lam_x_img[:B_l] * x_l_aug + (1 - lam_x_img[:B_l]) * W_x[:B_l]
+                mixed_y_l = lam_y_t[:B_l]  * y_l      + (1 - lam_y_t[:B_l])  * W_y[:B_l]
+
+                # MixUp each unlabeled view with its W slice
+                u_views_x = torch.cat(views, dim=0)   # [K*B_u, ...]
+                u_views_y = torch.cat([q] * K, dim=0) # [K*B_u, ...]
+                mixed_x_u = lam_x_img[B_l:] * u_views_x + (1 - lam_x_img[B_l:]) * W_x[B_l:]
+                mixed_y_u = lam_y_t[B_l:]  * u_views_y + (1 - lam_y_t[B_l:])  * W_y[B_l:]
+
+                mixed_x = torch.cat([mixed_x_l, mixed_x_u], dim=0)
+                mixed_y = torch.cat([mixed_y_l, mixed_y_u], dim=0)
 
                 # --- Step 5: Forward pass ---
                 logits_all = self.model({modality: mixed_x})  # [B_l + K*B_u, C, ...]

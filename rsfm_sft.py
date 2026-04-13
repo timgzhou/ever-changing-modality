@@ -357,6 +357,9 @@ class DinoWrapper(ModelWrapper):
         self.register_buffer('norm_mean', torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1))
         self.register_buffer('norm_std',  torch.tensor(std,  dtype=torch.float32).view(1, 3, 1, 1))
 
+        # Number of register tokens (DINOv3 prepends [CLS, reg_1, ..., reg_R, patch_1, ...])
+        self.num_register_tokens = getattr(model.config, 'num_register_tokens', 0)
+
     def forward(self, imgs, output_hidden_states=False):
         """
         [B, 3, H, W] raw DN → ModelOutput.
@@ -372,12 +375,16 @@ class DinoWrapper(ModelWrapper):
         x = (x - self.norm_mean) / self.norm_std
 
         output = self.model(pixel_values=x)
-        # HF DINOv3: last_hidden_state is [B, 1+N, D] (CLS token at index 0)
+        # HF DINOv3: last_hidden_state is [B, 1+R+N, D]
+        #   index 0:       CLS token
+        #   indices 1..R:  register tokens (R = num_register_tokens, typically 4)
+        #   indices R+1..: patch tokens
         tokens = output.last_hidden_state
+        patch_start = 1 + self.num_register_tokens
         if output_hidden_states:
-            return ModelOutput(tokens[:, 1:, :])   # patch tokens [B, N, D]
+            return ModelOutput(tokens[:, patch_start:, :])   # patch tokens [B, N, D]
         else:
-            return ModelOutput(tokens[:, 0, :])    # CLS token [B, D]
+            return ModelOutput(tokens[:, 0, :])              # CLS token [B, D]
 
 
 class PanopticonWrapper(ModelWrapper):

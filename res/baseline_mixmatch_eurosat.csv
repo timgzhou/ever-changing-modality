@@ -14,3 +14,12 @@ evan_small,swir,fft,0.0003,0.0001,21605002,20,2,0.5,0.75,75.0,5,Acc,70.57,70.81,
 evan_small,swir,fft,0.0001,0.0001,21605002,20,2,0.5,0.75,75.0,5,Acc,70.59,70.15,70.59,checkpoints/evan_mixmatch_eurosat_swir_20260412_213040.pt,clstoken,False
 evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.75,75.0,5,Acc,67.20,66.67,67.20,checkpoints/evan_mixmatch_eurosat_rgb_20260412_214905.pt,clstoken,True
 evan_small,rgb,fft,0.0003,0.0001,21605002,20,2,0.5,0.75,75.0,5,Acc,79.04,79.15,79.07,checkpoints/evan_mixmatch_eurosat_rgb_20260412_220952.pt,clstoken,True
+evan_small,rgb,fft,0.0001,0.0001,21605002,20,2,0.5,0.75,75.0,5,Acc,82.87,82.70,82.59,checkpoints/evan_mixmatch_eurosat_rgb_20260412_223029.pt,clstoken,True
+evan_small,vre,fft,0.001,0.0001,21605002,20,2,0.5,0.75,75.0,5,Acc,81.65,80.56,81.56,checkpoints/evan_mixmatch_eurosat_vre_20260412_225115.pt,clstoken,True
+evan_small,vre,fft,0.0003,0.0001,21605002,20,2,0.5,0.75,75.0,5,Acc,86.43,87.00,87.30,checkpoints/evan_mixmatch_eurosat_vre_20260412_230941.pt,clstoken,True
+evan_small,vre,fft,0.0001,0.0001,21605002,20,2,0.5,0.75,75.0,5,Acc,87.96,88.30,87.96,checkpoints/evan_mixmatch_eurosat_vre_20260412_232812.pt,clstoken,True
+evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.5,75.0,4,Acc,48.39,51.22,50.69,checkpoints/evan_mixmatch_eurosat_rgb_20260413_001538.pt,clstoken,False
+evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.5,100.0,4,Acc,37.26,51.00,51.85,checkpoints/evan_mixmatch_eurosat_rgb_20260413_003703.pt,clstoken,False
+evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.5,125.0,4,Acc,20.19,46.04,45.11,checkpoints/evan_mixmatch_eurosat_rgb_20260413_005856.pt,clstoken,False
+evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.75,75.0,4,Acc,24.07,51.56,51.91,checkpoints/evan_mixmatch_eurosat_rgb_20260413_012019.pt,clstoken,False
+evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.75,100.0,4,Acc,24.63,50.00,50.06,checkpoints/evan_mixmatch_eurosat_rgb_20260413_014154.pt,clstoken,False
