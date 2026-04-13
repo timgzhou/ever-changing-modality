@@ -1,5 +1,0 @@
-dataset,model_type,modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,test_metric,metric_name,saved_checkpoint,global_rep
-benv2,evan_small,s2,fft,32,fft,0.0001,23106067,8,57.08,mAP,checkpoints/benv2_s2_s0.pt,clstoken
-benv2,evan_small,s1,fft,32,fft,0.0001,22123411,16,44.20,mAP,checkpoints/benv2_s1_s0.pt,clstoken
-benv2,panopticon_base,s2,sgd,1,50,0.01,mAP,62.46,27.45,61.52,checkpoints/panopticon_lp_benv2_s2_s0.pt
-benv2,panopticon_base,s1,sgd,1,50,0.01,mAP,31.09,55.68,31.71,checkpoints/panopticon_lp_benv2_s1_s0.pt

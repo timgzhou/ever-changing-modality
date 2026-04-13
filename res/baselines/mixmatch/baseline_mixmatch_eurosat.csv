@@ -23,3 +23,4 @@ evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.5,100.0,4,Acc,37.26,51.00,51
 evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.5,125.0,4,Acc,20.19,46.04,45.11,checkpoints/evan_mixmatch_eurosat_rgb_20260413_005856.pt,clstoken,False
 evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.75,75.0,4,Acc,24.07,51.56,51.91,checkpoints/evan_mixmatch_eurosat_rgb_20260413_012019.pt,clstoken,False
 evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.75,100.0,4,Acc,24.63,50.00,50.06,checkpoints/evan_mixmatch_eurosat_rgb_20260413_014154.pt,clstoken,False
+evan_small,rgb,fft,0.001,0.0001,21605002,20,2,0.5,0.75,125.0,4,Acc,22.09,48.81,48.80,checkpoints/evan_mixmatch_eurosat_rgb_20260413_020238.pt,clstoken,False

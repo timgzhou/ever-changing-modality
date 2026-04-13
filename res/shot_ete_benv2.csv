@@ -1,4 +1,0 @@
-dataset,starting_modality,new_modality,ssl_lr,weight_decay,epochs,mask_ratio,modality_dropout,labeled_frequency,labeled_start_fraction,entr_frequency,trainable_params,active_losses,use_mfla,mfla_warmup_epochs,metric_name,transfer_metric,peeking_metric,addition_metric,addition_ens_metric,valchecked_transfer,valchecked_peek,valchecked_add,valchecked_add_ens,stage0_checkpoint,shote2e_checkpoint
-benv2,s2,s1,0.0001,0.001,1,0.75,0.3,0.3,0.0,0,38763814,distill+ce+latent,False,0,mAP,0.00,0.00,0.00,,,,,,checkpoints/panopticon_lp_benv2_s2_s0.pt,checkpoints/delulunet_benv2_0331_1700.pt
-benv2,s2,s1,0.0001,0.001,1,0.75,0.3,0.3,0.0,0,38763814,all,False,0,mAP,0.00,0.00,0.00,,,,,,checkpoints/panopticon_lp_benv2_s2_s0.pt,checkpoints/delulunet_benv2_0331_1704.pt
-benv2,s2,s1,0.0001,0.001,16,0.75,0.3,0.3,0.0,0,38763814,all,False,0,mAP,42.10,60.02,50.40,60.40,40.02,60.02,40.77,60.40,checkpoints/panopticon_lp_benv2_s2_s0.pt,checkpoints/delulunet_benv2_0331_1726.pt
