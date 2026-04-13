@@ -830,6 +830,305 @@ class Trainer:
 
         return train_metric, test_metric, best_val_metric, best_val_test_metric
 
+    def train_mixmatch(
+        self,
+        train1_loader,
+        train2_loader,
+        val1_loader,
+        test_loader,
+        num_epochs: int,
+        modality: str,
+        *,
+        weak_aug,
+        K: int = 2,
+        temperature: float = 0.5,
+        alpha: float = 0.75,
+        lambda_u: float = 75.0,
+        warmup_epochs: int = 5,
+        best_checkpoint_path: str | None = None,
+        val_per_epoch: int = 1,
+    ) -> tuple:
+        """
+        MixMatch semi-supervised training loop (Berthelot et al., NeurIPS 2019).
+
+        Uses train1_loader as labeled source, train2_loader as unlabeled source
+        (labels ignored). An epoch = one full pass through train2_loader.
+        train1_loader is cycled if shorter.
+
+        lambda_u is linearly ramped from 0 to lambda_u over warmup_epochs.
+
+        Returns:
+            (train_metric, test_metric, best_val_metric, best_val_test_metric)
+        """
+        import numpy as np
+
+        tc = self.task_config
+        label_key = tc.label_key
+        segmentation = (tc.task_type == 'segmentation')
+        multilabel = tc.multilabel
+        num_classes = tc.num_classes
+        ignore_index = getattr(tc, 'ignore_index', -100)
+        modality_bands_dict = tc.modality_bands_dict
+
+        criterion = make_criterion(tc)
+        scheduler = make_scheduler(self.optimizer, num_epochs, self.warmup_epochs)
+        accum = self._make_accumulator()
+        mod_upper = modality.upper()
+
+        best_val_metric = 0.0 if val1_loader is not None else None
+        best_val_test_metric = None
+
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        global_step = 0
+
+        eval_kwargs = dict(
+            modality_bands_dict=modality_bands_dict,
+            modalities_to_use=(modality,),
+            multilabel=multilabel,
+            label_key=label_key,
+            segmentation=segmentation,
+            num_classes=num_classes if segmentation else None,
+            ignore_index=ignore_index,
+        )
+
+        train_metric = test_metric = 0.0
+
+        for epoch in range(num_epochs):
+            self.model.train()
+            accum.reset()
+            labeled_iter = iter(train1_loader)
+            epoch_sup_loss = 0.0
+            epoch_unsup_loss = 0.0
+            epoch_mean_lam = 0.0
+            n_steps = 0
+
+            # Lambda_u ramp: 0 → lambda_u over warmup_epochs
+            lam_u = lambda_u * min(1.0, (epoch + 1) / max(1, warmup_epochs))
+
+            pbar = tqdm(train2_loader,
+                        desc=f"MixMatch Epoch {epoch+1}/{num_epochs} [{mod_upper}] λ_u={lam_u:.1f}")
+
+            for unlabeled_batch in pbar:
+                # --- Labeled batch (cycle if exhausted) ---
+                try:
+                    labeled_batch = next(labeled_iter)
+                except StopIteration:
+                    labeled_iter = iter(train1_loader)
+                    labeled_batch = next(labeled_iter)
+
+                labels = labeled_batch[label_key].to(self.device)
+
+                x_l = create_multimodal_batch(
+                    labeled_batch, modality_bands_dict=modality_bands_dict,
+                    modalities=(modality,),
+                )
+                x_l_tensor = x_l[modality].to(self.device)
+
+                # --- Unlabeled batch ---
+                x_u = create_multimodal_batch(
+                    unlabeled_batch, modality_bands_dict=modality_bands_dict,
+                    modalities=(modality,),
+                )
+                x_u_tensor = x_u[modality].to(self.device)
+
+                B_l = x_l_tensor.size(0)
+                B_u = x_u_tensor.size(0)
+
+                # --- Step 1: K augmented views of unlabeled → average → sharpen ---
+                views = [weak_aug(x_u_tensor) for _ in range(K)]  # K × [B_u, C, H, W]
+
+                with torch.no_grad():
+                    if segmentation:
+                        # Average softmax over K views, flatten spatial for pseudo-labels
+                        avg_logits = sum(
+                            self.model({modality: v}) for v in views
+                        ) / K  # [B_u, C, H, W]
+                        avg_prob = F.softmax(avg_logits / temperature, dim=1)  # [B_u, C, H, W]
+                        # Sharpen along class dim
+                        sharp = avg_prob.pow(1.0 / temperature)
+                        q_spatial = sharp / sharp.sum(dim=1, keepdim=True)  # [B_u, C, H, W]
+                        # For mixing: flatten to [B_u, H*W, C]
+                        H, W = q_spatial.shape[2], q_spatial.shape[3]
+                        q = q_spatial.permute(0, 2, 3, 1).reshape(B_u, H * W, num_classes)
+                    elif multilabel:
+                        avg_logits = sum(
+                            self.model({modality: v}) for v in views
+                        ) / K  # [B_u, C]
+                        q = torch.sigmoid(avg_logits / temperature)  # [B_u, C]
+                    else:
+                        avg_logits = sum(
+                            self.model({modality: v}) for v in views
+                        ) / K  # [B_u, C]
+                        avg_prob = F.softmax(avg_logits, dim=1)
+                        sharp = avg_prob.pow(1.0 / temperature)
+                        q = sharp / sharp.sum(dim=1, keepdim=True)  # [B_u, C]
+
+                # --- Step 2: Build one-hot / soft labeled targets ---
+                x_l_aug = weak_aug(x_l_tensor)
+
+                if segmentation:
+                    H, W = x_l_tensor.shape[2], x_l_tensor.shape[3]
+                    valid = (labels != ignore_index)  # [B_l, H, W]
+                    labels_clipped = labels.clone()
+                    labels_clipped[~valid] = 0
+                    y_l = F.one_hot(labels_clipped.long(), num_classes).float()  # [B_l, H, W, C]
+                    y_l[~valid] = 0.0
+                    y_l = y_l.reshape(B_l, H * W, num_classes)  # [B_l, H*W, C]
+                elif multilabel:
+                    y_l = labels.float()  # [B_l, C]
+                else:
+                    y_l = F.one_hot(labels.long(), num_classes).float()  # [B_l, C]
+
+                # --- Step 3: Concatenate W = [x_l_aug, view1, view2, ...] ---
+                all_x = torch.cat([x_l_aug] + views, dim=0)         # [B_l + K*B_u, ...]
+                all_y = torch.cat([y_l] + [q] * K, dim=0)           # [B_l + K*B_u, ...]
+
+                # Shuffle
+                perm = torch.randperm(all_x.size(0), device=self.device)
+                all_x_shuf = all_x[perm]
+                all_y_shuf = all_y[perm]
+
+                # --- Step 4: MixUp ---
+                lam_vals = np.random.beta(alpha, alpha, size=all_x.size(0))
+                lam_vals = np.maximum(lam_vals, 1 - lam_vals)
+                mean_lam = float(lam_vals.mean())
+
+                lam_x = torch.tensor(lam_vals, dtype=torch.float32, device=self.device)
+                # Reshape for broadcasting over image dims
+                lam_x_img = lam_x.view(-1, *([1] * (all_x.ndim - 1)))
+                lam_y_t = lam_x.view(-1, *([1] * (all_y.ndim - 1)))
+
+                # Pair each sample with the next (roll)
+                roll_x = torch.roll(all_x_shuf, 1, dims=0)
+                roll_y = torch.roll(all_y_shuf, 1, dims=0)
+                mixed_x = lam_x_img * all_x_shuf + (1 - lam_x_img) * roll_x
+                mixed_y = lam_y_t * all_y_shuf + (1 - lam_y_t) * roll_y
+
+                # --- Step 5: Forward pass ---
+                logits_all = self.model({modality: mixed_x})  # [B_l + K*B_u, C, ...]
+
+                if segmentation:
+                    # logits_all: [B_l+K*B_u, C, H, W] → flatten spatial
+                    _, C_out, H_out, W_out = logits_all.shape
+                    logits_flat = logits_all.permute(0, 2, 3, 1).reshape(-1, C_out * H_out * W_out)
+                    # Actually keep as [N, C, H, W] — split first then flatten
+                    logits_lab = logits_all[:B_l]                   # [B_l, C, H, W]
+                    logits_unl = logits_all[B_l:]                   # [K*B_u, C, H, W]
+                    y_lab = mixed_y[:B_l]                           # [B_l, H*W, C]
+                    y_unl = mixed_y[B_l:]                           # [K*B_u, H*W, C]
+                else:
+                    logits_lab = logits_all[:B_l]                   # [B_l, C]
+                    logits_unl = logits_all[B_l:]                   # [K*B_u, C]
+                    y_lab = mixed_y[:B_l]                           # [B_l, C]
+                    y_unl = mixed_y[B_l:]                           # [K*B_u, C]
+
+                # --- Step 6: Losses ---
+                if segmentation:
+                    # Supervised: soft CE over valid pixels
+                    log_p_lab = F.log_softmax(logits_lab, dim=1)    # [B_l, C, H, W]
+                    log_p_lab_flat = log_p_lab.permute(0, 2, 3, 1).reshape(-1, num_classes)
+                    y_lab_flat = y_lab.reshape(-1, num_classes)      # [B_l*H*W, C]
+                    # Valid mask (rows where y_lab sums to 1)
+                    valid_mask = y_lab_flat.sum(dim=1) > 0           # [B_l*H*W]
+                    if valid_mask.sum() > 0:
+                        sup_loss = -(y_lab_flat[valid_mask] * log_p_lab_flat[valid_mask]).sum(dim=1).mean()
+                    else:
+                        sup_loss = torch.tensor(0.0, device=self.device)
+                    # Unsupervised: MSE of softmax vs soft q
+                    p_unl = F.softmax(logits_unl, dim=1)            # [K*B_u, C, H, W]
+                    p_unl_flat = p_unl.permute(0, 2, 3, 1).reshape(-1, num_classes)
+                    y_unl_flat = y_unl.reshape(-1, num_classes)
+                    unsup_loss = F.mse_loss(p_unl_flat, y_unl_flat)
+                elif multilabel:
+                    # Supervised: soft BCE
+                    y_lab_c = y_lab.clamp(0.0, 1.0)
+                    log_sig = F.logsigmoid(logits_lab)
+                    log_1msig = F.logsigmoid(-logits_lab)
+                    sup_loss = -(y_lab_c * log_sig + (1 - y_lab_c) * log_1msig).mean()
+                    # Unsupervised: MSE of sigmoid probs vs soft q
+                    p_unl = torch.sigmoid(logits_unl)
+                    unsup_loss = F.mse_loss(p_unl, y_unl.clamp(0.0, 1.0))
+                else:
+                    # Supervised: soft CE
+                    sup_loss = -(y_lab * F.log_softmax(logits_lab, dim=1)).sum(dim=1).mean()
+                    # Unsupervised: MSE of softmax vs soft q
+                    p_unl = F.softmax(logits_unl, dim=1)
+                    unsup_loss = F.mse_loss(p_unl, y_unl)
+
+                total_loss = sup_loss + lam_u * unsup_loss
+
+                self.optimizer.zero_grad()
+                grad_norm = self._step(total_loss, trainable_params)
+
+                # Accumulate train metric using hard labeled logits (before mixing)
+                with torch.no_grad():
+                    hard_logits = self.model({modality: x_l_aug})
+                accum.update(hard_logits.detach(), labels.detach())
+
+                epoch_sup_loss += sup_loss.item()
+                epoch_unsup_loss += unsup_loss.item()
+                epoch_mean_lam += mean_lam
+                n_steps += 1
+
+                pbar.set_postfix({
+                    'sup': f'{sup_loss.item():.3f}',
+                    'unsup': f'{unsup_loss.item():.3f}',
+                    'lam': f'{mean_lam:.3f}',
+                })
+
+                if self.use_wandb and self.wandb_prefix:
+                    wandb.log({
+                        f'{self.wandb_prefix}/sup_loss': sup_loss.item(),
+                        f'{self.wandb_prefix}/unsup_loss': unsup_loss.item(),
+                        f'{self.wandb_prefix}/lambda_u': lam_u,
+                        f'{self.wandb_prefix}/mean_lam': mean_lam,
+                        f'{self.wandb_prefix}/total_loss': total_loss.item(),
+                        f'{self.wandb_prefix}/grad_norm': float(grad_norm),
+                        f'{self.wandb_prefix}/step': global_step,
+                    })
+                global_step += 1
+
+            # End of epoch
+            n_steps = max(n_steps, 1)
+            train_metric = accum.compute()
+            scheduler.step()
+
+            print(f"  Epoch {epoch+1}: sup_loss={epoch_sup_loss/n_steps:.4f}, "
+                  f"unsup_loss={epoch_unsup_loss/n_steps:.4f}, "
+                  f"lambda_u={lam_u:.1f}, mean_lam={epoch_mean_lam/n_steps:.3f}")
+
+            do_eval = ((epoch + 1) % val_per_epoch == 0) or (epoch + 1 == num_epochs)
+            test_loss = val_loss = test_metric_ep = val_metric = None
+
+            if do_eval:
+                test_loss, test_metric_ep = evaluate(
+                    self.model, test_loader, criterion, self.device, **eval_kwargs
+                )
+                test_metric = test_metric_ep
+
+                if val1_loader is not None:
+                    val_loss, val_metric = evaluate(
+                        self.model, val1_loader, criterion, self.device, **eval_kwargs
+                    )
+
+                metric_name = accum.metric_name
+                print(f"  Train ({mod_upper}): {metric_name}={train_metric:.2f}%")
+                print(f"  Test  ({mod_upper}): Loss={test_loss:.4f}, {metric_name}={test_metric:.2f}%")
+                if val_metric is not None:
+                    print(f"  Val   ({mod_upper}): Loss={val_loss:.4f}, {metric_name}={val_metric:.2f}%")
+                    if val_metric > best_val_metric:
+                        print(f"    New val record: {val_metric:.2f} > {best_val_metric:.2f} — saving checkpoint")
+                        best_val_metric = val_metric
+                        best_val_test_metric = test_metric
+                        if best_checkpoint_path is not None:
+                            self.model.save_checkpoint(best_checkpoint_path)
+
+            self._log_epoch(epoch, epoch_sup_loss / n_steps, train_metric,
+                            accum.metric_name, self.optimizer.param_groups[0]['lr'],
+                            test_loss, test_metric_ep, val_loss, val_metric)
+
+        return train_metric, test_metric, best_val_metric, best_val_test_metric
+
     def train_shot(self, *args, **kwargs):
         raise NotImplementedError
 
