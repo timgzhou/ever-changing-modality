@@ -53,7 +53,7 @@ def main():
                         help='Modalities to train on (first is primary). '
                              'EuroSAT: rgb/vre/nir/swir/aw. '
                              'GeoBench/DFC2020: s2/s1/s2_rgb/s2_vre/s2_nir/s2_swir/s2_aw.')
-    parser.add_argument('--model', type=str, default='evan_small', choices=['evan_small', 'evan_base', 'evan_large'])
+    parser.add_argument('--model', type=str, default='evan_base', choices=['evan_small', 'evan_base', 'evan_large'])
     parser.add_argument('--use_dino_weights', action='store_true')
     parser.add_argument('--use_s2dino_weights', action='store_true',
                         help='Init from torchgeo S2-DINO ViT-Small (SSL4EO-S12). '
@@ -109,13 +109,6 @@ def main():
     print("\n=== Creating datasets ===")
     data_normalizer = None
     normalization = 'zscore'
-    if args.dataset == 'pastis' and (
-        args.use_s2dino_weights or (args.use_dino_weights and primary_modality == 'rgb')
-    ):
-        from geobench_data_utils import make_div10000_normalizer
-        data_normalizer = make_div10000_normalizer()
-        normalization = 'div10000'
-        print("Using /10000 normalizer to match torchgeo DINO pretraining.")
     train1_loader, val1_loader, test_loader, task_config, modality_bands_dict = get_task_config_and_loaders(
         args.dataset, args.modalities, args.batch_size, args.num_workers, data_normalizer=data_normalizer,
         num_time_steps=args.num_time_steps, data_root=args.data_root,
@@ -149,8 +142,25 @@ def main():
             **common_kwargs,
         )
     else:
+        # For s2 modality, pass the RGB-band positions so DINO patch weights are
+        # copied into the correct channels of the s2 patch embedder.
+        # EuroSAT s2 (13ch): B04=3, B03=2, B02=1
+        # BEN-v2  s2 (12ch): same positions (B10 dropped at idx10, doesn't shift rgb)
+        # PASTIS  s2 (10ch): B04=2, B03=1, B02=0 (B01/B09/B10 removed)
+        _S2_RGB_INDICES = {
+            'eurosat':   [3, 2, 1],
+            'benv2':     [3, 2, 1],
+            'benv2full': [3, 2, 1],
+            'dfc2020':   [3, 2, 1],
+            'pastis':    [2, 1, 0],
+        }
+        rgb_in_s2_indices = (
+            _S2_RGB_INDICES.get(args.dataset)
+            if primary_modality == 's2' and args.use_dino_weights
+            else None
+        )
         model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
-        evan = model_fn(load_weights=args.use_dino_weights, **common_kwargs)
+        evan = model_fn(load_weights=args.use_dino_weights, rgb_in_s2_indices=rgb_in_s2_indices, **common_kwargs)
 
     is_segmentation = (task_config.task_type == 'segmentation')
 
@@ -223,7 +233,7 @@ def main():
     else:
         modalities_str = '+'.join(args.modalities)
         checkpoint_path = os.path.join(args.checkpoint_dir,
-                                       f'evan_{args.dataset}_stage0_{modalities_str}_{timestamp}.pt')
+                                       f'sft_{args.model}_{args.dataset}_{modalities_str}_{args.train_mode}_lr{args.lr}_{timestamp}.pt')
 
     train_metric, test_metric, best_val_metric, best_val_test_metric = single_modality_training_loop(
         model, train1_loader, test_loader, device,
@@ -284,31 +294,4 @@ def main():
 if __name__ == '__main__':
     main()
 
-
-# DRYRUN examples
-"""
-# EuroSAT RGB (original behaviour)
-python -u train_stage0.py --dataset eurosat --modalities rgb --epochs 5 --checkpoint_name eurosat_rgb_s0
-
-# BEN-v2 S2 (random init)
-python -u train_stage0.py --dataset benv2 --modalities s2 --epochs 2 --checkpoint_name benv2_s2_s0
-
-# BEN-v2 S2 (init from torchgeo S2-DINO)
-python -u train_stage0.py --dataset benv2 --modalities s2 --epochs 2 --checkpoint_name benv2_s2dino_s0 --use_s2dino_weights
-
-# BEN-v2 S1 (start from S1 instead)
-python -u train_stage0.py --dataset benv2 --modalities s1 --epochs 2 --checkpoint_name benv2_s1_s0
-
-# BEN-v2 S2 + S1 together
-python -u train_stage0.py --dataset benv2 --modalities s2 s1 --epochs 2 --checkpoint_name benv2_s2s1_s0
-
-# BEN-v2 S2_RGB sub-band only
-python -u train_stage0.py --dataset benv2 --modalities s2_rgb --epochs 2 --checkpoint_name benv2_s2rgb_s0
-
-# PASTIS S2
-python -u train_stage0.py --dataset pastis --modalities s2 --epochs 2 --batch_size 16 --checkpoint_name pastis_s2_s0 --num_workers 4 --use_dino_weights
-python -u train_stage0.py --dataset pastis --modalities s2 --epochs 16 --batch_size 16 --checkpoint_name pastis_s2_s0 --num_workers 4 --use_s2dino_weights
-
-# PASTIS RGB (init from DINOv3, 3-channel B04/B03/B02 subset of S2)
-python -u train_stage0.py --dataset pastis --modality rgb --epochs 16 --batch_size 16 --checkpoint_name pastis_rgb_s0 --num_workers 4 --use_dino_weights
-"""
+# for run example see sh/{dataset}

@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
 
-CSV_PATH = os.path.join(os.path.dirname(__file__), '..', 'res', 'rsfm_results.csv')
+CSV_PATH = os.path.join(os.path.dirname(__file__), '..', 'res', 'rsfm', 'rsfm_results.csv')
 
 # ---------------------------------------------------------------------------
 # Load & fix concatenated rows (two rows joined without newline)
@@ -100,6 +100,7 @@ for ax, dataset in zip(axes, datasets):
     ax.set_title(dataset, fontsize=13, fontweight='bold')
     ax.set_xticks(group_centers)
     ax.set_xticklabels(mod_order, rotation=30, ha='right', fontsize=9)
+    ax.set_xlim(group_centers[0] - 0.6, group_centers[-1] + 0.6)
     ax.set_xlabel('Modality', fontsize=10)
     ax.set_ylabel(METRIC_LABEL.get(dataset, 'Test Metric (%)'), fontsize=10)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{v:.1f}'))
@@ -136,7 +137,7 @@ fig.legend(
 fig.suptitle('RSFM SFT — Best LR per (model, dataset, modality, train_mode)', fontsize=13, y=1.01)
 plt.tight_layout()
 
-out_path = os.path.join(os.path.dirname(__file__), '..', 'res', 'rsfm_results.png')
+out_path = os.path.join(os.path.dirname(__file__), '..', 'artifacts', 'rsfm_results.png')
 plt.savefig(out_path, dpi=150, bbox_inches='tight')
 print(f"Saved: {out_path}")
 plt.show()

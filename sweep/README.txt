@@ -12,7 +12,8 @@ sweep/
   sweep_registry.txt           # Log of created sweep IDs
   sweep_yaml/
     base.yaml                  # Shared HPs: lr, weight_decay
-    sweep_shot.yaml            # SHOT-specific HPs
+    sweep_shot.yaml            # SHOT-specific HPs (mae enabled, all lambdas)
+    sweep_pldc.yaml            # SHOT variant: no MAE, lambdas for prefusion/latent/distill/ce only
     sweep_sft.yaml             # SFT-specific HPs
     sweep_baseline_distill.yaml # Distill-specific HPs
 
@@ -26,6 +27,12 @@ python sweep/create_sweep.py --script shot --starting rgb --newmod nir
 
 # Any other dataset (provide checkpoint explicitly):
 python sweep/create_sweep.py --script shot \
+    --dataset dfc2020 \
+    --starting s2_rgb --newmod s1 \
+    --stage0_checkpoint checkpoints/dfc2020_s2rgb_dinov3init_sft.pt
+
+# PLDC sweep (no MAE, sweeps prefusion/latent/distill/ce lambdas + weight_decay):
+python sweep/create_sweep.py --script pldc \
     --dataset dfc2020 \
     --starting s2_rgb --newmod s1 \
     --stage0_checkpoint checkpoints/dfc2020_s2rgb_dinov3init_sft.pt
@@ -56,6 +63,13 @@ Swept hyperparameters (sweep_shot.yaml)
 ----------------------------------------
   lr, weight_decay, mae_mask_ratio, modality_dropout,
   labeled_frequency, labeled_start_fraction, use_mae, use_latent
+
+Swept hyperparameters (sweep_pldc.yaml)
+----------------------------------------
+  lr, weight_decay, mae_mask_ratio, modality_dropout,
+  labeled_frequency, labeled_start_fraction,
+  lambda_latent [0,1], lambda_prefusion [0,1], lambda_distill [0,1]
+  (lambda_mae fixed=0, lambda_ce fixed=1, use_mae=false)
 
 
 Adding a new swept hyperparameter

@@ -8,3 +8,13 @@ evan_small,s2_rgb,fft,0.001,0.0001,21608467,20,2,0.5,0.75,75.0,5,mAP,42.40,45.22
 evan_small,s2_rgb,fft,0.0001,0.0001,21608467,20,2,0.5,0.75,75.0,5,mAP,46.19,50.30,45.86,checkpoints/evan_mixmatch_benv2_s2_rgb_20260412_230541.pt,clstoken,False
 evan_small,s2,fft,0.001,0.0001,22493203,20,2,0.5,0.5,75.0,4,mAP,50.36,54.63,50.36,checkpoints/evan_mixmatch_benv2_s2_20260413_002948.pt,clstoken,False
 evan_small,s2,fft,0.001,0.0001,22493203,20,2,0.5,0.5,100.0,4,mAP,48.49,52.92,48.49,checkpoints/evan_mixmatch_benv2_s2_20260413_011334.pt,clstoken,False
+evan_small,s2,fft,0.0003,0.0001,22493203,20,2,0.5,0.5,10.0,4,mAP,57.39,63.28,57.70,checkpoints/evan_mixmatch_benv2_s2_20260413_055125.pt,clstoken,False
+evan_small,s2,fft,0.0003,0.0001,22493203,20,2,0.5,0.5,40.0,4,mAP,54.53,60.35,54.55,checkpoints/evan_mixmatch_benv2_s2_20260413_063444.pt,clstoken,False
+evan_small,s2,fft,0.0003,0.0001,22493203,60,2,0.5,0.5,10.0,4,mAP,54.68,63.29,57.83,checkpoints/evan_mixmatch_benv2_s2_20260413_061619.pt,clstoken,False
+evan_small,s2,fft,0.0003,0.0001,22493203,20,2,0.5,0.5,100.0,4,mAP,52.44,56.27,52.44,checkpoints/evan_mixmatch_benv2_s2_20260413_075045.pt,clstoken,False
+evan_small,s2,fft,0.0003,0.0001,22493203,20,2,0.5,0.75,10.0,4,mAP,57.98,62.87,57.83,checkpoints/evan_mixmatch_benv2_s2_20260413_083414.pt,clstoken,False
+evan_small,s2,fft,0.0003,0.0001,22493203,20,2,0.5,0.75,40.0,4,mAP,54.39,60.27,54.04,checkpoints/evan_mixmatch_benv2_s2_20260413_091520.pt,clstoken,False
+evan_small,s2,fft,0.0003,0.0001,22493203,20,2,0.5,0.75,75.0,4,mAP,53.23,58.84,53.23,checkpoints/evan_mixmatch_benv2_s2_20260413_095716.pt,clstoken,False
+evan_small,s2,fft,0.0003,0.0001,22493203,60,2,0.5,0.5,100.0,4,mAP,49.42,57.35,52.41,checkpoints/evan_mixmatch_benv2_s2_20260413_083457.pt,clstoken,False
+evan_small,s2,fft,0.0003,0.0001,22493203,20,2,0.5,0.75,100.0,4,mAP,52.00,56.72,51.89,checkpoints/evan_mixmatch_benv2_s2_20260413_103916.pt,clstoken,False
+evan_small,s2,fft,0.0003,0.0001,22493203,20,2,0.5,0.5,10.0,4,mAP,56.23,60.96,57.19,checkpoints/evan_mixmatch_benv2_s2_20260413_213854.pt,clstoken,True

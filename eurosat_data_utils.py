@@ -7,6 +7,7 @@ import torch
 from torchvision import transforms
 import os
 from torch.utils.data import DataLoader, Subset
+from torchgeo.datasets import EuroSAT
 
 
 # TODO refactor load_split_indices here with load_split_indices in train_utils.py
@@ -484,7 +485,7 @@ def create_multimodal_batch(
     # band-name tuples (e.g. {'s2': slice(0, 10), 's1': slice(10, 16)}).
     # Detect this case and bypass the band-index lookup path.
     if modality_bands_dict is not None and any(
-        isinstance(v, (slice, list)) for v in modality_bands_dict.values()
+        isinstance(v, slice) for v in modality_bands_dict.values()
     ):
         image = batch['image']  # [B, C_total, H, W] — already normalized
         result = {}

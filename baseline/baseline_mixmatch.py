@@ -93,7 +93,7 @@ def main():
     parser.add_argument('--tz_modality_specific_layer_augmenter', type=str, default='fft',
                         choices=['fft'])
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
-    parser.add_argument('--wandb_project', type=str, default=None)
+    parser.add_argument('--wandb_project', type=str, default='mixmatch')
     parser.add_argument('--global_rep', type=str, default='clstoken',
                         choices=['clstoken', 'mean_patch'])
     parser.add_argument('--train_mode', type=str, default='fft',

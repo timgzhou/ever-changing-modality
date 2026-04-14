@@ -340,3 +340,12 @@ panopticon,eurosat,nir,fft,16,0.001,0.0,32,Acc,48.9074,98983690,checkpoints/rsfm
 panopticon,benv2,s2,fft,16,0.001,0.0,32,mAP,45.6915,98990611,checkpoints/rsfm_benv2_s2_fft_20260413_022257.pt
 panopticon,eurosat,swir,fft,16,0.003,0.0,32,Acc,49.6852,98983690,checkpoints/rsfm_eurosat_swir_fft_20260413_023044.pt
 dinov3-vitl-lvd,dfc2020,s2_rgb,fft,16,0.0001,0.0,32,mIoU,49.6879,303137800,checkpoints/rsfm_dfc2020_s2_rgb_fft_20260413_023046.pt
+dinov3-vitl-sat,dfc2020,s2_rgb,lp,16,0.003,0.0,32,mIoU,43.7246,8200,checkpoints/rsfm_dfc2020_s2_rgb_lp_20260413_023747.pt
+panopticon,benv2,s2,fft,16,0.0005,0.0,32,mAP,55.7993,98990611,checkpoints/rsfm_benv2_s2_fft_20260413_024201.pt
+dinov3-vitl-sat,dfc2020,s2_rgb,lp,16,0.001,0.0,32,mIoU,43.2289,8200,checkpoints/rsfm_dfc2020_s2_rgb_lp_20260413_024445.pt
+panopticon,eurosat,swir,fft,16,0.001,0.0,32,Acc,61.7778,98983690,checkpoints/rsfm_eurosat_swir_fft_20260413_024737.pt
+dinov3-vitl-sat,dfc2020,s2_rgb,lp,16,0.0005,0.0,32,mIoU,43.1067,8200,checkpoints/rsfm_dfc2020_s2_rgb_lp_20260413_025145.pt
+dinov3-vitl-sat,dfc2020,s2_rgb,lp,16,0.0001,0.0,32,mIoU,41.5039,8200,checkpoints/rsfm_dfc2020_s2_rgb_lp_20260413_025844.pt
+panopticon,benv2,s2,fft,16,0.0001,0.0,32,mAP,58.7988,98990611,checkpoints/rsfm_benv2_s2_fft_20260413_030105.pt
+olmoearth,eurosat,s2,lp,16,0.003,0.0,32,Acc,95.7037,7690,checkpoints/rsfm_eurosat_s2_lp_20260413_112305.pt
+olmoearth,dfc2020,s2,lp,16,0.003,0.0,32,mIoU,51.2281,6152,checkpoints/rsfm_dfc2020_s2_lp_20260413_112737.pt

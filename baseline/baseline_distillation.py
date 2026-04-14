@@ -490,9 +490,15 @@ def main():
 
     # Create datasets (do this first so we know task_type before loading teacher)
     print("\n=== Creating datasets ===")
+    # Load teacher checkpoint to discover teacher modality before building loaders,
+    # so we can request both modalities and get a complete modality_bands_dict.
+    _ckpt_for_mod = torch.load(teacher_checkpoint_path, map_location='cpu')
+    _teacher_modality = _ckpt_for_mod['config']['evan_config'].get('starting_modality', 'rgb')
+    del _ckpt_for_mod
     train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = \
         get_loaders(args.dataset, args.modality, args.batch_size, args.num_workers,
-                    data_normalizer=data_normalizer, num_time_steps=args.num_time_steps)
+                    data_normalizer=data_normalizer, num_time_steps=args.num_time_steps,
+                    new_modality=_teacher_modality if _teacher_modality != args.modality else None)
 
     is_segmentation = (task_config.task_type == 'segmentation')
     multilabel = task_config.multilabel

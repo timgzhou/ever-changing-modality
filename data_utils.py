@@ -183,13 +183,14 @@ def get_loaders(
 def _get_eurosat_loaders(starting_modality, new_modality, batch_size, num_workers, data_normalizer=None):
     from eurosat_data_utils import get_loaders_with_val, get_modality_bands_dict, MODALITY_BANDS
 
-    raw_pixels = data_normalizer is False
-    train1, val1, train2, val2, test = get_loaders_with_val(batch_size, num_workers, raw_pixels=raw_pixels)
+    # Always load raw DN values — create_multimodal_batch handles all normalization
+    # via normalize_bands (min-max per band) + optional ImageNet norm for rgb.
+    train1, val1, train2, val2, test = get_loaders_with_val(batch_size, num_workers, raw_pixels=True)
 
-    from eurosat_data_utils import get_band_indices
     mods = (starting_modality,) if new_modality is None else (starting_modality, new_modality)
-    # Convert band name tuples to integer index lists so callers can do imgs[:, indices]
-    modality_bands_dict = {k: get_band_indices(v) for k, v in get_modality_bands_dict(*mods).items()}
+    # Keep band name tuples (not int lists) so create_multimodal_batch routes to the
+    # EuroSAT path (tuple check) rather than the GeoBench path (list/slice check).
+    modality_bands_dict = get_modality_bands_dict(*mods)
 
     task_config = TaskConfig(
         dataset_name='eurosat',

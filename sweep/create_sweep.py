@@ -40,8 +40,9 @@ CHECKPOINT_MAP_DINO = {
 
 
 def _create_shot_sweep(starting_mod: str, new_mod: str, dino: bool = False,
-                        dataset: str = 'eurosat', stage0_checkpoint: str = None) -> str:
-    config = _load_merged_config('shot')
+                        dataset: str = 'eurosat', stage0_checkpoint: str = None,
+                        script: str = 'shot') -> str:
+    config = _load_merged_config(script)
 
     if stage0_checkpoint is None:
         cpt_map = CHECKPOINT_MAP_DINO if dino else CHECKPOINT_MAP
@@ -49,7 +50,7 @@ def _create_shot_sweep(starting_mod: str, new_mod: str, dino: bool = False,
             raise ValueError(f"Unknown starting modality: {starting_mod}. Options: {list(cpt_map.keys())}")
         stage0_checkpoint = cpt_map[starting_mod]
 
-    project_name = f"delulu-sweep-{dataset}-{starting_mod}-{new_mod}"
+    project_name = f"delulu-{script}-{dataset}-{starting_mod}-{new_mod}"
     if dino:
         project_name += "-dino"
     config['project'] = project_name
@@ -143,7 +144,7 @@ def _create_baseline_distill_sweep(dataset: str, teacher_checkpoint: str, modali
 def main():
     parser = argparse.ArgumentParser(description='Create a W&B sweep.')
     parser.add_argument('--script', type=str, required=True,
-                        choices=['shot', 'sft', 'baseline_distill'],
+                        choices=['shot', 'pldc', 'sft', 'baseline_distill'],
                         help='Which training script to sweep')
 
     # SHOT-specific
@@ -171,14 +172,15 @@ def main():
 
     args = parser.parse_args()
 
-    if args.script == 'shot':
+    if args.script == 'shot' or args.script == 'pldc':
         if not args.starting or not args.newmod:
-            parser.error('--script shot requires --starting and --newmod')
+            parser.error(f'--script {args.script} requires --starting and --newmod')
         if args.starting == args.newmod:
             parser.error('--starting and --newmod must be different')
         dataset = args.dataset or 'eurosat'
         _create_shot_sweep(args.starting, args.newmod, args.dino,
-                           dataset=dataset, stage0_checkpoint=args.stage0_checkpoint)
+                           dataset=dataset, stage0_checkpoint=args.stage0_checkpoint,
+                           script=args.script)
 
     elif args.script == 'sft':
         if not args.dataset or not args.modalities:

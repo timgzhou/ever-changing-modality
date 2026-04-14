@@ -373,12 +373,21 @@ class EVAN(nn.Module):
                 for i in range(length)
             ])
 
-    def load_pretrained_dino(self, model_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", load_weights:bool=True):
+    def load_pretrained_dino(self, model_name: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", load_weights:bool=True,
+                             rgb_in_s2_indices: 'list[int] | None' = None):
         """
         Load pretrained DINO weights from HuggingFace into EVAN.
 
         Args:
             model_name: HuggingFace model name (default: facebook/dinov3-vitl16-pretrain-lvd1689m)
+            rgb_in_s2_indices: When starting_modality is 's2', a list of 3 channel indices
+                within the s2 patch embedder that correspond to the RGB bands (B04, B03, B02).
+                The DINO RGB patch embedder weights are copied into those positions; all other
+                s2 channels remain randomly initialised.
+                Example values:
+                  EuroSAT s2 (13ch): [3, 2, 1]   # B04, B03, B02 at indices 3,2,1
+                  BEN-v2  s2 (12ch): [3, 2, 1]   # same (B10 dropped, positions unchanged)
+                  PASTIS  s2 (10ch): [2, 1, 0]   # B04=idx2, B03=idx1, B02=idx0
         """
         if not load_weights:
             print("pretrained=False, not loading weight and returning directly.")
@@ -426,12 +435,17 @@ class EVAN(nn.Module):
             # EVAN multi-modality compatibility: Remap patch_embed.* to patch_embedders.<starting_modality>.*
             # DINO patch embedder is 3-channel RGB; copy weights only when starting modality
             # is also 3-channel RGB (rgb, s2_rgb, or any *_rgb variant).
-            # For other modalities (s2, s1, etc.) the patch embedder must be randomly init'd.
+            # For s2, the RGB bands are a subset — stash the DINO weights for partial copy later.
+            # For other modalities (s1, etc.) the patch embedder must be randomly init'd.
             if 'patch_embed.' in new_key:
                 is_rgb_modality = (self.starting_modality == 'rgb' or
                                    self.starting_modality.endswith('_rgb'))
+                is_s2_modality = (self.starting_modality == 's2')
                 if is_rgb_modality:
                     new_key = new_key.replace('patch_embed.', f'patch_embedders.{self.starting_modality}.')
+                elif is_s2_modality and new_key == 'patch_embed.proj.weight':
+                    _dino_rgb_patch_weight = value  # [D, 3, kH, kW] — stash for post-load copy
+                    continue
                 else:
                     continue  # Skip patch embedder weights for non-RGB modalities
             checkpoint[new_key] = value
@@ -498,6 +512,21 @@ class EVAN(nn.Module):
         
         result = self.load_state_dict(checkpoint, strict=False)
 
+        # For s2 modality: copy DINO RGB patch weights into the rgb band positions of the
+        # s2 patch embedder (all other channels remain randomly initialised).
+        if (self.starting_modality == 's2' and
+                '_dino_rgb_patch_weight' in dir() and
+                rgb_in_s2_indices is not None):
+            with torch.no_grad():
+                proj_weight = self.patch_embedders['s2'].proj.weight  # [D, C_s2, kH, kW]
+                for dst_ch, src_ch in enumerate(range(3)):
+                    proj_weight[:, rgb_in_s2_indices[dst_ch], :, :] = _dino_rgb_patch_weight[:, src_ch, :, :]
+            n_rgb_params = _dino_rgb_patch_weight.numel()
+            print(f"  s2 patch embedder: copied DINO RGB weights into channels {rgb_in_s2_indices} "
+                  f"({n_rgb_params:,} params); remaining {proj_weight.shape[1] - 3} channels randomly init'd.")
+        elif self.starting_modality == 's2' and rgb_in_s2_indices is None:
+            print("  s2 patch embedder: randomly init'd (pass rgb_in_s2_indices to copy DINO RGB weights).")
+
         actually_transferred_params = sum(
             v.numel() for k, v in checkpoint.items()
             if k not in result.unexpected_keys
@@ -519,6 +548,10 @@ class EVAN(nn.Module):
                     mod = key[len(prefix):].split('.')[0]
                     if mod != primary:
                         return True
+            # s2 patch embedder is kept randomly init'd (or partially overwritten post-load)
+            # so it won't appear in the checkpoint — expected missing.
+            if primary == 's2' and key.startswith('patch_embedders.s2.'):
+                return True
             if self.tz_modality_specific_layer_augmenter == "lora":
                 if 'modality_specific_layer_adaptors' in key:
                     return True
@@ -1209,12 +1242,14 @@ class EVAN(nn.Module):
 
 # EVAN preset functions (similar to DINOv3)
 
-def evan_small(pretrained: str = "facebook/dinov3-vits16-pretrain-lvd1689m", load_weights:bool=True, **kwargs):
+def evan_small(pretrained: str = "facebook/dinov3-vits16-pretrain-lvd1689m", load_weights:bool=True,
+               rgb_in_s2_indices: 'list[int] | None' = None, **kwargs):
     """
     Create EVAN-Small model (384 dim, 12 blocks, 6 heads) with pretrained DINO weights.
 
     Args:
         pretrained: HuggingFace model name for pretrained weights (default: facebook/dinov3-vits16-pretrain-lvd1689m)
+        rgb_in_s2_indices: See EVAN.load_pretrained_dino for details.
         **kwargs: Additional arguments passed to EVAN (e.g., device, tz_fusion_time, n_storage_tokens)
 
     Returns:
@@ -1229,16 +1264,18 @@ def evan_small(pretrained: str = "facebook/dinov3-vits16-pretrain-lvd1689m", loa
         layerscale_init=1e-5,  # DINOv3 uses LayerScale
         **kwargs,
     )
-    model.load_pretrained_dino(model_name=pretrained, load_weights=load_weights)
+    model.load_pretrained_dino(model_name=pretrained, load_weights=load_weights, rgb_in_s2_indices=rgb_in_s2_indices)
     return model
 
 
-def evan_base(pretrained: str = "facebook/dinov3-vitb16-pretrain-lvd1689m", load_weights:bool=True, **kwargs):
+def evan_base(pretrained: str = "facebook/dinov3-vitb16-pretrain-lvd1689m", load_weights:bool=True,
+              rgb_in_s2_indices: 'list[int] | None' = None, **kwargs):
     """
     Create EVAN-Base model (768 dim, 12 blocks, 12 heads) with pretrained DINO weights.
 
     Args:
         pretrained: HuggingFace model name for pretrained weights (default: facebook/dinov3-vitb16-pretrain-lvd1689m)
+        rgb_in_s2_indices: See EVAN.load_pretrained_dino for details.
         **kwargs: Additional arguments passed to EVAN (e.g., device, tz_fusion_time, n_storage_tokens)
 
     Returns:
@@ -1253,16 +1290,18 @@ def evan_base(pretrained: str = "facebook/dinov3-vitb16-pretrain-lvd1689m", load
         layerscale_init=1e-5,  # DINOv3 uses LayerScale
         **kwargs,
     )
-    model.load_pretrained_dino(model_name=pretrained,load_weights=load_weights)
+    model.load_pretrained_dino(model_name=pretrained, load_weights=load_weights, rgb_in_s2_indices=rgb_in_s2_indices)
     return model
 
 
-def evan_large(pretrained: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", load_weights:bool=True, **kwargs):
+def evan_large(pretrained: str = "facebook/dinov3-vitl16-pretrain-sat493m", load_weights:bool=True,
+               rgb_in_s2_indices: 'list[int] | None' = None, **kwargs):
     """
     Create EVAN-Large model (1024 dim, 24 blocks, 16 heads) with pretrained DINO weights.
 
     Args:
-        pretrained: HuggingFace model name for pretrained weights (default: facebook/dinov3-vitl16-pretrain-lvd1689m)
+        pretrained: HuggingFace model name for pretrained weights (default: facebook/dinov3-vitl16-pretrain-sat493m)
+        rgb_in_s2_indices: See EVAN.load_pretrained_dino for details.
         **kwargs: Additional arguments passed to EVAN (e.g., device, tz_fusion_time, n_storage_tokens)
 
     Returns:
@@ -1277,7 +1316,7 @@ def evan_large(pretrained: str = "facebook/dinov3-vitl16-pretrain-lvd1689m", loa
         layerscale_init=1e-5,  # DINOv3 uses LayerScale
         **kwargs,
     )
-    model.load_pretrained_dino(model_name=pretrained,load_weights=load_weights)
+    model.load_pretrained_dino(model_name=pretrained, load_weights=load_weights, rgb_in_s2_indices=rgb_in_s2_indices)
     return model
 
 

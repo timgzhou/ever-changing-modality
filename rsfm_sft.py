@@ -41,9 +41,6 @@ Usage:
   # OlmoEarth LP on BEN-v2 S2
   python rsfm_sft.py --model allenai/OlmoEarth-v1-Base --dataset benv2 --modality s2 --train_mode lp --epochs 50
 
-  # OlmoEarth FFT on PASTIS S2
-  python rsfm_sft.py --model allenai/OlmoEarth-v1-Base --dataset pastis --modality s2 --train_mode fft --epochs 20
-
   # Panopticon LP on BEN-v2 S2 (to verify against lp_panopticon_benv2.py baseline)
   python rsfm_sft.py --model panopticon --dataset benv2 --modality s2 --train_mode lp --epochs 50
 
@@ -661,13 +658,20 @@ def extract_features(model, loader, device, modality_slices: dict, modality: str
 
 def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
                                 data_root=None, raw_pixels=False):
-    """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict).
+    """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict, preprocess_fn).
+
+    preprocess_fn(batch) -> imgs [B, C, H, W]: extracts and normalizes the requested
+    modality from a raw batch. For EuroSAT this applies per-band min-max normalization
+    (and ImageNet norm for rgb). For GeoBench/DFC2020 datasets the batch is already
+    z-score normalized by the loader, so preprocess_fn just slices the channel dim.
+    For OlmoEarth/DINO (raw_pixels=True) normalization is handled inside the model wrapper,
+    so preprocess_fn only slices.
 
     Args:
         raw_pixels: If True, skip dataset-level normalization (for models like OlmoEarth
                     that apply their own normalization internally).
     """
-    from data_utils import get_loaders
+    from data_utils import get_loaders, create_multimodal_batch
 
     # s2s1 = concatenated all-bands; load with both modalities so the stacked image is available
     starting_modality = 's2' if modality == 's2s1' else modality
@@ -692,7 +696,25 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
     else:
         modality_bands_dict = {modality: task_config.modality_bands_dict[modality]}
 
-    return train1, val1, test, task_config, modality_bands_dict
+    # Build preprocess_fn: for EuroSAT the dict values are band-name tuples, so we must
+    # go through create_multimodal_batch which does min-max + optional ImageNet norm.
+    # For all other datasets (GeoBench, DFC2020) dict values are slices/int-lists so
+    # a plain channel slice suffices (normalization already done in the loader).
+    first_val = next(iter(modality_bands_dict.values()))
+    if isinstance(first_val, (slice, list)):
+        # GeoBench / DFC2020: batch already normalized; just slice the channel dim.
+        _slice = first_val  # the single modality's slice or list
+        def preprocess_fn(batch):
+            return batch['image'][:, _slice]
+    else:
+        # EuroSAT: band-name tuples — delegate to create_multimodal_batch for normalization.
+        _mbd = modality_bands_dict
+        _mod = modality
+        def preprocess_fn(batch):
+            result = create_multimodal_batch(batch, modality_bands_dict=_mbd, modalities=(_mod,))
+            return result[_mod]
+
+    return train1, val1, test, task_config, modality_bands_dict, preprocess_fn
 
 
 def compute_metrics(logits, labels, task_type='classification', multilabel=False,
@@ -723,7 +745,8 @@ def compute_metrics(logits, labels, task_type='classification', multilabel=False
 
 
 def eval_head(model, head, loader, criterion, device, segmentation, multilabel,
-              num_classes, ignore_index, desc='Eval', modality_slice=None):
+              num_classes, ignore_index, desc='Eval', modality_slice=None,
+              preprocess_fn=None):
     """Run model+head over loader, return (metric, loss). Used for val and test."""
     from tqdm import tqdm
     model.eval()
@@ -732,9 +755,12 @@ def eval_head(model, head, loader, criterion, device, segmentation, multilabel,
     all_logits, all_labels = [], []
 
     for batch in tqdm(loader, desc=desc, leave=False):
-        imgs = batch['image'].to(device)
-        if modality_slice is not None:
-            imgs = imgs[:, modality_slice]
+        if preprocess_fn is not None:
+            imgs = preprocess_fn(batch).to(device)
+        else:
+            imgs = batch['image'].to(device)
+            if modality_slice is not None:
+                imgs = imgs[:, modality_slice]
         if segmentation:
             labels = batch.get('mask', batch.get('label')).to(device).long()
         else:
@@ -800,7 +826,7 @@ def _patch_tokens_to_spatial(feat):
 def train_head(model, head, train_loader, val_loader, criterion, device,
                epochs, lr, weight_decay, train_mode='lp', wandb_log=False,
                segmentation=False, multilabel=False, num_classes=None, ignore_index=-100,
-               modality_slice=None):
+               modality_slice=None, preprocess_fn=None):
     """
     Train the head (+ optionally backbone layers) on train_loader.
 
@@ -858,9 +884,12 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
 
         train_loss = 0.0
         for batch in tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs} [train]', leave=False):
-            imgs = batch['image'].to(device)
-            if modality_slice is not None:
-                imgs = imgs[:, modality_slice]
+            if preprocess_fn is not None:
+                imgs = preprocess_fn(batch).to(device)
+            else:
+                imgs = batch['image'].to(device)
+                if modality_slice is not None:
+                    imgs = imgs[:, modality_slice]
             if segmentation:
                 labels = batch.get('mask', batch.get('label')).to(device).long()
             else:
@@ -925,6 +954,7 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
             num_classes=num_classes, ignore_index=ignore_index,
             desc=f'Epoch {epoch+1}/{epochs} [val]',
             modality_slice=modality_slice,
+            preprocess_fn=preprocess_fn,
         )
 
         if val_metric > best_val_metric:
@@ -985,10 +1015,11 @@ def main():
 
     # Data
     print("\n=== Creating datasets ===")
-    train1_loader, val1_loader, test_loader, task_config, modality_bands_dict = get_task_config_and_loaders(
-        args.dataset, args.modality, args.batch_size, args.num_workers,
-        data_root=args.data_root, raw_pixels=is_olmoearth or is_dino,
-    )
+    train1_loader, val1_loader, test_loader, task_config, modality_bands_dict, preprocess_fn = \
+        get_task_config_and_loaders(
+            args.dataset, args.modality, args.batch_size, args.num_workers,
+            data_root=args.data_root, raw_pixels=is_olmoearth or is_dino,
+        )
 
     # Model
     print("\n=== Loading foundation model ===")
@@ -1026,15 +1057,13 @@ def main():
     # Training
     print(f"\n=== Training for {args.epochs} epochs ===")
     ignore_index = getattr(task_config, 'ignore_index', -100)
-    # Resolve the slice for the requested modality (loaders always return the full stacked image)
-    modality_slice = modality_bands_dict.get(args.modality)
     head, _, trainable_params = train_head(
         fm, head, train1_loader, val1_loader, criterion, device,
         epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
         train_mode=args.train_mode, wandb_log=bool(args.wandb_project),
         segmentation=is_segmentation, multilabel=task_config.multilabel,
         num_classes=task_config.num_classes, ignore_index=ignore_index,
-        modality_slice=modality_slice,
+        preprocess_fn=preprocess_fn,
     )
 
     # Save checkpoint
@@ -1052,7 +1081,7 @@ def main():
         fm, head, test_loader, criterion, device,
         segmentation=is_segmentation, multilabel=task_config.multilabel,
         num_classes=task_config.num_classes, ignore_index=ignore_index,
-        desc='Test', modality_slice=modality_slice,
+        desc='Test', preprocess_fn=preprocess_fn,
     )
     print(f"Test {metric_name}: {test_metric:.2f}%")
 

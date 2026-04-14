@@ -1,5 +1,6 @@
 """Training utilities for EVAN."""
 
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -937,21 +938,43 @@ class Trainer:
                 B_u = x_u_tensor.size(0)
 
                 # --- Step 1: K augmented views of unlabeled → average → sharpen ---
-                views = [weak_aug(x_u_tensor) for _ in range(K)]  # K × [B_u, C, H, W]
+                # Capture (view, aug_params) together so we can invert the spatial
+                # transform on segmentation prediction maps before averaging.
+                views_and_params = []
+                for _ in range(K):
+                    v = weak_aug(x_u_tensor)
+                    views_and_params.append((v, copy.deepcopy(weak_aug._params)))
+                views = [v for v, _ in views_and_params]
 
+                self.model.eval()
                 with torch.no_grad():
                     if segmentation:
-                        # Average softmax over K views, flatten spatial for pseudo-labels
-                        avg_logits = sum(
-                            self.model({modality: v}) for v in views
-                        ) / K  # [B_u, C, H, W]
-                        avg_prob = F.softmax(avg_logits, dim=1)  # [B_u, C, H, W]
-                        # Sharpen along class dim
-                        sharp = avg_prob.pow(1.0 / temperature)
-                        q_spatial = sharp / sharp.sum(dim=1, keepdim=True)  # [B_u, C, H, W]
-                        # For mixing: flatten to [B_u, H*W, C]
-                        H, W = q_spatial.shape[2], q_spatial.shape[3]
-                        q = q_spatial.permute(0, 2, 3, 1).reshape(B_u, H * W, num_classes)
+                        # For segmentation: invert each view's augmentation on its
+                        # prediction map before averaging so spatial positions align.
+                        # Must work in prob space for inversion, so sharpen via
+                        # softmax(log(avg_prob) / T) rather than logit/T directly.
+                        avg_prob = None
+                        for v, aug_params in views_and_params:
+                            logits_v = self.model({modality: v})   # [B_u, C, H, W]
+                            prob_v = F.softmax(logits_v, dim=1)    # [B_u, C, H, W]
+                            # Invert the spatial transform → original coordinate frame.
+                            prob_v = weak_aug.inverse(prob_v, params=aug_params)
+                            avg_prob = prob_v if avg_prob is None else avg_prob + prob_v
+                        avg_prob = avg_prob / K                    # [B_u, C, H, W]
+                        # Sharpen: softmax(log(p) / T) — correct temperature in logit space
+                        log_p = torch.log(avg_prob.clamp(min=1e-8))
+                        q_spatial = F.softmax(log_p / temperature, dim=1)  # [B_u, C, H, W]
+                        # Re-apply each view's augmentation to q so that the training
+                        # target is in the same (augmented) coordinate frame as the image.
+                        H_s, W_s = q_spatial.shape[2], q_spatial.shape[3]
+                        q_views = []
+                        for _, aug_params in views_and_params:
+                            q_aug = weak_aug(q_spatial, params=aug_params)  # [B_u, C, H, W]
+                            q_views.append(
+                                q_aug.permute(0, 2, 3, 1).reshape(B_u, H_s * W_s, num_classes)
+                            )
+                        # q_views is a list of K tensors [B_u, H*W, C] — used below in all_y
+                        q = q_views  # sentinel: segmentation uses q_views not a single q
                     elif multilabel:
                         avg_logits = sum(
                             self.model({modality: v}) for v in views
@@ -961,10 +984,9 @@ class Trainer:
                         avg_logits = sum(
                             self.model({modality: v}) for v in views
                         ) / K  # [B_u, C]
-                        avg_prob = F.softmax(avg_logits, dim=1)
-                        sharp = avg_prob.pow(1.0 / temperature)
-                        q = sharp / sharp.sum(dim=1, keepdim=True)  # [B_u, C]
+                        q = F.softmax(avg_logits / temperature, dim=1)  # [B_u, C]
 
+                self.model.train()
                 # --- Step 2: Build one-hot / soft labeled targets ---
                 x_l_aug = weak_aug(x_l_tensor)
 
@@ -985,7 +1007,10 @@ class Trainer:
                 # X̂ = augmented labeled: [B_l, ...]
                 # Ũ = K augmented views of unlabeled each paired with q: [K*B_u, ...]
                 all_x = torch.cat([x_l_aug] + views, dim=0)         # [B_l + K*B_u, ...]
-                all_y = torch.cat([y_l] + [q] * K, dim=0)           # [B_l + K*B_u, ...]
+                # For segmentation q is a list of K per-view targets (each re-augmented);
+                # for other tasks q is a single tensor repeated K times.
+                q_list = q if segmentation else [q] * K
+                all_y = torch.cat([y_l] + q_list, dim=0)            # [B_l + K*B_u, ...]
 
                 # Shuffle W
                 perm = torch.randperm(all_x.size(0), device=self.device)
@@ -1041,8 +1066,10 @@ class Trainer:
                     log_p_lab = F.log_softmax(logits_lab, dim=1)    # [B_l, C, H, W]
                     log_p_lab_flat = log_p_lab.permute(0, 2, 3, 1).reshape(-1, num_classes)
                     y_lab_flat = y_lab.reshape(-1, num_classes)      # [B_l*H*W, C]
-                    # Valid mask (rows where y_lab sums to 1)
-                    valid_mask = y_lab_flat.sum(dim=1) > 0           # [B_l*H*W]
+                    # Valid mask: originally-valid pixels had one-hot targets summing
+                    # to 1.0; after MixUp with λ≥0.5 they sum to ≥0.5. Ignore-index
+                    # pixels were zeroed before MixUp so sum near 0 even after mixing.
+                    valid_mask = y_lab_flat.sum(dim=1) > 0.5         # [B_l*H*W]
                     if valid_mask.sum() > 0:
                         sup_loss = -(y_lab_flat[valid_mask] * log_p_lab_flat[valid_mask]).sum(dim=1).mean()
                     else:
@@ -1086,7 +1113,8 @@ class Trainer:
                 pbar.set_postfix({
                     'sup': f'{sup_loss.item():.3f}',
                     'unsup': f'{unsup_loss.item():.3f}',
-                    'lam': f'{mean_lam:.3f}',
+                    'mixup_lam': f'{mean_lam:.3f}',
+                    'lambda_u': f'{lam_u:.1f}',
                 })
 
                 if self.use_wandb and self.wandb_prefix:

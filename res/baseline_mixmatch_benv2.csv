@@ -1,2 +1,7 @@
 model_type,modality,train_mode,learning_rate,weight_decay,trainable_params,epochs,K,temperature,alpha,lambda_u,mixmatch_warmup_epochs,metric_name,test_metric,best_val_metric,best_val_test_metric,saved_checkpoint,global_rep,use_dino_weights
 evan_small,s2,fft,0.001,0.0001,22493203,20,2,0.5,0.5,125.0,4,mAP,47.82,51.72,47.82,checkpoints/evan_mixmatch_benv2_s2_20260413_015601.pt,clstoken,False
+evan_small,s2,fft,0.001,0.0001,22493203,20,2,0.5,0.75,75.0,4,mAP,49.36,52.43,49.10,checkpoints/evan_mixmatch_benv2_s2_20260413_023736.pt,clstoken,False
+evan_small,s2,fft,0.001,0.0001,22493203,20,2,0.5,0.75,100.0,4,mAP,47.31,50.89,46.97,checkpoints/evan_mixmatch_benv2_s2_20260413_031859.pt,clstoken,False
+evan_small,s2,fft,0.001,0.0001,22493203,20,2,0.5,0.75,125.0,4,mAP,47.35,51.72,47.14,checkpoints/evan_mixmatch_benv2_s2_20260413_040002.pt,clstoken,False
+evan_small,s2,fft,0.001,0.0001,22493203,20,2,0.5,1.0,75.0,4,mAP,48.53,51.92,48.53,checkpoints/evan_mixmatch_benv2_s2_20260413_044115.pt,clstoken,False
+evan_small,s2,fft,0.001,0.0001,22493203,20,2,0.5,1.0,100.0,4,mAP,47.01,49.36,47.71,checkpoints/evan_mixmatch_benv2_s2_20260413_052229.pt,clstoken,False
