@@ -158,8 +158,21 @@ def main():
         img_size=task_config.img_size,
         device=device,
     )
+    # For S2 modalities, tell DINO patch-embed init which channels map to RGB.
+    # Positions mirror train_sft.py.
+    _S2_RGB_INDICES = {
+        'eurosat': [3, 2, 1],   # B04, B03, B02 at indices 3, 2, 1
+        'benv2':   [3, 2, 1],
+        'dfc2020': [3, 2, 1],
+        'pastis':  [2, 1, 0],   # B04, B03, B02 at indices 2, 1, 0 (B01/B09/B10 removed)
+    }
+    rgb_in_s2_indices = (
+        _S2_RGB_INDICES.get(args.dataset)
+        if args.modality == 's2' and args.use_dino_weights
+        else None
+    )
     model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
-    evan = model_fn(load_weights=args.use_dino_weights, **common_kwargs)
+    evan = model_fn(load_weights=args.use_dino_weights, rgb_in_s2_indices=rgb_in_s2_indices, **common_kwargs)
 
     if is_segmentation:
         model = EvanSegmenter(

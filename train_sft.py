@@ -265,7 +265,7 @@ def main():
         print(f"  Best val {metric_name}: {best_val_metric:.2f}% — checkpoint: {checkpoint_path}")
 
     # CSV logging
-    filename = f"res/stage0/{args.dataset}.csv"
+    filename = f"res/train_sft/{args.dataset}.csv"
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
     fieldnames = [
@@ -273,6 +273,7 @@ def main():
         "tz_lora_rank", "tz_modality_specific_layer_augmenter",
         "learning_rate", "trainable_params", "epoch",
         "test_metric", "metric_name", "saved_checkpoint", "global_rep",
+        "dino_init",
     ]
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
@@ -284,6 +285,7 @@ def main():
             args.lr, trainable_params, args.epochs,
             f"{best_val_test_metric:.2f}" if best_val_test_metric is not None else "",
             metric_name, checkpoint_path, args.global_rep,
+            args.use_dino_weights,
         ])
 
     if args.wandb_project:

@@ -2,3 +2,6 @@ dataset,model_type,modality,train_mode,tz_lora_rank,tz_modality_specific_layer_a
 dfc2020,evan_base,s2,fft,32,fft,0.001,87641864,16,37.12,mIoU,checkpoints/sft_evan_base_dfc2020_s2_fft_lr0.001_20260413_223011.pt,clstoken
 dfc2020,evan_base,s2,fft,32,fft,0.0005,87641864,16,37.45,mIoU,checkpoints/sft_evan_base_dfc2020_s2_fft_lr0.0005_20260413_225310.pt,clstoken
 dfc2020,evan_base,s2,fft,32,fft,0.0001,87641864,16,37.66,mIoU,checkpoints/sft_evan_base_dfc2020_s2_fft_lr0.0001_20260413_231726.pt,clstoken
+dfc2020,evan_base,s1,fft,32,fft,0.001,85479176,16,34.83,mIoU,checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.001_20260413_234214.pt,clstoken
+dfc2020,evan_base,s1,fft,32,fft,0.0005,85479176,16,34.44,mIoU,checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260414_000432.pt,clstoken
+dfc2020,evan_base,s1,fft,32,fft,0.0005,85479176,16,35.29,mIoU,checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260414_000610.pt,clstoken
