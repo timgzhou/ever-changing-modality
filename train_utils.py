@@ -1034,8 +1034,8 @@ class Trainer:
                 mixed_y_l = lam_y_t[:B_l]  * y_l      + (1 - lam_y_t[:B_l])  * W_y[:B_l]
 
                 # MixUp each unlabeled view with its W slice
-                u_views_x = torch.cat(views, dim=0)   # [K*B_u, ...]
-                u_views_y = torch.cat([q] * K, dim=0) # [K*B_u, ...]
+                u_views_x = torch.cat(views, dim=0)    # [K*B_u, ...]
+                u_views_y = torch.cat(q_list, dim=0)  # [K*B_u, ...]
                 mixed_x_u = lam_x_img[B_l:] * u_views_x + (1 - lam_x_img[B_l:]) * W_x[B_l:]
                 mixed_y_u = lam_y_t[B_l:]  * u_views_y + (1 - lam_y_t[B_l:])  * W_y[B_l:]
 

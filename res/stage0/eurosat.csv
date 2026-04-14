@@ -1,0 +1,7 @@
+dataset,model_type,modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,test_metric,metric_name,saved_checkpoint,global_rep
+eurosat,evan_base,rgb,fft,32,fft,0.001,85677322,16,71.07,Acc,checkpoints/sft_evan_base_eurosat_rgb_fft_lr0.001_20260413_222829.pt,clstoken
+eurosat,evan_base,rgb,fft,32,fft,0.0005,85677322,16,78.72,Acc,checkpoints/sft_evan_base_eurosat_rgb_fft_lr0.0005_20260413_224236.pt,clstoken
+eurosat,evan_base,rgb,fft,32,fft,0.0001,85677322,16,86.44,Acc,checkpoints/sft_evan_base_eurosat_rgb_fft_lr0.0001_20260413_225653.pt,clstoken
+eurosat,evan_base,vre,fft,32,fft,0.001,85677322,16,80.48,Acc,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.001_20260413_231102.pt,clstoken
+eurosat,evan_base,vre,fft,32,fft,0.0005,85677322,16,85.17,Acc,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260413_232438.pt,clstoken
+eurosat,evan_base,vre,fft,32,fft,0.0001,85677322,16,87.63,Acc,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0001_20260413_233927.pt,clstoken
