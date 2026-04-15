@@ -465,3 +465,6 @@ olmoearth-large,benv2,s2s1,fft,16,0.0005,0.0,32,mAP,44.8736,307792915,checkpoint
 olmoearth-large,dfc2020,s2s1,fft,16,0.0001,0.0,32,mIoU,52.6178,307781640,checkpoints/rsfm_dfc2020_s2s1_fft_20260414_012802.pt
 olmoearth-large,benv2,s2s1,fft,16,0.0001,0.0,32,mAP,63.8370,307792915,checkpoints/rsfm_benv2_s2s1_fft_20260414_014432.pt
 olmoearth-large,dfc2020,s2_rgb,fft,16,0.0005,0.0,32,mIoU,23.5434,307781640,checkpoints/rsfm_dfc2020_s2_rgb_fft_20260414_014948.pt
+dinov3-vitb-lvd,benv2,s2_rgb,fft,16,0.0005,0.0,32,mAP,46.2626,85675027,checkpoints/rsfm_benv2_s2_rgb_fft_20260414_140806.pt
+dinov3-vitb-lvd,benv2,s2_rgb,fft,5,0.0005,0.0,32,mAP,61.2741,85675027,checkpoints/rsfm_benv2_s2_rgb_fft_20260414_164504.pt
+dinov3-vitb-lvd,benv2,s2_rgb,fft,5,0.0005,0.0,32,mAP,58.2812,85675027,checkpoints/rsfm_benv2_s2_rgb_fft_20260414_165145.pt

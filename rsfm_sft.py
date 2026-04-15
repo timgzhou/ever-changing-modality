@@ -322,54 +322,54 @@ class OlmoEarthWrapper(ModelWrapper):
 
 class DinoWrapper(ModelWrapper):
     """
-    Wraps a HuggingFace DINOv3 ViT to accept raw-DN [B, 3, H, W] RGB tensors.
+    Wraps a HuggingFace DINOv3 ViT to accept [B, 3, H, W] tensors.
 
-    Preprocessing (applied internally, so loaders must pass raw_pixels=True):
-      1. Min-max normalize to [0, 1] using per-band EuroSAT BAND_MINS/BAND_MAXS
-         (bands are B04, B03, B02 = Red, Green, Blue in that order)
-      2. Z-score with model-specific mean/std:
-         - LVD models: ImageNet stats (0.485, 0.456, 0.406) / (0.229, 0.224, 0.225)
-         - SAT model:  satellite stats (0.430, 0.411, 0.296) / (0.213, 0.156, 0.143)
+    Two modes depending on raw_pixels:
+      raw_pixels=True  (EuroSAT): applies min-max → [0,1] → ImageNet/SAT z-score internally.
+      raw_pixels=False (GeoBench datasets): input is already z-score normalized by the loader;
+                        internal normalization is skipped (consistent with train_sft).
 
     forward() returns ModelOutput with:
       - output_hidden_states=False: CLS token [B, D]
       - output_hidden_states=True:  patch tokens [B, N, D]
     """
 
-    def __init__(self, model, model_key: str, modality: str, dataset: str):
+    def __init__(self, model, model_key: str, modality: str, dataset: str, raw_pixels: bool = True):
         super().__init__()
         self.model = model
         self.modality = modality
         self.dataset = dataset
+        self.raw_pixels = raw_pixels
 
-        # Min-max stats for B04, B03, B02 (Red, Green, Blue)
-        # ALL_BAND_NAMES = [B01,B02,B03,B04,...] → indices 3,2,1
-        from eurosat_data_utils import BAND_MINS, BAND_MAXS
-        rgb_indices = [3, 2, 1]  # B04=3, B03=2, B02=1 in ALL_BAND_NAMES
-        self.register_buffer('band_mins', BAND_MINS[rgb_indices].view(1, 3, 1, 1))
-        self.register_buffer('band_maxs', BAND_MAXS[rgb_indices].view(1, 3, 1, 1))
-
-        # Per-model normalization stats
-        mean, std = DINO_NORM_STATS[model_key]
-        self.register_buffer('norm_mean', torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1))
-        self.register_buffer('norm_std',  torch.tensor(std,  dtype=torch.float32).view(1, 3, 1, 1))
+        if raw_pixels:
+            # EuroSAT path: min-max bounds for B04, B03, B02
+            from eurosat_data_utils import BAND_MINS, BAND_MAXS
+            rgb_indices = [3, 2, 1]  # B04=3, B03=2, B02=1 in ALL_BAND_NAMES
+            self.register_buffer('band_mins', BAND_MINS[rgb_indices].view(1, 3, 1, 1))
+            self.register_buffer('band_maxs', BAND_MAXS[rgb_indices].view(1, 3, 1, 1))
+            mean, std = DINO_NORM_STATS[model_key]
+            self.register_buffer('norm_mean', torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1))
+            self.register_buffer('norm_std',  torch.tensor(std,  dtype=torch.float32).view(1, 3, 1, 1))
 
         # Number of register tokens (DINOv3 prepends [CLS, reg_1, ..., reg_R, patch_1, ...])
         self.num_register_tokens = getattr(model.config, 'num_register_tokens', 0)
 
     def forward(self, imgs, output_hidden_states=False):
         """
-        [B, 3, H, W] raw DN → ModelOutput.
+        [B, 3, H, W] → ModelOutput.
 
         last_hidden_state:
           - [B, D]    when output_hidden_states=False (CLS token, classification)
           - [B, N, D] when output_hidden_states=True  (patch tokens, segmentation)
         """
-        # Step 1: min-max to [0, 1]
-        x = (imgs - self.band_mins) / (self.band_maxs - self.band_mins + 1e-6)
-        x = x.clamp(0.0, 1.0)
-        # Step 2: z-score with model-specific stats
-        x = (x - self.norm_mean) / self.norm_std
+        if self.raw_pixels:
+            # EuroSAT: min-max to [0, 1] then ImageNet/SAT z-score
+            x = (imgs - self.band_mins) / (self.band_maxs - self.band_mins + 1e-6)
+            x = x.clamp(0.0, 1.0)
+            x = (x - self.norm_mean) / self.norm_std
+        else:
+            # GeoBench: already z-score normalized by loader — pass through as-is
+            x = imgs
 
         output = self.model(pixel_values=x)
         # HF DINOv3: last_hidden_state is [B, 1+R+N, D]
@@ -475,7 +475,7 @@ class PanopticonWrapper(ModelWrapper):
             return ModelOutput(features)
 
 
-def load_foundation_model(model_name: str, device, modality='s2', dataset=None):
+def load_foundation_model(model_name: str, device, modality='s2', dataset=None, raw_pixels=True):
     """
     Load a foundation model from HuggingFace or torch.hub.
 
@@ -544,7 +544,7 @@ def load_foundation_model(model_name: str, device, modality='s2', dataset=None):
         model = AutoModel.from_pretrained(repo_id)
         model = model.to(device).eval()
         feature_dim = model.config.hidden_size  # 768 for vitb, 1024 for vitl
-        wrapped = DinoWrapper(model, model_key=model_name, modality=modality, dataset=dataset)
+        wrapped = DinoWrapper(model, model_key=model_name, modality=modality, dataset=dataset, raw_pixels=raw_pixels)
         wrapped = wrapped.to(device)
         print(f"Feature dimension (DINOv3 {model_name}): {feature_dim}")
         return wrapped, feature_dim
@@ -769,7 +769,7 @@ def eval_head(model, head, loader, criterion, device, segmentation, multilabel,
                 labels = labels.float()
 
         with torch.no_grad():
-            output = model(imgs, output_hidden_states=True)
+            output = model(imgs, output_hidden_states=segmentation)
             feat = output.last_hidden_state if hasattr(output, 'last_hidden_state') \
                 else (output[0] if isinstance(output, tuple) else output)
 
@@ -826,7 +826,7 @@ def _patch_tokens_to_spatial(feat):
 def train_head(model, head, train_loader, val_loader, criterion, device,
                epochs, lr, weight_decay, train_mode='lp', wandb_log=False,
                segmentation=False, multilabel=False, num_classes=None, ignore_index=-100,
-               modality_slice=None, preprocess_fn=None):
+               modality_slice=None, preprocess_fn=None, warmup_epochs=1):
     """
     Train the head (+ optionally backbone layers) on train_loader.
 
@@ -868,9 +868,8 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
         list(filter(lambda p: p.requires_grad, head.parameters())),
         lr=lr, weight_decay=weight_decay
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=epochs * len(train_loader), eta_min=0
-    )
+    from train_utils import make_scheduler
+    scheduler = make_scheduler(optimizer, epochs, warmup_epochs=warmup_epochs)
 
     best_val_metric = 0.0
     best_state = None
@@ -900,27 +899,28 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
             optimizer.zero_grad()
 
             # Forward pass
+            # output_hidden_states=True for segmentation (need patch tokens);
+            # output_hidden_states=False for classification (CLS token directly).
+            need_spatial = segmentation
             if train_mode == 'fft':
-                output = model(imgs, output_hidden_states=True)
+                output = model(imgs, output_hidden_states=need_spatial)
                 if hasattr(output, 'last_hidden_state'):
                     feat = output.last_hidden_state
                 else:
                     feat = output[0] if isinstance(output, tuple) else output
 
-                # Extract features: CLS token for classification, patch tokens for segmentation
                 if segmentation:
                     features = _patch_tokens_to_spatial(feat)
                 else:
-                    # Classification: extract from whatever shape we get
                     if feat.dim() == 3:
                         features = feat[:, 0, :]  # CLS token from [B, N, D]
                     elif feat.dim() == 2:
                         features = feat  # Already pooled [B, D]
                     else:
-                        features = feat.mean(dim=(2, 3))  # Global average from [B, D, H, W]
+                        features = feat.mean(dim=(2, 3))
             else:
                 with torch.no_grad():
-                    output = model(imgs, output_hidden_states=True)
+                    output = model(imgs, output_hidden_states=need_spatial)
                     if hasattr(output, 'last_hidden_state'):
                         feat = output.last_hidden_state
                     else:
@@ -942,10 +942,10 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
             loss = criterion(logits, labels)
             loss.backward()
             optimizer.step()
-            scheduler.step()
             train_loss += loss.item()
 
         train_loss /= len(train_loader)
+        scheduler.step()
 
         # Validation
         val_metric, val_loss = eval_head(
@@ -992,6 +992,7 @@ def main():
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--weight_decay', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--warmup_epochs', type=int, default=3)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--wandb_project', type=str, default=None)
@@ -1012,18 +1013,22 @@ def main():
 
     is_olmoearth = 'olmoearth' in args.model.lower()
     is_dino = args.model in DINO_MODELS
+    # DINO on GeoBench datasets (benv2, dfc2020, pastis): use loader z-score normalization,
+    # consistent with train_sft. DINO on EuroSAT: raw pixels, normalize inside DinoWrapper.
+    dino_raw_pixels = is_dino and args.dataset == 'eurosat'
 
     # Data
     print("\n=== Creating datasets ===")
     train1_loader, val1_loader, test_loader, task_config, modality_bands_dict, preprocess_fn = \
         get_task_config_and_loaders(
             args.dataset, args.modality, args.batch_size, args.num_workers,
-            data_root=args.data_root, raw_pixels=is_olmoearth or is_dino,
+            data_root=args.data_root, raw_pixels=is_olmoearth or dino_raw_pixels,
         )
 
     # Model
     print("\n=== Loading foundation model ===")
-    fm, feature_dim = load_foundation_model(args.model, device, modality=args.modality, dataset=args.dataset)
+    fm, feature_dim = load_foundation_model(args.model, device, modality=args.modality,
+                                            dataset=args.dataset, raw_pixels=dino_raw_pixels)
 
     # Head
     print("\n=== Creating task-specific head ===")
@@ -1063,7 +1068,7 @@ def main():
         train_mode=args.train_mode, wandb_log=bool(args.wandb_project),
         segmentation=is_segmentation, multilabel=task_config.multilabel,
         num_classes=task_config.num_classes, ignore_index=ignore_index,
-        preprocess_fn=preprocess_fn,
+        preprocess_fn=preprocess_fn, warmup_epochs=args.warmup_epochs,
     )
 
     # Save checkpoint

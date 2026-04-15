@@ -16,7 +16,7 @@ import wandb
 # Shared training utilities
 # ---------------------------------------------------------------------------
 
-def make_scheduler(optimizer, num_epochs: int, warmup_epochs: int = 1, eta_min: float = 1e-5):
+def make_scheduler(optimizer, num_epochs: int, warmup_epochs: int = 1, eta_min: float = 1e-6):
     """
     Linear warmup (lr*0.1 → lr) for warmup_epochs, then cosine decay to eta_min.
     Call scheduler.step() once per epoch (not per step).

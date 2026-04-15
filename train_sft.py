@@ -79,7 +79,7 @@ def main():
                         help='Number of timestamps to sample per PASTIS image before temporal aggregation.')
     parser.add_argument('--val_per_epoch', type=int, default=1,
                         help='Run validation every N epochs (and always on the last epoch).')
-    parser.add_argument('--warmup_epochs', type=int, default=1,
+    parser.add_argument('--warmup_epochs', type=int, default=3,
                         help='Linear LR warmup epochs before cosine decay (default: 1).')
     parser.add_argument('--data_root', type=str, default=None,
                         help='Root directory for benv2full dataset. Should contain BigEarthNet-S2 and BigEarthNet-S1 subdirs. '
@@ -156,7 +156,7 @@ def main():
         }
         rgb_in_s2_indices = (
             _S2_RGB_INDICES.get(args.dataset)
-            if primary_modality == 's2' and args.use_dino_weights
+            if primary_modality in ('s2', 's2_rgb') and args.use_dino_weights
             else None
         )
         model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]

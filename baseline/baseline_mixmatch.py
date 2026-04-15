@@ -77,7 +77,7 @@ def main():
                         choices=['eurosat', 'benv2', 'pastis', 'dfc2020'])
     parser.add_argument('--modality', type=str, required=True,
                         help='Modality to train on (single modality)')
-    parser.add_argument('--model', type=str, default='evan_small',
+    parser.add_argument('--model', type=str, default='evan_base',
                         choices=['evan_small', 'evan_base', 'evan_large'])
     parser.add_argument('--use_dino_weights', action='store_true',
                         help='Init EVAN backbone from DINOv2 ViT weights')

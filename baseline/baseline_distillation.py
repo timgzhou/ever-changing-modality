@@ -418,8 +418,8 @@ def main():
                         help='Path to teacher checkpoint file')
     parser.add_argument('--modality', type=str, required=True,
                         help='Student modality (must be different from teacher; valid choices depend on --dataset)')
-    parser.add_argument('--model', type=str, default='evan_small', choices=['evan_small', 'evan_base', 'evan_large'],
-                        help='EVAN model size (default: evan_small)')
+    parser.add_argument('--model', type=str, default='evan_base', choices=['evan_small', 'evan_base', 'evan_large'],
+                        help='EVAN model size (default: evan_base)')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size for training (default: 32)')
     parser.add_argument('--lr', type=float, default=1e-4,
