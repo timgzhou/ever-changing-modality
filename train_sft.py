@@ -207,7 +207,24 @@ def main():
         criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
         print(f"Loss: CrossEntropyLoss (ignore_index={ignore_index})")
 
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
+    if args.train_mode == 'fft':
+        head_params = set()
+        if model.head is not None:
+            head_params.update(id(p) for p in model.head.parameters())
+        if model.modality_heads is not None:
+            for h in model.modality_heads.values():
+                head_params.update(id(p) for p in h.parameters())
+        backbone_p = [p for p in model.parameters() if p.requires_grad and id(p) not in head_params]
+        head_p     = [p for p in model.parameters() if p.requires_grad and id(p) in head_params]
+        optimizer = torch.optim.AdamW([
+            {'params': backbone_p, 'lr': args.lr / 10},
+            {'params': head_p,     'lr': args.lr},
+        ], weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=args.lr, weight_decay=args.weight_decay,
+        )
 
     if args.wandb_project:
         modalities_str = '+'.join(args.modalities)
@@ -271,7 +288,7 @@ def main():
     fieldnames = [
         "dataset", "model_type", "modality", "train_mode",
         "tz_lora_rank", "tz_modality_specific_layer_augmenter",
-        "learning_rate", "trainable_params", "epoch",
+        "learning_rate", "weight_decay", "trainable_params", "epoch",
         "test_metric", "metric_name", "saved_checkpoint", "global_rep",
         "dino_init",
     ]
@@ -282,7 +299,7 @@ def main():
         writer.writerow([
             args.dataset, args.model, '+'.join(args.modalities), args.train_mode,
             args.tz_lora_rank, args.tz_modality_specific_layer_augmenter,
-            args.lr, trainable_params, args.epochs,
+            args.lr, args.weight_decay, trainable_params, args.epochs,
             f"{best_val_test_metric:.2f}" if best_val_test_metric is not None else "",
             metric_name, checkpoint_path, args.global_rep,
             args.use_dino_weights,

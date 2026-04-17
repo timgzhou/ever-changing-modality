@@ -879,16 +879,20 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
     total_params = sum(p.numel() for p in model.parameters()) + sum(p.numel() for p in head.parameters())
     print(f"Trainable: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
 
+    backbone_lr = lr / 10 if train_mode == 'fft' else lr
     optimizer = torch.optim.AdamW(
-        list(filter(lambda p: p.requires_grad, model.parameters())) +
-        list(filter(lambda p: p.requires_grad, head.parameters())),
-        lr=lr, weight_decay=weight_decay
+        [
+            {'params': list(filter(lambda p: p.requires_grad, model.parameters())), 'lr': backbone_lr},
+            {'params': list(filter(lambda p: p.requires_grad, head.parameters())),  'lr': lr},
+        ],
+        weight_decay=weight_decay
     )
     from train_utils import make_scheduler
     scheduler = make_scheduler(optimizer, epochs, warmup_epochs=warmup_epochs)
 
     best_val_metric = 0.0
     best_state = None
+    best_model_state = None
     metric_name = "mIoU" if segmentation else ("mAP" if multilabel else "Acc")
 
     from tqdm import tqdm
@@ -957,6 +961,9 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
                 logits = F.interpolate(logits, size=labels.shape[-2:], mode='bilinear', align_corners=False)
             loss = criterion(logits, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(model.parameters()) + list(head.parameters()), max_norm=1.0
+            )
             optimizer.step()
             train_loss += loss.item()
 
@@ -976,6 +983,8 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
         if val_metric > best_val_metric:
             best_val_metric = val_metric
             best_state = {k: v.clone() for k, v in head.state_dict().items()}
+            if train_mode == 'fft':
+                best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
 
         print(f'  Epoch {epoch+1}/{epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  val_{metric_name}={val_metric:.2f}%  (best={best_val_metric:.2f}%)')
 
@@ -989,6 +998,8 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
 
     if best_state is not None:
         head.load_state_dict(best_state)
+    if train_mode == 'fft' and best_model_state is not None:
+        model.load_state_dict(best_model_state)
 
     return head, best_val_metric, trainable_params
 
@@ -1012,7 +1023,7 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--wandb_project', type=str, default=None)
-    parser.add_argument('--results_csv', type=str, default='res/rsfm_results.csv')
+    parser.add_argument('--results_csv', type=str, default='res/rsfm/rsfm_results.csv')
     parser.add_argument('--data_root', type=str, default=None,
                         help='Root directory for benv2full dataset.')
     args = parser.parse_args()
