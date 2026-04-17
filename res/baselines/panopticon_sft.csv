@@ -1,1 +1,0 @@
-model,dataset,train_modality,optimizer,aug_views,epochs,lr,metric_name,train_fraction,test_s2,test_s1,test_s2s1,checkpoint

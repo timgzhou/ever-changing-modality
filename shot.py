@@ -917,7 +917,8 @@ def _unlabeled_batch_step(
 
     hallucinated_mods = {mod for mod, dropped in modality_dropped.items() if dropped} if use_mfla else set()
     if use_mfla:
-        set_mfla_training_mode(evan, hallucinated_mods, all_modalities)
+        raise NotImplementedError()
+        # set_mfla_training_mode(evan, hallucinated_mods, all_modalities)
 
     # cross projector produces [B, 1+n_patches, D] for dropped mods — fusion needs to know prefix is smaller
     dropped_mods = {mod for mod, dropped in modality_dropped.items() if dropped} if evan.intermediate_projector_type == "cross" else set()
@@ -1134,7 +1135,7 @@ def train_shot(
     latent_reconstruct_modalities: list[str] = ["rgb"],
     modality_bands_dict: dict = None,
     max_norm=4,
-    distillation_temperature: float = 2.0,
+    distillation_temperature: float = 1.0,
     test_loader=None,
     eval_every_n_epochs: int = None,
     labeled_train_loader=None,
@@ -1295,7 +1296,7 @@ def train_shot(
     teacher_is_peeking = False
     teacher_val_acc = None
     teacher_baselines = {}
-    for loader, set_name in zip([val_labeled_loader, test_loader], ["val(labeled)", "test"]):
+    for loader, set_name in zip([train_loader, val_labeled_loader, test_loader], ["adaptation_train", "val(labeled)", "test"]):
         if loader is not None:
             from train_utils import evaluate as _eval_fn
             _, teacher_val_acc = _eval_fn(

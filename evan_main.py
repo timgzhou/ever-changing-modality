@@ -1603,7 +1603,8 @@ class EVANClassifier(EvanPredictor):
         elif target_strategy == "ensemble":
             self.mean_to_ensemble()
             for mod in self.evan.patch_embedders.keys():
-                self.instantiate_modality_head(mod)
+                if mod not in self.modality_heads:
+                    self.instantiate_modality_head(mod)
         return
 
     def mean_to_ensemble(self):

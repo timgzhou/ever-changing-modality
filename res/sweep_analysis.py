@@ -1,7 +1,7 @@
 """Analysis of sweep_results.csv for dfc2020/s2_rgb/s1 with prefusion+distill+ce+latent.
 
 Outputs:
-  - Top-3 hyperparams per val metric (4 metrics × 3 = 12 rows each)
+  - Top-2 hyperparams per val metric (4 metrics × 2 = 8 rows each)
   - Val vs test scatter plots saved to artifacts/
   - JSON of best configs saved to artifacts/sweep_best.json (readable by bash/python)
 
@@ -20,10 +20,10 @@ import os
 
 df = pd.read_csv('res/sweep_results.csv')
 df = df[
-    (df['dataset'] == 'benv2') &
-    (df['starting_modality'] == 's2') &
+    (df['dataset'] == 'dfc2020') &
+    (df['starting_modality'] == 's2_rgb') &
     (df['new_modality'] == 's1') &
-    (df['active_losses'] == 'prefusion+distill+ce+mae+latent')
+    (df['active_losses'] == 'prefusion+distill+ce+latent')
 ].copy()
 
 print(f"Filtered rows: {len(df)}")
@@ -63,24 +63,24 @@ best_configs = []
 for val_col, test_col in VAL_TEST_PAIRS:
     metric_name = val_col.replace('val_', '')
     sorted_df = df.sort_values(val_col, ascending=False).reset_index(drop=True)
-    top3 = sorted_df.head(3)[HYPERPARAM_COLS + ['stage0_checkpoint', val_col, test_col]].copy()
+    top2 = sorted_df.head(2)[HYPERPARAM_COLS + ['stage0_checkpoint', val_col, test_col]].copy()
 
     # 3 significant digits for display
-    display = top3[HYPERPARAM_COLS + [val_col, test_col]].map(
+    display = top2[HYPERPARAM_COLS + [val_col, test_col]].map(
         lambda x: float(f'{x:.3g}') if isinstance(x, float) else x
     )
-    print(f'\n=== Top-3 by {val_col} ===')
+    print(f'\n=== Top-2 by {val_col} ===')
     print(display.to_string(index=False))
 
-    # Collect JSON entries (full precision)
-    for rank, (_, row) in enumerate(top3.iterrows(), start=1):
+    # Collect JSON entries (3 significant digits)
+    for rank, (_, row) in enumerate(top2.iterrows(), start=1):
         entry = {
             'selected_by': metric_name,
             'rank':        rank,
-            'val_score':   round(float(row[val_col]), 4),
-            'test_score':  round(float(row[test_col]), 4),
+            'val_score':   float(f"{row[val_col]:.3g}"),
+            'test_score':  float(f"{row[test_col]:.3g}"),
             'stage0_checkpoint': row['stage0_checkpoint'],
-            'args': {COL_TO_ARG[c]: float(row[c]) for c in HYPERPARAM_COLS if c in COL_TO_ARG},
+            'args': {COL_TO_ARG[c]: float(f"{row[c]:.3g}") for c in HYPERPARAM_COLS if c in COL_TO_ARG},
         }
         best_configs.append(entry)
 
@@ -89,7 +89,7 @@ os.makedirs('artifacts', exist_ok=True)
 json_path = 'artifacts/sweep_best.json'
 with open(json_path, 'w') as f:
     json.dump(best_configs, f, indent=2)
-print(f'\nSaved {len(best_configs)} configs to {json_path}')
+print(f'\nSaved {len(best_configs)} configs to {json_path}')  # 4 metrics × 2 = 8
 
 # ---------------------------------------------------------------------------
 # Val vs test scatter plots

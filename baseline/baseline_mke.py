@@ -170,7 +170,7 @@ def main():
                         choices=['probe', 'adaptor', 'fft', 'emb+probe'])
     parser.add_argument('--val_per_epoch', type=int, default=1,
                         help='Run validation every N epochs (default: 1)')
-    parser.add_argument('--warmup_epochs', type=int, default=1)
+    parser.add_argument('--warmup_epochs', type=int, default=3)
     parser.add_argument('--results_csv', type=str, default=None)
     args = parser.parse_args()
 

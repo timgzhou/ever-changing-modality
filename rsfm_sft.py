@@ -700,12 +700,28 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
     # go through create_multimodal_batch which does min-max + optional ImageNet norm.
     # For all other datasets (GeoBench, DFC2020) dict values are slices/int-lists so
     # a plain channel slice suffices (normalization already done in the loader).
+    #
+    # Exception: raw_pixels=True (OlmoEarth, DINO-on-EuroSAT) means the model wrapper
+    # applies its own normalization internally. For EuroSAT we must NOT call
+    # create_multimodal_batch (which would normalize to [0,1]), and instead just slice
+    # the raw DN channels. OlmoEarth's SWIR only uses B11+B12 (not B10).
+    _EUROSAT_RAW_SLICES = {
+        'rgb':  [3, 2, 1],   # B04, B03, B02
+        'vre':  [4, 5, 6],   # B05, B06, B07
+        'nir':  [7, 8],      # B08, B8A
+        'swir': [11, 12],    # B11, B12 (drop B10 — not in OlmoEarth's band set)
+    }
     first_val = next(iter(modality_bands_dict.values()))
     if isinstance(first_val, (slice, list)):
         # GeoBench / DFC2020: batch already normalized; just slice the channel dim.
         _slice = first_val  # the single modality's slice or list
         def preprocess_fn(batch):
             return batch['image'][:, _slice]
+    elif raw_pixels and modality in _EUROSAT_RAW_SLICES:
+        # EuroSAT + raw_pixels model (OlmoEarth, DINO): slice raw DN channels, skip normalization.
+        _ch = _EUROSAT_RAW_SLICES[modality]
+        def preprocess_fn(batch):
+            return batch['image'][:, _ch]
     else:
         # EuroSAT: band-name tuples — delegate to create_multimodal_batch for normalization.
         _mbd = modality_bands_dict
@@ -1062,7 +1078,7 @@ def main():
     # Training
     print(f"\n=== Training for {args.epochs} epochs ===")
     ignore_index = getattr(task_config, 'ignore_index', -100)
-    head, _, trainable_params = train_head(
+    head, best_val_metric, trainable_params = train_head(
         fm, head, train1_loader, val1_loader, criterion, device,
         epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
         train_mode=args.train_mode, wandb_log=bool(args.wandb_project),
@@ -1097,7 +1113,7 @@ def main():
     os.makedirs(os.path.dirname(args.results_csv), exist_ok=True)
     fieldnames = [
         'model', 'dataset', 'modality', 'train_mode', 'epochs', 'lr', 'weight_decay',
-        'batch_size', 'metric_name', 'test_metric', 'trainable_params', 'saved_checkpoint'
+        'batch_size', 'metric_name', 'val_metric', 'test_metric', 'trainable_params', 'saved_checkpoint'
     ]
     file_exists = os.path.isfile(args.results_csv)
     with open(args.results_csv, 'a', newline='') as f:
@@ -1114,6 +1130,7 @@ def main():
             'weight_decay': args.weight_decay,
             'batch_size': args.batch_size,
             'metric_name': metric_name,
+            'val_metric': f'{best_val_metric:.4f}',
             'test_metric': f'{test_metric:.4f}',
             'trainable_params': trainable_params,
             'saved_checkpoint': checkpoint_path,

@@ -20,7 +20,6 @@ VALID_NEW_MODS = {
     'dfc2020': ['s1', 's2'],
 }
 
-
 def main():
     parser = argparse.ArgumentParser(description='End to end training for SHOT model.')
     # IMPORTANT
@@ -50,7 +49,7 @@ def main():
     parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for CE loss (default: 1.0)')
     parser.add_argument('--use_mfla', action='store_true',
                         help='Enable MFLA training for hallucinated modalities')
-    parser.add_argument('--warmup_epochs', type=int, default=1,
+    parser.add_argument('--warmup_epochs', type=int, default=3,
                         help='Linear LR warmup epochs before cosine decay (default: 1)')
 
     parser.add_argument('--results_csv', type=str, required=True,
@@ -68,7 +67,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=2)
     parser.add_argument('--epochs', type=int, default=4)
-    parser.add_argument('--eval_every_n_epochs', type=int, default=4)
+    parser.add_argument('--eval_every_n_epochs', type=int, default=2)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=0.001)
     parser.add_argument('--wandb_project', type=str, default='delulu-reBEN')
@@ -267,12 +266,16 @@ def main():
     filename = args.results_csv
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
+    embed_dim = evan.embed_dim
+    model_arch = {384: 'evan_small', 768: 'evan_base', 1024: 'evan_large'}.get(embed_dim, f'evan_d{embed_dim}')
     fieldnames = [
-        "dataset", "starting_modality", "new_modality", "lr", "weight_decay", "epochs",
+        "dataset", "model_arch", "starting_modality", "new_modality", "lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
         "trainable_params", "active_losses", "use_mfla", "warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
+        "teacher_test_metric",
         "transfer_metric", "peeking_metric", "addition_metric", "addition_ens_metric",
         "valchecked_transfer", "valchecked_peek", "valchecked_add", "valchecked_add_ens",
+        "valchecked_val_transfer", "valchecked_val_peek", "valchecked_val_add", "valchecked_val_add_ens",
         "stage0_checkpoint", "shote2e_checkpoint"
     ]
 
@@ -286,8 +289,10 @@ def main():
         if not file_exists:
             writer.writerow(fieldnames)
         active_losses_str = "+".join(args.active_losses) if args.active_losses else "all"
+        teacher_test_metric = teacher_baselines.get("test", None)
         writer.writerow([
             args.dataset,
+            model_arch,
             starting_modality,
             newmod,
             args.lr,
@@ -304,6 +309,7 @@ def main():
             args.intermediate_projector_type,
             args.tz_fusion_time,
             metric_name,
+            f"{teacher_test_metric:.2f}" if teacher_test_metric is not None else "",
             f"{metrics['transfer']:.2f}",
             f"{metrics['peeking']:.2f}",
             f"{metrics['addition']:.2f}",
@@ -312,6 +318,10 @@ def main():
             get_valchecked('best_peeking', 'test_peeking'),
             get_valchecked('best_addition', 'test_addition'),
             get_valchecked('best_ens_addition', 'test_addition_ens'),
+            get_valchecked('best_transfer', 'val_metric'),
+            get_valchecked('best_peeking', 'val_metric'),
+            get_valchecked('best_addition', 'val_metric'),
+            get_valchecked('best_ens_addition', 'val_metric'),
             args.stage0_checkpoint,
             checkpoint_shotete,
         ])
