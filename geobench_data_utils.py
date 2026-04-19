@@ -286,7 +286,7 @@ def get_benv2_loaders(
         test_loader:   S2+S1, labeled (for evaluation)
         task_config:   TaskConfig describing this dataset/task
     """
-    assert starting_modality in ('s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_aw', 's2_swir'), f"starting_modality unrecognized, got {starting_modality!r}"
+    assert starting_modality in ('s2', 's1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_aw', 's2_swir'), f"starting_modality unrecognized, got {starting_modality!r}"
     root = Path(data_root)
 
     band_orders = {'s2': list(BENV2_S2_BANDS), 's1': list(BENV2_S1_BANDS)}
@@ -345,11 +345,12 @@ def get_benv2_loaders(
     # Add S2 sub-band groups (match EuroSAT rgb/vre/nir/swir/aw groupings)
     # BEN-v2 S2 order: B01,B02,B03,B04,B05,B06,B07,B08,B8A,B09,B11,B12 (idx 0-11 within s2 slice)
     # Absolute indices in stacked tensor (s2 starts at 0):
-    modality_slices['s2_rgb']  = [3, 2, 1]     # B04, B03, B02
-    modality_slices['s2_vre']  = slice(4, 7)   # B05, B06, B07
-    modality_slices['s2_nir']  = slice(7, 9)   # B08, B8A
-    modality_slices['s2_swir'] = slice(10, 12) # B11, B12 (no B10 in BEN-v2)
-    modality_slices['s2_aw']   = [0, 9]        # B01, B09
+    modality_slices['s2_rgb']   = [3, 2, 1]                        # B04, B03, B02
+    modality_slices['s2_norgb'] = [0, 4, 5, 6, 7, 8, 9, 10, 11]   # B01, B05-B8A, B09, B11, B12 (9 bands)
+    modality_slices['s2_vre']   = slice(4, 7)                      # B05, B06, B07
+    modality_slices['s2_nir']   = slice(7, 9)                      # B08, B8A
+    modality_slices['s2_swir']  = slice(10, 12)                    # B11, B12 (no B10 in BEN-v2)
+    modality_slices['s2_aw']    = [0, 9]                           # B01, B09
 
     assert starting_modality in modality_slices, \
         f"starting_modality must be one of {list(modality_slices)}, got {starting_modality!r}"
@@ -536,10 +537,11 @@ def get_pastis_loaders(
     # Add S2 sub-band groups (match EuroSAT rgb/vre/nir/swir groupings)
     # PASTIS S2 order: B02,B03,B04,B05,B06,B07,B08,B8A,B11,B12 (idx 0-9 within s2 slice)
     # Absolute indices in stacked tensor (s2 starts at 0):
-    modality_slices['s2_rgb']  = [2, 1, 0]   # B04, B03, B02 (same as 'rgb')
-    modality_slices['s2_vre']  = slice(3, 6)  # B05, B06, B07
-    modality_slices['s2_nir']  = slice(6, 8)  # B08, B8A
-    modality_slices['s2_swir'] = slice(8, 10) # B11, B12 (no B10 in PASTIS)
+    modality_slices['s2_rgb']   = [2, 1, 0]         # B04, B03, B02 (same as 'rgb')
+    modality_slices['s2_norgb'] = [3, 4, 5, 6, 7, 8, 9]  # B05-B8A, B11, B12 (7 bands)
+    modality_slices['s2_vre']   = slice(3, 6)       # B05, B06, B07
+    modality_slices['s2_nir']   = slice(6, 8)       # B08, B8A
+    modality_slices['s2_swir']  = slice(8, 10)      # B11, B12 (no B10 in PASTIS)
     # no s2_aw: B01/B09 not in PASTIS S2
 
     assert starting_modality in modality_slices, \

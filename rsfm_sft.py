@@ -408,18 +408,14 @@ class PanopticonWrapper(ModelWrapper):
         self.S2S1_CHN_IDS = torch.cat([self.S2_CHN_IDS, self.S1_CHN_IDS])        # 14ch
         self.S2S1_13_CHN_IDS = torch.cat([self.S2_13_CHN_IDS, self.S1_CHN_IDS])  # 15ch (DFC2020)
 
-        # Pre-compute channel IDs for EuroSAT if applicable
-        self.eurosat_chn_ids = None
-        if dataset == 'eurosat':
-            from eurosat_data_utils import get_band_wavelengths, MODALITY_BANDS, ALL_BAND_NAMES
-            if modality == 's2':
-                wavelengths = get_band_wavelengths(ALL_BAND_NAMES)
-            elif modality in MODALITY_BANDS:
-                band_names = MODALITY_BANDS[modality]
-                wavelengths = get_band_wavelengths(band_names)
-            else:
-                raise ValueError(f"Unknown EuroSAT modality: {modality}")
-            self.eurosat_chn_ids = torch.tensor(wavelengths, dtype=torch.int16)
+        # Pre-compute channel IDs for any S2 sub-band modality (rgb, vre, nir, swir, aw, s2_rgb, ...)
+        # using the authoritative BAND_WAVELENGTHS table from eurosat_data_utils.
+        from eurosat_data_utils import get_band_wavelengths, MODALITY_BANDS, ALL_BAND_NAMES
+        self.subband_chn_ids = None
+        if modality in MODALITY_BANDS:
+            band_names = ALL_BAND_NAMES if modality == 's2' else MODALITY_BANDS[modality]
+            wavelengths = get_band_wavelengths(band_names)
+            self.subband_chn_ids = torch.tensor(wavelengths, dtype=torch.int16)
 
     def forward(self, imgs, output_hidden_states=False):
         """
@@ -451,13 +447,11 @@ class PanopticonWrapper(ModelWrapper):
         elif C == 2:
             # S1 only (VV, VH)
             chn_ids = self.S1_CHN_IDS.to(device)
-        elif self.dataset == 'eurosat':
-            # EuroSAT: pre-computed in __init__
-            chn_ids = self.eurosat_chn_ids.to(device)
+        elif self.subband_chn_ids is not None:
+            # Sub-band S2 modality (rgb, vre, nir, swir, aw, s2_rgb, ...): use known wavelengths
+            chn_ids = self.subband_chn_ids.to(device)
         else:
-            # Unknown: use synthetic wavelength IDs
-            chn_ids = torch.linspace(400, 2400, C, dtype=torch.int16).to(device)
-            logger.warning(f"Unknown {C}-channel input; using synthetic wavelength IDs: {chn_ids.tolist()}")
+            raise ValueError(f"Unknown modality {self.modality!r} ({C} channels) — add it to MODALITY_BANDS in eurosat_data_utils.py")
 
         # Expand to batch
         chn_ids = chn_ids.unsqueeze(0).expand(B, -1)
@@ -706,10 +700,15 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
     # create_multimodal_batch (which would normalize to [0,1]), and instead just slice
     # the raw DN channels. OlmoEarth's SWIR only uses B11+B12 (not B10).
     _EUROSAT_RAW_SLICES = {
+        # EuroSAT ALL_BAND_NAMES: [B01,B02,B03,B04,B05,B06,B07,B08,B8A,B09,B10,B11,B12]
+        #                  index:    0    1    2    3    4    5    6    7    8    9   10   11   12
         'rgb':  [3, 2, 1],   # B04, B03, B02
         'vre':  [4, 5, 6],   # B05, B06, B07
         'nir':  [7, 8],      # B08, B8A
         'swir': [11, 12],    # B11, B12 (drop B10 — not in OlmoEarth's band set)
+        # s2: reorder EuroSAT bands to match OlmoEarth's S2_BAND_ORDER_12
+        # S2_BAND_ORDER_12 = [B02,B03,B04,B08,B05,B06,B07,B8A,B11,B12,B01,B09]
+        's2':   [1, 2, 3, 7, 4, 5, 6, 8, 11, 12, 0, 9],
     }
     first_val = next(iter(modality_bands_dict.values()))
     if isinstance(first_val, (slice, list)):
@@ -1098,14 +1097,7 @@ def main():
         preprocess_fn=preprocess_fn, warmup_epochs=args.warmup_epochs,
     )
 
-    # Save checkpoint
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    checkpoint_path = os.path.join(args.checkpoint_dir,
-                                   f'rsfm_{args.dataset}_{args.modality}_{args.train_mode}_{timestamp}.pt')
-    torch.save(head.state_dict(), checkpoint_path)
     print(f"\n=== Training complete ===")
-    print(f"Head checkpoint: {checkpoint_path}")
 
     # Test evaluation
     print(f"\n=== Evaluating best checkpoint on test set ===")
@@ -1144,7 +1136,7 @@ def main():
             'val_metric': f'{best_val_metric:.4f}',
             'test_metric': f'{test_metric:.4f}',
             'trainable_params': trainable_params,
-            'saved_checkpoint': checkpoint_path,
+            'saved_checkpoint': '',
         })
 
     if args.wandb_project:

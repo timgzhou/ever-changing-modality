@@ -1,0 +1,12 @@
+model_type,teacher_modality,student_modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,temperature,alpha,distillation_mode,kl_type,metric_name,teacher_test_metric,test_metric,best_test_metric(oracle),best_epoch,best_val_agreement,ensemble_metric_logits,ensemble_metric_softmax,teacher_classifier_acc,supervised_classifier_acc,supervised_classifier_best_acc,saved_checkpoint,global_rep,teacher_checkpoint
+evan_base,s2,s1+s2,fft,0,fft,0.001,109120531,16,0.5,1.0,regular,kd,mAP,61.48,57.30,58.10,11,,61.43,55.39,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+evan_base,s2,s1+s2,fft,0,fft,0.001,109120531,16,1.0,1.0,regular,kd,mAP,61.48,56.63,57.69,12,,59.47,52.97,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+evan_base,s2,s1+s2,fft,0,fft,0.001,109120531,16,2.0,1.0,regular,kd,mAP,61.48,59.07,59.21,12,,57.80,56.32,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+evan_base,s2,s1+s2,fft,0,fft,0.001,109120531,16,0.5,1.0,regular,ttm,mAP,61.48,56.51,57.78,9,,62.39,56.04,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+evan_base,s2,s1+s2,fft,0,fft,0.001,109120531,16,1.0,1.0,regular,ttm,mAP,61.48,58.30,58.43,13,,61.70,58.24,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+evan_base,s2,s1+s2,fft,0,fft,0.001,109120531,16,2.0,1.0,regular,ttm,mAP,61.48,58.18,58.25,12,,59.68,56.02,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+evan_base,s2,s1+s2,fft,0,fft,0.0003,109120531,16,0.5,1.0,regular,kd,mAP,61.48,56.34,57.04,6,,62.26,56.25,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+evan_base,s2,s1+s2,fft,0,fft,0.0003,109120531,16,1.0,1.0,regular,kd,mAP,61.48,57.11,57.43,6,,61.38,57.19,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+evan_base,s2,s1+s2,fft,0,fft,0.0003,109120531,16,2.0,1.0,regular,kd,mAP,61.48,59.26,59.53,12,,61.56,58.82,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+evan_base,s2,s1+s2,fft,0,fft,0.0003,109120531,16,0.5,1.0,regular,ttm,mAP,61.48,57.13,58.80,7,,61.63,55.28,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+evan_base,s2,s1+s2,fft,0,fft,0.0003,109120531,16,1.0,1.0,regular,ttm,mAP,61.48,58.96,59.51,7,,62.52,57.48,,,,,clstoken,checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt

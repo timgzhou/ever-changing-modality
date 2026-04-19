@@ -20,9 +20,8 @@ from data_utils import get_loaders, create_multimodal_batch
 from train_utils import _compute_map, compute_miou, evaluate
 
 VALID_NEW_MODS = {
-    'eurosat': ['vre', 'nir', 'swir', 'rgb'],
+    'eurosat': ['vre', 'nir', 'swir', 'rgb', 's2'],
     'benv2':   ['s1', 's2'],
-    'pastis':  ['s1', 's2'],
     'dfc2020': ['s1', 's2', 's2_rgb'],
 }
 
@@ -355,24 +354,24 @@ def distillation_training_loop(
     multilabel=False, label_key='label',
     segmentation=False, num_classes=None, ignore_index=-100,
     val_loader=None, best_checkpoint_path=None, warmup_epochs=1,
-    task_config=None,
+    task_config=None, student_modalities=None,
 ):
     """
-    Knowledge distillation from teacher (teacher_modality) to student (student_modality).
+    Knowledge distillation from teacher (teacher_modality) to student.
+
+    student_modality: primary student modality (used for display / backwards compat).
+    student_modalities: full tuple of student modality names; defaults to (student_modality,).
 
     Backward-compatible wrapper around Trainer.train_distillation.
 
-    New params:
-        val_loader: Unlabeled multimodal val loader (val2) for teacher-agreement checkpoint selection.
-        best_checkpoint_path: Save best-agreement checkpoint here (requires val_loader).
-        warmup_epochs: Linear warmup epochs for cosine LR scheduler (default 1).
-        task_config: Optional TaskConfig; built from flags if not provided.
-
     Returns:
-        (train_metric, test_metric, best_test_metric, best_epoch)
+        (train_metric, test_metric, best_test_metric, best_epoch, best_agreement)
     """
     from train_utils import Trainer
     from data_utils import TaskConfig
+
+    if student_modalities is None:
+        student_modalities = (student_modality,)
 
     if task_config is None:
         task_config = TaskConfig(
@@ -406,6 +405,7 @@ def distillation_training_loop(
         distillation_mode=distillation_mode,
         kl_type=kl_type,
         best_checkpoint_path=best_checkpoint_path,
+        student_modalities=student_modalities,
     )
 
 
@@ -416,8 +416,9 @@ def main():
                         help='Dataset to train on (default: eurosat)')
     parser.add_argument('--teacher_checkpoint', type=str, required=True,
                         help='Path to teacher checkpoint file')
-    parser.add_argument('--modality', type=str, required=True,
-                        help='Student modality (must be different from teacher; valid choices depend on --dataset)')
+    parser.add_argument('--modalities', type=str, nargs='+', required=True,
+                        help='Student modalities (each must be valid for --dataset; '
+                             'pass multiple for a multimodal student, e.g. --modalities s1 s2)')
     parser.add_argument('--model', type=str, default='evan_base', choices=['evan_small', 'evan_base', 'evan_large'],
                         help='EVAN model size (default: evan_base)')
     parser.add_argument('--batch_size', type=int, default=32,
@@ -432,7 +433,7 @@ def main():
                         help='Timestamps to sample per PASTIS image before temporal aggregation (default: 10)')
     parser.add_argument('--tz_fusion_time', type=int, default=3,
                         help='n modality-independent layers before fusion')
-    parser.add_argument('--tz_lora_rank', type=int, default=32,
+    parser.add_argument('--tz_lora_rank', type=int, default=0,
                         help='rank of lora adaptors')
     parser.add_argument('--tz_modality_specific_layer_augmenter', type=str, default='fft', choices=['lora', 'fft'])
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
@@ -459,11 +460,15 @@ def main():
                         help='Linear LR warmup epochs before cosine decay (default: 1)')
     args = parser.parse_args()
 
-    # Validate modality against dataset
+    # Validate each student modality against dataset
     valid_mods = VALID_NEW_MODS[args.dataset]
-    if args.modality not in valid_mods:
-        parser.error(f"--modality {args.modality!r} is not valid for --dataset {args.dataset}. "
-                     f"Valid choices: {valid_mods}")
+    for m in args.modalities:
+        if m not in valid_mods:
+            parser.error(f"--modalities {m!r} is not valid for --dataset {args.dataset}. "
+                         f"Valid choices: {valid_mods}")
+    student_modalities = tuple(args.modalities)
+    primary_modality = student_modalities[0]
+    student_label = '+'.join(student_modalities)
 
     # Default results CSV includes dataset name
     if args.results_csv is None:
@@ -491,14 +496,17 @@ def main():
     # Create datasets (do this first so we know task_type before loading teacher)
     print("\n=== Creating datasets ===")
     # Load teacher checkpoint to discover teacher modality before building loaders,
-    # so we can request both modalities and get a complete modality_bands_dict.
+    # so we can request all required modalities and get a complete modality_bands_dict.
     _ckpt_for_mod = torch.load(teacher_checkpoint_path, map_location='cpu')
     _teacher_modality = _ckpt_for_mod['config']['evan_config'].get('starting_modality', 'rgb')
     del _ckpt_for_mod
-    train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = \
-        get_loaders(args.dataset, args.modality, args.batch_size, args.num_workers,
+    # Request teacher modality as new_modality so the stacked batch contains all bands.
+    # If teacher modality is already one of the student modalities, no extra request needed.
+    _extra_mod = _teacher_modality if _teacher_modality not in student_modalities else None
+    train1_loader, _, train2_loader, val2_loader, test_loader, task_config = \
+        get_loaders(args.dataset, primary_modality, args.batch_size, args.num_workers,
                     data_normalizer=data_normalizer, num_time_steps=args.num_time_steps,
-                    new_modality=_teacher_modality if _teacher_modality != args.modality else None)
+                    new_modality=_extra_mod)
 
     is_segmentation = (task_config.task_type == 'segmentation')
     multilabel = task_config.multilabel
@@ -515,24 +523,22 @@ def main():
     teacher_model = teacher_model.to(device)
     teacher_model.eval()
 
-    # Get teacher modality
     teacher_modality = teacher_model.evan.starting_modality
     print(f"Teacher modality: {teacher_modality}")
+    print(f"Student modalities: {student_modalities}")
 
-    if args.modality == teacher_modality:
-        raise ValueError(f"Student modality ({args.modality}) must be different from teacher modality ({teacher_modality})")
+    if len(student_modalities) == 1 and student_modalities[0] == teacher_modality:
+        raise ValueError(f"Single-modality student ({primary_modality}) must differ from teacher ({teacher_modality})")
 
-    print(f"Student modality: {args.modality}")
-
-    # modality_bands_dict is populated for all datasets by get_loaders()
+    # Build per-modality band dicts from task_config
     modality_bands_dict = task_config.modality_bands_dict
-    student_modality_bands_dict = modality_bands_dict
-    teacher_modality_bands_dict = modality_bands_dict
-    bands_mod = modality_bands_dict[args.modality]
-    if isinstance(bands_mod, slice):
-        num_student_chans = bands_mod.stop - bands_mod.start
-    else:
-        num_student_chans = len(bands_mod)
+    student_modality_bands_dict = {m: modality_bands_dict[m] for m in student_modalities}
+    teacher_modality_bands_dict = {teacher_modality: modality_bands_dict[teacher_modality]}
+
+    def _n_chans(entry):
+        return entry.stop - entry.start if isinstance(entry, slice) else len(entry)
+
+    all_student_n_chans = [_n_chans(modality_bands_dict[m]) for m in student_modalities]
 
     # Evaluate teacher on test split before distillation
     print(f"\n=== Teacher baseline ({teacher_modality.upper()}) on test split ===")
@@ -556,21 +562,23 @@ def main():
         wandb.init(
             project=args.wandb_project,
             config=vars(args),
-            name=f"{args.dataset}_distill_{args.distillation_mode}_{teacher_modality}->{args.modality}_{args.train_mode}"
+            name=f"{args.dataset}_distill_{args.distillation_mode}_{teacher_modality}->{student_label}_{args.train_mode}"
         )
         wandb.log({f"teacher_baseline/test_{metric_name}": teacher_test_metric})
 
     print(f"Model: {args.model}, Batch size: {args.batch_size}, LR: {args.lr}, Epochs: {args.epochs}")
 
-    # Create student model
+    # Create student model (DINO-initialized, multimodal-capable like train_sft)
     print("\n=== Creating student model ===")
 
     if args.init_from_teacher:
+        if len(student_modalities) > 1:
+            raise ValueError("--init_from_teacher is only supported for single-modality students")
         print(f"Initializing student from teacher checkpoint: {teacher_checkpoint_path}")
         student_model = init_student_from_teacher(
             teacher_checkpoint_path=teacher_checkpoint_path,
-            student_modality=args.modality,
-            student_n_chans=num_student_chans,
+            student_modality=primary_modality,
+            student_n_chans=all_student_n_chans[0],
             task_type=task_config.task_type,
             device=device,
         )
@@ -582,24 +590,12 @@ def main():
             tz_lora_rank=args.tz_lora_rank,
             tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
             n_storage_tokens=4,
-            starting_modality=args.modality,
-            starting_n_chans=num_student_chans,
+            starting_modality=list(student_modalities),
+            starting_n_chans=all_student_n_chans,
             img_size=task_config.img_size,
             device=device,
-            load_weights=False
+            load_weights=True,
         )
-
-        # If student is RGB, reset patch embedder to random init (DINO pretrained weights are unfair)
-        if args.modality == 'rgb':
-            from evan.layers import PatchEmbed
-            print("  Resetting RGB patch embedder to random initialization (removing DINO pretrained weights)")
-            evan_model.patch_embedders['rgb'] = PatchEmbed(
-                img_size=evan_model.img_size,
-                patch_size=evan_model.patch_size,
-                in_chans=num_student_chans,
-                embed_dim=evan_model.embed_dim,
-                flatten_embedding=False,
-            ).to(device)
 
         if is_segmentation:
             student_model = EvanSegmenter(
@@ -613,21 +609,21 @@ def main():
             )
         student_model = student_model.to(device)
 
-    # Freeze student backbone, train only specified components
+    # Freeze student backbone, train only specified components (all student modalities)
     student_model.freeze_all()
     if args.train_mode == 'fft':
         student_model.set_requires_grad('backbone', blocks=True, norm=True)
-        student_model.set_requires_grad(args.modality, msla=True, mfla=False, patch_embedders=True, clsreg=True, head=True)
-        print(f"Mode=fft, Freezing lora paths, training full layers and classifier.")
+        student_model.set_requires_grad('all', patch_embedders=True, clsreg=True, msla=True, modality_encoders=True, head=True)
+        print(f"Mode=fft: training full backbone layers + head.")
     elif args.train_mode == 'adaptor':
-        student_model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True, msla=True, mfla=True, head=True)
-        print(f"Mode=adaptor, Freezing backbone, training embedder, lora or fft adaptors and classifier.")
+        student_model.set_requires_grad('all', patch_embedders=True, clsreg=True, msla=True, mfla=True, head=True)
+        print(f"Mode=adaptor: training embedder, adaptors and classifier.")
     elif args.train_mode == 'probe':
-        student_model.set_requires_grad(args.modality, head=True)
-        print(f"Mode=Probe, Freezing backbone, only training classifier.")
+        student_model.set_requires_grad('all', head=True)
+        print(f"Mode=probe: training classifier only.")
     elif args.train_mode == 'emb+probe':
-        student_model.set_requires_grad(args.modality, patch_embedders=True, head=True)
-        print(f"Mode=Emb+Probe, Freezing backbone, training embedder(tokenizer) and classifier.")
+        student_model.set_requires_grad('all', patch_embedders=True, head=True)
+        print(f"Mode=emb+probe: training embedder + classifier.")
 
     # Print parameter info
     trainable_params = sum(p.numel() for p in student_model.parameters() if p.requires_grad)
@@ -639,15 +635,32 @@ def main():
     num_epochs = args.epochs
 
     print(f"\n=== Distillation training for {num_epochs} epochs ===")
-    print(f"Strategy: Distill from {teacher_modality.upper()} teacher to {args.modality.upper()} student")
+    print(f"Strategy: Distill from {teacher_modality.upper()} teacher to {student_label.upper()} student")
     print(f"Distillation mode: {args.distillation_mode}, Metric: {metric_name}")
     print(f"Temperature: {args.temperature}, Alpha: {args.alpha}")
 
+    # Build task_config for distillation (student modality_bands_dict merged with teacher's)
+    from data_utils import TaskConfig
+    distill_task_config = TaskConfig(
+        dataset_name=task_config.dataset_name,
+        task_type=task_config.task_type,
+        modality_a=primary_modality,
+        modality_b=teacher_modality,
+        modality_a_channels=all_student_n_chans[0],
+        modality_b_channels=_n_chans(modality_bands_dict[teacher_modality]),
+        num_classes=task_config.num_classes,
+        multilabel=multilabel,
+        label_key=label_key,
+        modality_bands_dict={**student_modality_bands_dict, **teacher_modality_bands_dict},
+        img_size=task_config.img_size,
+        ignore_index=ignore_index,
+    )
+
     # Run distillation training loop
-    train_metric, test_metric, best_test_metric, best_epoch = distillation_training_loop(
+    train_metric, test_metric, best_test_metric, best_epoch, best_agreement = distillation_training_loop(
         student_model, teacher_model, train2_loader, test_loader, device,
         student_modality_bands_dict, teacher_modality_bands_dict,
-        optimizer, num_epochs, args.modality, teacher_modality,
+        optimizer, num_epochs, primary_modality, teacher_modality,
         temperature=args.temperature, alpha=args.alpha,
         distillation_mode=args.distillation_mode,
         use_wandb=bool(args.wandb_project), wandb_prefix='distill',
@@ -655,7 +668,8 @@ def main():
         segmentation=is_segmentation, num_classes=task_config.num_classes,
         ignore_index=ignore_index,
         val_loader=val2_loader, warmup_epochs=args.warmup_epochs,
-        task_config=task_config,
+        task_config=distill_task_config,
+        student_modalities=student_modalities,
     )
 
     print("\n=== Distillation Training complete ===")
@@ -665,7 +679,7 @@ def main():
     ensemble_metric_avg = evaluate_ensemble(
         student_model, teacher_model, test_loader, device,
         student_modality_bands_dict, teacher_modality_bands_dict,
-        args.modality, teacher_modality, ensemble_mode='avg',
+        primary_modality, teacher_modality, ensemble_mode='avg',
         multilabel=multilabel, label_key=label_key,
         segmentation=is_segmentation, num_classes=task_config.num_classes,
         ignore_index=ignore_index,
@@ -675,7 +689,7 @@ def main():
     ensemble_metric_softmax = evaluate_ensemble(
         student_model, teacher_model, test_loader, device,
         student_modality_bands_dict, teacher_modality_bands_dict,
-        args.modality, teacher_modality, ensemble_mode='avg_softmax',
+        primary_modality, teacher_modality, ensemble_mode='avg_softmax',
         multilabel=multilabel, label_key=label_key,
         segmentation=is_segmentation, num_classes=task_config.num_classes,
         ignore_index=ignore_index,
@@ -693,7 +707,7 @@ def main():
         print("\n--- Evaluation 1: Using teacher's classifier on student features ---")
         teacher_classifier_acc = evaluate_with_teacher_classifier(
             student_model, teacher_model, test_loader, device,
-            student_modality_bands_dict, args.modality, teacher_modality,
+            student_modality_bands_dict, primary_modality, teacher_modality,
             global_rep=args.global_rep, label_key=label_key,
         )
         print(f"  Test accuracy (teacher classifier): {teacher_classifier_acc:.2f}%")
@@ -701,24 +715,13 @@ def main():
         print("\n--- Evaluation 2: Training classifier with frozen backbone (supervised) ---")
         supervised_classifier_acc, supervised_classifier_best_acc = train_classifier_with_frozen_backbone(
             student_model, train1_loader, test_loader, device,
-            student_modality_bands_dict, args.modality,
+            student_modality_bands_dict, primary_modality,
             lr=args.lr, epochs=min(args.epochs, 10), global_rep=args.global_rep,
             multilabel=multilabel, label_key=label_key,
         )
         print(f"  Test accuracy (supervised classifier): {supervised_classifier_acc:.2f}% (best: {supervised_classifier_best_acc:.2f}%)")
 
-    # Save checkpoint
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    if args.checkpoint_name:
-        checkpoint_path = os.path.join(args.checkpoint_dir, f'{args.checkpoint_name}.pt')
-    else:
-        checkpoint_path = os.path.join(args.checkpoint_dir, f'evan_distill_{args.dataset}_{teacher_modality}_to_{args.modality}_{timestamp}.pt')
-
-    student_model.save_checkpoint(checkpoint_path)
-    print(f"\n=== Distillation checkpoint saved to: {checkpoint_path} ===")
-    print(f"Distillation Final metrics ({args.modality.upper()}):")
+    print(f"\nDistillation Final metrics ({student_label.upper()}):")
     print(f"  Train {metric_name}: {train_metric:.2f}%")
     print(f"  Test {metric_name}: {test_metric:.2f}%")
     print(f"  Ensemble {metric_name} (avg logits): {ensemble_metric_avg:.2f}%")
@@ -734,6 +737,7 @@ def main():
                   "tz_modality_specific_layer_augmenter", "learning_rate", "trainable_params",
                   "epoch", "temperature", "alpha", "distillation_mode", "kl_type",
                   "metric_name", "teacher_test_metric", "test_metric", "best_test_metric(oracle)", "best_epoch",
+                  "best_val_agreement",
                   "ensemble_metric_logits", "ensemble_metric_softmax",
                   "teacher_classifier_acc", "supervised_classifier_acc", "supervised_classifier_best_acc",
                   "saved_checkpoint", "global_rep", "teacher_checkpoint"]
@@ -742,23 +746,21 @@ def main():
         if not file_exists:
             writer.writerow(fieldnames)
         writer.writerow([
-            args.model, teacher_modality, args.modality, args.train_mode, args.tz_lora_rank,
+            args.model, teacher_modality, student_label, args.train_mode, args.tz_lora_rank,
             args.tz_modality_specific_layer_augmenter, args.lr, trainable_params,
             num_epochs, args.temperature, args.alpha, args.distillation_mode, args.kl_type, metric_name,
             f"{teacher_test_metric:.2f}", f"{test_metric:.2f}", f"{best_test_metric:.2f}", best_epoch,
+            f"{best_agreement:.2f}" if best_agreement >= 0 else "",
             f"{ensemble_metric_avg:.2f}", f"{ensemble_metric_softmax:.2f}",
             f"{teacher_classifier_acc:.2f}" if teacher_classifier_acc is not None else "",
             f"{supervised_classifier_acc:.2f}" if supervised_classifier_acc is not None else "",
             f"{supervised_classifier_best_acc:.2f}" if supervised_classifier_best_acc is not None else "",
-            checkpoint_path, args.global_rep, teacher_checkpoint_path,
+            "", args.global_rep, teacher_checkpoint_path,
         ])
 
     print(f"\nResults appended to {filename}")
-    # Finish wandb run
     if args.wandb_project:
         wandb.finish()
-    return checkpoint_path
-
 
 if __name__ == '__main__':
     main()

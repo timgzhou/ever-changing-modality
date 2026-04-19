@@ -1,7 +1,6 @@
 
 from shot import train_shot
 from data_utils import get_loaders
-import re
 import torch
 import logging
 import os
@@ -37,7 +36,7 @@ def main():
     parser.add_argument('--mae_modalities', type=str, default="all", choices=["all","newmod"])
     parser.add_argument('--labeled_frequency', type=float, default=0.3,
                         help='Frequency of labeled monomodal batches from train1 (0-1, default: 0.3)')
-    parser.add_argument('--labeled_start_fraction', type=float, default=0.0,
+    parser.add_argument('--labeled_start_fraction', type=float, default=0.5,
                         help='Fraction of training before labeled mixing starts (0=start, 0.5=halfway, 1=never)')
     parser.add_argument('--active_losses', type=str, nargs='+', default=None,
                         choices=['mae', 'latent', 'prefusion', 'distill', 'ce'],
@@ -69,6 +68,10 @@ def main():
     parser.add_argument('--epochs', type=int, default=4)
     parser.add_argument('--eval_every_n_epochs', type=int, default=2)
     parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--asym_lr', type=float, default=None,
+                        help='LR multiplier for new components (intermediate_projectors, mae_decoders, '
+                             'latent_projectors, new-modality patch_embedder/MSLA/CLS/storage/head). '
+                             'If None (default), all params share --lr.')
     parser.add_argument('--weight_decay', type=float, default=0.001)
     parser.add_argument('--wandb_project', type=str, default='delulu-reBEN')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
@@ -81,31 +84,20 @@ def main():
         parser.error(f"--new_mod_group {args.new_mod_group!r} is not valid for --dataset {args.dataset}. "
                      f"Valid choices: {valid_new_mods}")
 
-    # Load stage 0 checkpoint — detect Panopticon LP checkpoint vs EVAN checkpoint
     print(f"\n=== Loading Stage 0 checkpoint from: {args.stage0_checkpoint} ===")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    raw_ckpt = torch.load(args.stage0_checkpoint, map_location='cpu')
-    is_panopticon = not isinstance(raw_ckpt, dict) or 'config' not in raw_ckpt
-
-    if is_panopticon:
-        m = re.search(r'panopticon_lp_benv2_(\w+)_s0', args.stage0_checkpoint)
-        starting_modality = m.group(1) if m else args.new_mod_group
-        config = {'normalization': 'zscore', 'evan_config': {'starting_modality': starting_modality}}
-        print(f"  Detected Panopticon LP checkpoint — starting modality: {starting_modality}")
-        print(f"\nUsing device: {device}")
+    checkpoint = torch.load(args.stage0_checkpoint, map_location='cpu')
+    config = checkpoint['config']
+    if 'decoder_strategy' in config:
+        model = EvanSegmenter.from_checkpoint(args.stage0_checkpoint, device)
     else:
-        checkpoint = raw_ckpt
-        config = checkpoint['config']
-        if 'decoder_strategy' in config:
-            model = EvanSegmenter.from_checkpoint(args.stage0_checkpoint, device)
-        else:
-            model = EVANClassifier.from_checkpoint(args.stage0_checkpoint, device)
-        evan_config = config['evan_config']
-        starting_modality = evan_config['starting_modality']
-        print(f"Stage 0 config:")
-        for k, v in config.items():
-            print(f"  {k}: {v}")
-        print(f"\nUsing device: {device}")
+        model = EVANClassifier.from_checkpoint(args.stage0_checkpoint, device)
+    evan_config = config['evan_config']
+    starting_modality = evan_config['starting_modality']
+    print(f"Stage 0 config:")
+    for k, v in config.items():
+        print(f"  {k}: {v}")
+    print(f"\nUsing device: {device}")
 
     newmod = args.new_mod_group
 
@@ -130,45 +122,9 @@ def main():
     modality_bands_dict = task_config.modality_bands_dict
     bands_newmod = modality_bands_dict[newmod]
 
-    if is_panopticon:
-        # Build Panopticon teacher (frozen backbone + trained LP head)
-        from lp_panopticon_benv2 import PanopticonTeacher
-        panopticon_teacher = PanopticonTeacher.from_checkpoint(
-            head_state_path=args.stage0_checkpoint,
-            modality=starting_modality,
-            num_classes=task_config.num_classes,
-            device=device,
-        )
-        # Build random-init EVAN student (no pretrained weights)
-        from evan_main import evan_base
-        evan_student = evan_base(
-            load_weights=False,
-            starting_modality=starting_modality,
-            starting_n_chans=task_config.modality_a_channels,
-            img_size=task_config.img_size,
-            n_storage_tokens=4,
-            tz_fusion_time=args.tz_fusion_time,
-            device=device,
-        )
-        model = EVANClassifier(
-            evan_student,
-            num_classes=task_config.num_classes,
-            classifier_strategy='ensemble',
-            device=device,
-        ).to(device)
-        evan = model.evan
-        # Dims for latent projector cross-architecture matching
-        teacher_latent_dim = 768
-        teacher_n_patches = (task_config.img_size // 14) ** 2
-        print(f"Panopticon teacher loaded. Random-init EVAN student created.")
-        print(f"  teacher_latent_dim={teacher_latent_dim}, teacher_n_patches={teacher_n_patches}")
-    else:
-        panopticon_teacher = None
-        teacher_latent_dim = None
-        teacher_n_patches = None
-        evan = model.evan
-        model = model.to(device)
-        print(f"SSL-trained components loaded: {newmod} patch embedder, {newmod} modality-specific LoRAs")
+    evan = model.evan
+    model = model.to(device)
+    print(f"SSL-trained components loaded: {newmod} patch embedder, {newmod} modality-specific LoRAs")
 
     num_newmod_channels = len(bands_newmod) if not isinstance(bands_newmod, slice) else \
         (bands_newmod.stop - bands_newmod.start)
@@ -215,15 +171,11 @@ def main():
         val_labeled_loader=val1_loader,
         use_mfla=args.use_mfla,
         warmup_epochs=args.warmup_epochs,
-        multilabel=task_config.multilabel,
+        asym_lr_multiplier=args.asym_lr,
+        task_type=task_config.task_type,
         label_key=task_config.label_key,
-        segmentation=(task_config.task_type == 'segmentation'),
         num_classes=task_config.num_classes,
         ignore_index=getattr(task_config, 'ignore_index', -100),
-
-        teacher_classifier=panopticon_teacher,
-        teacher_latent_dim=teacher_latent_dim,
-        teacher_n_patches=teacher_n_patches,
     )
 
     if task_config.task_type == 'segmentation':
@@ -337,63 +289,15 @@ if __name__ == '__main__':
 
 # DRYRUN examples
 """
-# BEN-v2 using Panopticon LP checkpoint as teacher (s2 teacher → add s1)
-python -u shot_ete.py \
-    --dataset benv2 \
-    --new_mod_group s1 \
-    --stage0_checkpoint checkpoints/panopticon_lp_benv2_s2_s0.pt \
-    --epochs 2 \
-    --eval_every_n_epochs 1 \
-    --batch_size 32 \
-    --results_csv res/shot_ete_dryrun.csv \
-    --labeled_frequency 0.3 \
-    --tz_fusion_time 0
-
-# BEN-v2 using Panopticon LP checkpoint as teacher (s1 teacher → add s2)
-python -u shot_ete.py \
-    --dataset benv2 \
-    --new_mod_group s2 \
-    --stage0_checkpoint checkpoints/panopticon_lp_benv2_s1_s0.pt \
-    --epochs 2 \
-    --eval_every_n_epochs 1 \
-    --batch_size 32 \
-    --results_csv res/shot_ete_dryrun.csv \
-    --active_losses distill ce latent \
-    --labeled_frequency 0.3
-
 # BEN-v2 (s2 -> add s1)
 python -u shot_ete.py \
     --dataset benv2 \
     --new_mod_group s1 \
     --checkpoint_name benv2_s2_to_s1 \
-    --stage0_checkpoint checkpoints/benv2_s2_s0.pt \
-    --epochs 2 \
+    --stage0_checkpoint checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt \
+    --epochs 4 \
     --eval_every_n_epochs 1 \
     --batch_size 32 \
     --results_csv res/shot_ete_benv2.csv \
-    --labeled_frequency 0.3
-    
-# BENv2 s2 to s1
-python -u shot_ete.py \
-    --dataset benv2 \
-    --new_mod_group s1 \
-    --checkpoint_name benv2_s2_to_s1_dryrun \
-    --stage0_checkpoint checkpoints/benv2_s2_s0.pt \
-    --epochs 4 \
-    --eval_every_n_epochs 1 \
-    --batch_size 64 \
-    --results_csv res/shot_ete_dryrun.csv \
-    --labeled_frequency 0.3
-    
-# PASTIS s2 to s1
-python -u shot_ete.py \
-    --dataset pastis \
-    --new_mod_group s1 \
-    --checkpoint_name pastis_s2_to_s1_dryrun \
-    --stage0_checkpoint checkpoints/pastis_s2_s0.pt \
-    --epochs 4 \
-    --eval_every_n_epochs 1 \
-    --batch_size 32 \
-    --results_csv res/shot_ete_dryrun.csv \
     --labeled_frequency 0.3
 """

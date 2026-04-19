@@ -321,9 +321,14 @@ class Trainer:
         distillation_mode: str = 'regular',
         kl_type: str = 'kd',
         best_checkpoint_path: str | None = None,
+        student_modalities: tuple | None = None,
     ) -> tuple:
         """
-        Knowledge distillation from teacher (teacher_modality) to student (student_modality).
+        Knowledge distillation from teacher (teacher_modality) to student.
+
+        student_modalities: tuple of all student modality names (e.g. ('s1', 's2') for a
+            multimodal student). Defaults to (student_modality,) for single-modality students.
+            student_modality is the primary modality (used for display / backwards compat).
 
         Val checkpoint criterion: teacher-agreement on val2 (unlabeled multimodal split).
         teacher-agreement = fraction of samples where student pred == teacher pred.
@@ -335,6 +340,9 @@ class Trainer:
         Returns:
             (train_metric, test_metric, best_test_metric, best_epoch)
         """
+        if student_modalities is None:
+            student_modalities = (student_modality,)
+
         tc = self.task_config
         label_key = tc.label_key
         segmentation = (tc.task_type == 'segmentation')
@@ -360,9 +368,10 @@ class Trainer:
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         global_step = 0
 
+        student_label = '+'.join(student_modalities).upper()
         eval_kwargs = dict(
             modality_bands_dict=student_modality_bands_dict,
-            modalities_to_use=(student_modality,),
+            modalities_to_use=student_modalities,
             multilabel=multilabel,
             label_key=label_key,
             segmentation=segmentation,
@@ -378,7 +387,7 @@ class Trainer:
             train_loss = 0.0
 
             pbar = tqdm(train_loader,
-                        desc=f"Distill Epoch {epoch+1}/{num_epochs} [{student_modality.upper()}]")
+                        desc=f"Distill Epoch {epoch+1}/{num_epochs} [{student_label}]")
             for batch in pbar:
                 labels = batch[label_key].to(self.device)
                 if multilabel:
@@ -386,7 +395,7 @@ class Trainer:
 
                 student_input = create_multimodal_batch(
                     batch, modality_bands_dict=student_modality_bands_dict,
-                    modalities=(student_modality,)
+                    modalities=student_modalities,
                 )
                 student_input = {k: v.to(self.device) for k, v in student_input.items()}
 
@@ -416,8 +425,7 @@ class Trainer:
                     student_logits = self.model(student_input)
                     distill_loss = distillation_loss(
                         student_logits, teacher_logits, temperature,
-                        ignore_index=ignore_index if segmentation else None,
-                        labels=labels if segmentation else None, kl_type=kl_type,
+                        kl_type=kl_type, task_type=tc.task_type,
                     )
                     if distillation_mode == 'with_guidance':
                         hard_loss = ce_criterion(student_logits, labels)
@@ -450,8 +458,8 @@ class Trainer:
 
             metric_name = accum.metric_name
             if (epoch % 8 == 1) or (epoch + 1 == num_epochs):
-                print(f"  Train ({student_modality.upper()}): Loss={train_loss:.4f}, {metric_name}={train_metric:.2f}%")
-                print(f"  Test  ({student_modality.upper()}): Loss={test_loss:.4f}, {metric_name}={test_metric:.2f}%")
+                print(f"  Train ({student_label}): Loss={train_loss:.4f}, {metric_name}={train_metric:.2f}%")
+                print(f"  Test  ({student_label}): Loss={test_loss:.4f}, {metric_name}={test_metric:.2f}%")
 
             if test_metric > best_test_metric:
                 best_test_metric = test_metric
@@ -462,7 +470,7 @@ class Trainer:
                 agreement = _compute_teacher_agreement(
                     self.model, teacher_model, val2_loader, self.device,
                     student_modality_bands_dict, teacher_modality_bands_dict,
-                    student_modality, teacher_modality, label_key,
+                    student_modalities, teacher_modality, label_key,
                     segmentation=segmentation, ignore_index=ignore_index,
                 )
                 print(f"  Val2 teacher-agreement: {agreement:.2f}%")
@@ -480,7 +488,7 @@ class Trainer:
                             self.optimizer.param_groups[0]['lr'],
                             test_loss, test_metric)
 
-        return train_metric, test_metric, best_test_metric, best_epoch
+        return train_metric, test_metric, best_test_metric, best_epoch, best_agreement
 
     # ------------------------------------------------------------------
     # Linear probe / LP-FT (replaces train_classifier_with_frozen_backbone body)
@@ -1177,14 +1185,18 @@ class Trainer:
 def _compute_teacher_agreement(
     student_model, teacher_model, val_loader, device,
     student_modality_bands_dict, teacher_modality_bands_dict,
-    student_modality, teacher_modality, label_key,
+    student_modalities, teacher_modality, label_key,
     segmentation: bool = False,
     ignore_index: int = -100,
 ) -> float:
     """
     Compute fraction of val2 samples where student prediction matches teacher prediction.
     Used as val criterion for distillation checkpoint selection.
+
+    student_modalities: tuple of modality names for the student (may be multimodal).
     """
+    if isinstance(student_modalities, str):
+        student_modalities = (student_modalities,)
     student_model.eval()
     teacher_model.eval()
     agree = 0
@@ -1194,7 +1206,7 @@ def _compute_teacher_agreement(
         for batch in val_loader:
             student_input = create_multimodal_batch(
                 batch, modality_bands_dict=student_modality_bands_dict,
-                modalities=(student_modality,)
+                modalities=student_modalities,
             )
             student_input = {k: v.to(device) for k, v in student_input.items()}
             teacher_input = create_multimodal_batch(
@@ -1573,20 +1585,22 @@ def compute_miou(preds: torch.Tensor, labels: torch.Tensor, num_classes: int, ig
 # ---------------------------------------------------------------------------
 
 def distillation_loss(student_logits, teacher_logits, temperature=2.0,
-                      ignore_index=None, labels=None, kl_type="kd"):
+                      ignore_index=None, labels=None, kl_type="kd",
+                      task_type="classification"):
     """
-    KL-divergence distillation loss between student and teacher logits.
+    Distillation loss between student and teacher logits.
 
-    Supports classification [B, C] and segmentation [B, C, H, W].
-    For segmentation pass labels [B, H, W] and ignore_index to mask void pixels.
+    task_type:
+        'classification' — softmax KL divergence [B, C]
+        'multilabel'     — per-class BCE against sigmoid teacher probs [B, C]
+        'segmentation'   — softmax KL divergence on [B, C, H, W]; pass labels+ignore_index to mask void pixels
 
-    kl_type choices:
+    kl_type choices (classification/segmentation only):
         'kd'   — standard KD (temperature-scaled softmax, multiplied by T²)
         'ttm'  — teacher-temp only (teacher scaled, student not)
         'wttm' — weighted TTM (weight by teacher confidence)
     """
-    from typing import Literal  # noqa: F401 (import inside fn to avoid top-level dep)
-    if student_logits.dim() == 4:
+    if task_type == "segmentation" and student_logits.dim() == 4:
         C = student_logits.shape[1]
         student_logits = student_logits.permute(0, 2, 3, 1).reshape(-1, C)
         teacher_logits = teacher_logits.permute(0, 2, 3, 1).reshape(-1, C)
@@ -1594,6 +1608,9 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0,
             mask = labels.reshape(-1) != ignore_index
             student_logits = student_logits[mask]
             teacher_logits = teacher_logits[mask]
+    if task_type == "multilabel":
+        teacher_probs = torch.sigmoid(teacher_logits / temperature)
+        return F.binary_cross_entropy_with_logits(student_logits / temperature, teacher_probs)
     teacher_soft = F.softmax(teacher_logits / temperature, dim=-1)
     if kl_type == "kd":
         student_log_soft = F.log_softmax(student_logits / temperature, dim=-1)

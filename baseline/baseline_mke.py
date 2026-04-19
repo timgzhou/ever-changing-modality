@@ -365,20 +365,11 @@ def main():
     aug = make_augmentation(task_config.img_size)
     aug_with_mask = make_augmentation_with_mask(task_config.img_size)
 
-    # Checkpoint
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    student_mods_str = '_'.join(student_modalities)
-    if args.checkpoint_name:
-        checkpoint_path = os.path.join(args.checkpoint_dir, f'{args.checkpoint_name}.pt')
-    else:
-        checkpoint_path = os.path.join(
-            args.checkpoint_dir,
-            f'evan_mke_{args.dataset}_{teacher_modality}_to_{student_mods_str}_{timestamp}.pt',
-        )
 
     # Channel counts per modality (for splitting combined tensor after aug)
     mod_chans = [_n_chans(modality_bands_dict[m]) for m in student_modalities]
+
+    student_mods_str = '_'.join(student_modalities)
 
     # WandB
     if args.wandb_project:
@@ -410,6 +401,7 @@ def main():
     best_test_metric = 0.0
     best_epoch = 0
     best_agreement = -1.0
+    valchecked_test_metric = None
     test_metric = 0.0
 
     trainable_param_list = [p for p in student_model.parameters() if p.requires_grad]
@@ -517,8 +509,7 @@ def main():
             print(f"  Val2 teacher-agreement: {agreement:.2f}%")
             if agreement > best_agreement:
                 best_agreement = agreement
-                student_model.save_checkpoint(checkpoint_path)
-                print(f"  Saved best checkpoint (agreement {agreement:.2f}%)")
+                valchecked_test_metric = test_metric
 
             if args.wandb_project:
                 wandb.log({
@@ -531,11 +522,6 @@ def main():
         else:
             print(f"Epoch {epoch+1}/{args.epochs} | loss={train_loss:.4f} | "
                   f"train {metric_name}={train_metric:.2f}%")
-
-    # Fallback: save final checkpoint if no val2-based save happened
-    if best_agreement < 0:
-        student_model.save_checkpoint(checkpoint_path)
-        print(f"Saved final checkpoint: {checkpoint_path}")
 
     print(f"\n=== MKE training complete ===")
     print(f"  Teacher train1 {metric_name}: {teacher_train1_metric:.2f}%")
@@ -557,6 +543,7 @@ def main():
         "use_dino_weights", "metric_name",
         "teacher_train1_metric", "teacher_train2_metric", "teacher_test_metric",
         "student_test_metric", "student_best_test_metric", "best_epoch",
+        "best_val2_teacher_agreement", "valchecked_test_metric",
         "saved_checkpoint", "global_rep", "teacher_checkpoint",
     ]
     with open(filename, mode='a', newline='') as f:
@@ -570,13 +557,14 @@ def main():
             args.use_dino_weights, metric_name,
             f"{teacher_train1_metric:.2f}", f"{teacher_train2_metric:.2f}", f"{teacher_test_metric:.2f}",
             f"{test_metric:.2f}", f"{best_test_metric:.2f}", best_epoch,
-            checkpoint_path, args.global_rep, teacher_checkpoint_path,
+            f"{best_agreement:.2f}",
+            f"{valchecked_test_metric:.2f}" if valchecked_test_metric is not None else "",
+            "", args.global_rep, teacher_checkpoint_path,
         ])
     print(f"Results appended to {filename}")
 
     if args.wandb_project:
         wandb.finish()
-    return checkpoint_path
 
 
 if __name__ == '__main__':

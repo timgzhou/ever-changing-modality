@@ -20,10 +20,9 @@ import os
 
 df = pd.read_csv('res/sweep_results.csv')
 df = df[
-    (df['dataset'] == 'dfc2020') &
-    (df['starting_modality'] == 's2_rgb') &
-    (df['new_modality'] == 's1') &
-    (df['active_losses'] == 'prefusion+distill+ce+latent')
+    (df['dataset'] == 'benv2') &
+    (df['starting_modality'] == 's2') &
+    (df['new_modality'] == 's1')
 ].copy()
 
 print(f"Filtered rows: {len(df)}")

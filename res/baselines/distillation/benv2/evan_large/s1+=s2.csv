@@ -1,0 +1,13 @@
+model_type,teacher_modality,student_modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,temperature,alpha,distillation_mode,kl_type,metric_name,teacher_test_metric,test_metric,best_test_metric(oracle),best_epoch,best_val_agreement,ensemble_metric_logits,ensemble_metric_softmax,teacher_classifier_acc,supervised_classifier_acc,supervised_classifier_best_acc,saved_checkpoint,global_rep,teacher_checkpoint
+evan_large,s1,s2,fft,0,fft,0.001,305532947,16,2.0,1.0,regular,kd,mAP,49.98,53.16,54.24,10,,56.06,54.33,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.0003,305532947,16,2.0,1.0,regular,kd,mAP,49.98,55.03,55.04,15,,55.86,54.98,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.001,305532947,16,2.0,1.0,regular,ttm,mAP,49.98,52.94,53.86,6,,55.37,54.67,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.0003,305532947,16,2.0,1.0,regular,ttm,mAP,49.98,53.96,54.07,12,,55.37,54.67,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.001,305532947,16,1.0,1.0,regular,ttm,mAP,49.98,53.25,54.08,8,,55.25,55.10,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.0003,305532947,16,1.0,1.0,regular,ttm,mAP,49.98,54.63,54.67,13,,54.84,55.36,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.0003,305532947,16,1.0,1.0,regular,kd,mAP,49.98,53.57,53.63,13,,54.68,54.94,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.001,305532947,16,1.0,1.0,regular,kd,mAP,49.98,51.78,52.69,4,,54.51,54.36,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.001,305532947,16,0.5,1.0,regular,kd,mAP,49.98,51.21,53.02,6,,53.49,53.56,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.001,305532947,16,0.5,1.0,regular,ttm,mAP,49.98,51.41,52.32,9,,53.36,53.52,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.0003,305532947,16,0.5,1.0,regular,kd,mAP,49.98,53.22,53.55,9,,53.33,54.17,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt
+evan_large,s1,s2,fft,0,fft,0.0003,305532947,16,0.5,1.0,regular,ttm,mAP,49.98,52.93,52.96,11,,53.27,54.21,,,,,clstoken,checkpoints/sft_evan_large_benv2_s1_fft_lr0.001_20260417_043157.pt

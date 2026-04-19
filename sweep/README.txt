@@ -27,9 +27,9 @@ python sweep/create_sweep.py --script shot --starting rgb --newmod nir
 
 # Any other dataset (provide checkpoint explicitly):
 python sweep/create_sweep.py --script shot \
-    --dataset dfc2020 \
+    --dataset benv2 \
     --starting s2_rgb --newmod s1 \
-    --stage0_checkpoint checkpoints/dfc2020_s2rgb_dinov3init_sft.pt
+    --stage0_checkpoint checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
 
 # PLDC sweep (no MAE, sweeps prefusion/latent/distill/ce lambdas + weight_decay):
 python sweep/create_sweep.py --script pldc \

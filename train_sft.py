@@ -14,7 +14,7 @@ from train_utils import single_modality_training_loop
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
-EUROSAT_MODALITIES    = ['rgb', 'vre', 'nir', 'swir', 'aw']
+EUROSAT_MODALITIES    = ['rgb', 'vre', 'nir', 'swir', 'aw', 's2']
 BENV2_MODALITIES      = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
 BENV2FULL_MODALITIES  = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
 PASTIS_MODALITIES     = ['s2', 's1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir']
@@ -289,7 +289,7 @@ def main():
         "dataset", "model_type", "modality", "train_mode",
         "tz_lora_rank", "tz_modality_specific_layer_augmenter",
         "learning_rate", "weight_decay", "trainable_params", "epoch",
-        "test_metric", "metric_name", "saved_checkpoint", "global_rep",
+        "test_metric", "val_metric", "metric_name", "saved_checkpoint", "global_rep",
         "dino_init",
     ]
     with open(filename, mode='a', newline='') as file:
@@ -301,6 +301,7 @@ def main():
             args.tz_lora_rank, args.tz_modality_specific_layer_augmenter,
             args.lr, args.weight_decay, trainable_params, args.epochs,
             f"{best_val_test_metric:.2f}" if best_val_test_metric is not None else "",
+            f"{best_val_metric:.2f}" if best_val_metric is not None else "",
             metric_name, checkpoint_path, args.global_rep,
             args.use_dino_weights,
         ])

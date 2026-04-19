@@ -68,7 +68,13 @@ MODALITY_BANDS = {
     'vre': VRE_BAND_NAMES,
     'nir': NIR_BAND_NAMES,
     'swir': SWIR_BAND_NAMES,
-    'aw': AW_BAND_NAMES
+    'aw': AW_BAND_NAMES,
+    's2_norgb': ('B01', 'B02', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B10', 'B11', 'B12'),
+    's2_rgb':  RGB_BAND_NAMES,
+    's2_vre':  VRE_BAND_NAMES,
+    's2_nir':  NIR_BAND_NAMES,
+    's2_swir': SWIR_BAND_NAMES,
+    's2_aw':   AW_BAND_NAMES,
 }
 
 def get_modality_bands_dict(*modality_keys):

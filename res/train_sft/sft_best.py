@@ -22,9 +22,9 @@ group_keys = ["dataset", "modality", "model_type", "train_mode", "dino_init"]
 counts = df.groupby(group_keys).size().reset_index(name="n_runs")
 
 best = (
-    df.sort_values("test_metric", ascending=False)
+    df.sort_values("val_metric", ascending=False)
     .groupby(group_keys, as_index=False)
-    .first()[group_keys + ["learning_rate", "trainable_params", "metric_name", "test_metric", "saved_checkpoint"]]
+    .first()[group_keys + ["learning_rate", "trainable_params", "metric_name", "val_metric", "test_metric", "saved_checkpoint"]]
     .merge(counts, on=group_keys)
     .sort_values(group_keys)
 )
@@ -46,6 +46,7 @@ for _, row in teachers.iterrows():
         "dataset":     row["dataset"],
         "modality":    row["modality"],
         "model_type":  row["model_type"],
+        "val_metric":  round(float(row["val_metric"]), 4),
         "test_metric": round(float(row["test_metric"]), 4),
         "metric_name": row["metric_name"],
         "checkpoint":  row["saved_checkpoint"],
@@ -58,6 +59,6 @@ with open(out, "w") as f:
 
 print(f"\nSaved {len(lookup)} teacher checkpoints to {out}")
 for key, v in sorted(lookup.items()):
-    print(f"  {key:<45}  {v['metric_name']}={v['test_metric']:.2f}  {v['checkpoint']}")
+    print(f"  {key:<45}  {v['metric_name']} val={v['val_metric']:.2f} test={v['test_metric']:.2f}  {v['checkpoint']}")
 
 # python res/train_sft/sft_best.py

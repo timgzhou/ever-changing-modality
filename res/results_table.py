@@ -48,19 +48,19 @@ COLUMNS = {
         'S2-RGB': ['s2_rgb'],
         'S2':     ['s2'],
         'S1':     ['s1'],
-        'S2+S1':  ['s2+s1', 's1+s2'],
+        'S2+S1':  ['s2+s1', 's1+s2', 's2s1', 's1s2'],
     },
     'dfc2020': {
         'S2-RGB': ['s2_rgb'],
         'S2':     ['s2'],
         'S1':     ['s1'],
-        'S2+S1':  ['s2+s1', 's1+s2'],
+        'S2+S1':  ['s2+s1', 's1+s2', 's2s1', 's1s2'],
     },
     'eurosat': {
         'RGB':  ['rgb'],
         'VRE':  ['vre'],
-        'NIR':  ['nir'],
         'SWIR': ['swir'],
+        'S2':   ['s2'],
     },
 }
 
@@ -107,6 +107,15 @@ def _best(df, group_cols, score_col):
     )
 
 
+def _top3(df, group_cols, score_col):
+    """Return top-3 rows per group by score_col (descending)."""
+    return (
+        df.sort_values(score_col, ascending=False)
+        .groupby(group_cols, as_index=False)
+        .head(3)
+    )
+
+
 def _params_str(params):
     """Format trainable_params as e.g. '87M'."""
     try:
@@ -132,16 +141,16 @@ def load_sft():
         if df is None:
             continue
         select_col = 'val_metric' if 'val_metric' in df.columns else 'test_metric'
-        best = _best(df, ['modality', 'model_type', 'dino_init'], select_col)
-        for _, row in best.iterrows():
-            model_label = EVAN_MODEL_LABELS.get(row['model_type'], row['model_type'])
-            init_group  = 'DINO v3' if row['dino_init'] else 'Random init'
+        top3 = _top3(df, ['modality', 'model_type', 'dino_init'], select_col)
+        for (modality, model_type, dino_init), grp in top3.groupby(['modality', 'model_type', 'dino_init']):
+            model_label = EVAN_MODEL_LABELS.get(model_type, model_type)
+            init_group  = 'DINO v3' if dino_init else 'Random init'
             records.append(dict(
                 dataset=dataset,
-                col_aliases=[row['modality']],
+                col_aliases=[modality],
                 init_group=init_group, model_label=model_label,
-                params=row.get('trainable_params'),
-                score=row['test_metric'],
+                params=grp['trainable_params'].iloc[0],
+                scores=grp['test_metric'].tolist(),
             ))
     return records
 
@@ -153,21 +162,20 @@ def load_rsfm():
     df = df[df['train_mode'] == 'fft']
     # Exclude DINO v3 models — those come from train_sft instead
     df = df[~df['model'].str.lower().str.contains('dino')]
-    # Select checkpoint by best val_metric (HP selection), report its test_metric
+    # Select top-3 checkpoints by val_metric (HP selection), report their test_metrics
     select_col = 'val_metric' if 'val_metric' in df.columns else 'test_metric'
-    best = _best(df, ['dataset', 'modality', 'model'], select_col)
+    top3 = _top3(df, ['dataset', 'modality', 'model'], select_col)
     records = []
-    for _, row in best.iterrows():
-        dataset = row['dataset']
+    for (dataset, modality, model), grp in top3.groupby(['dataset', 'modality', 'model']):
         if dataset not in COLUMNS:
             continue
-        init_group, model_label = _rsfm_model_info(row['model'])
+        init_group, model_label = _rsfm_model_info(model)
         records.append(dict(
             dataset=dataset,
-            col_aliases=[row['modality']],
+            col_aliases=[modality],
             init_group=init_group, model_label=model_label,
-            params=row.get('trainable_params'),
-            score=row['test_metric'],
+            params=grp['trainable_params'].iloc[0],
+            scores=grp['test_metric'].tolist(),
         ))
     return records
 
@@ -501,12 +509,22 @@ def _print_transfer_table(dataset, df, col_keys, col_display):
 # Build and print tables
 # ---------------------------------------------------------------------------
 
+def _fmt_scores(scores):
+    """Format a list of test scores as 'mean±std' (1 decimal place)."""
+    import numpy as np
+    if not scores:
+        return ''
+    if len(scores) == 1:
+        return f'{scores[0]:.1f}'
+    return f'{float(np.mean(scores)):.1f}±{float(np.std(scores)):.1f}'
+
+
 def build_table(dataset, all_records):
     col_defs  = COLUMNS[dataset]
     col_names = list(col_defs.keys())
 
-    # lookup: (init_group, model_label, col_name) → score
-    score_lookup  = {}
+    # lookup: (init_group, model_label, col_name) → list of test scores
+    scores_lookup = {}
     params_lookup = {}
 
     for rec in all_records:
@@ -516,17 +534,15 @@ def build_table(dataset, all_records):
         for col_name, aliases in col_defs.items():
             if any(a in rec['col_aliases'] for a in aliases):
                 lk = (*key, col_name)
-                prev = score_lookup.get(lk)
-                if prev is None or rec['score'] > prev:
-                    score_lookup[lk]   = rec['score']
-                    params_lookup[key] = rec.get('params')
+                scores_lookup.setdefault(lk, []).extend(rec['scores'])
+                params_lookup[key] = rec.get('params')
 
     rows = []
     prev_section    = None
     prev_init_group = None
     for section, init_group, model_label in ROW_ORDER:
         key      = (init_group, model_label)
-        row_vals = {col: score_lookup.get((*key, col)) for col in col_names}
+        row_vals = {col: scores_lookup.get((*key, col)) for col in col_names}
         if all(v is None for v in row_vals.values()):
             continue
 
@@ -538,8 +554,7 @@ def build_table(dataset, all_records):
             'Params':  _params_str(params),
         }
         for col in col_names:
-            v = row_vals[col]
-            row[col] = f'{v:.2f}' if v is not None else ''
+            row[col] = _fmt_scores(row_vals[col])
         rows.append(row)
         prev_section    = section
         prev_init_group = init_group

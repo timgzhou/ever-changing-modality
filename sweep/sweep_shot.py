@@ -91,10 +91,10 @@ def main():
     else:
         active_losses = ['prefusion', 'distill', 'ce']
 
-    # Optional losses
-    if use_mae:
+    # Optional losses — also respect lambda=0 as "disabled"
+    if use_mae and args.lambda_mae > 0:
         active_losses.append('mae')
-    if use_latent:
+    if use_latent and args.lambda_latent > 0:
         active_losses.append('latent')
 
     print(f"\n=== Sweep Configuration ===")
@@ -196,10 +196,9 @@ def main():
         weight_decay=weight_decay,
         val_unlabeled_loader=val2_loader,
         val_labeled_loader=val1_loader,
-        multilabel=task_config.multilabel,
+        task_type=task_config.task_type,
         label_key=task_config.label_key,
-        segmentation=is_segmentation,
-        num_classes=task_config.num_classes if is_segmentation else None,
+        num_classes=task_config.num_classes,
         ignore_index=getattr(task_config, 'ignore_index', -100),
     )
 
