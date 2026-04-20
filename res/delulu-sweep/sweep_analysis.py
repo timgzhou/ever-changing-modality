@@ -1,12 +1,14 @@
-"""Analysis of sweep_results.csv for dfc2020/s2_rgb/s1 with prefusion+distill+ce+latent.
+"""Analysis of sweep_results_nomae.csv (no-MAE sweep).
+
+Hyperparams are treated as dataset/modality-agnostic and applied to all combos.
 
 Outputs:
   - Top-2 hyperparams per val metric (4 metrics × 2 = 8 rows each)
-  - Val vs test scatter plots saved to artifacts/
-  - JSON of best configs saved to artifacts/sweep_best.json (readable by bash/python)
+  - Val vs test scatter plots saved to res/delulu-sweep/artifacts/
+  - JSON of best configs saved to res/delulu-sweep/artifacts/sweep_best.json
 
 Run from repo root:
-    python res/sweep_analysis.py
+    python res/delulu-sweep/sweep_analysis.py
 """
 
 import json
@@ -15,17 +17,12 @@ import matplotlib.pyplot as plt
 import os
 
 # ---------------------------------------------------------------------------
-# Load and filter
+# Load
 # ---------------------------------------------------------------------------
 
-df = pd.read_csv('res/sweep_results.csv')
-df = df[
-    (df['dataset'] == 'benv2') &
-    (df['starting_modality'] == 's2') &
-    (df['new_modality'] == 's1')
-].copy()
+df = pd.read_csv('res/delulu-sweep/sweep_results_nomae.csv')
 
-print(f"Filtered rows: {len(df)}")
+print(f"Rows: {len(df)}")
 
 VAL_TEST_PAIRS = [
     ('val_transfer',    'test_transfer'),
@@ -35,11 +32,11 @@ VAL_TEST_PAIRS = [
 ]
 
 HYPERPARAM_COLS = ['lr', 'weight_decay', 'mask_ratio', 'modality_dropout',
-                   'labeled_frequency', 'labeled_start_fraction',
-                   'lambda_latent', 'lambda_prefusion', 'lambda_distill', 'lambda_mae', 'lambda_ce']
+                   'labeled_frequency', 'labeled_start_fraction', 'dyn_teacher',
+                   'lambda_latent', 'lambda_prefusion', 'lambda_distill']
 
 # ---------------------------------------------------------------------------
-# Top-3 per val metric + collect for JSON
+# Top-2 per val metric + collect for JSON
 # ---------------------------------------------------------------------------
 
 # CSV columns → shot_ete.py argument names
@@ -50,42 +47,52 @@ COL_TO_ARG = {
     'modality_dropout':       'modality_dropout',
     'labeled_frequency':      'labeled_frequency',
     'labeled_start_fraction': 'labeled_start_fraction',
+    'dyn_teacher':            'dyn_teacher',
     'lambda_latent':          'lambda_latent',
     'lambda_prefusion':       'lambda_prefusion',
     'lambda_distill':         'lambda_distill',
-    'lambda_mae':             'lambda_mae',
-    'lambda_ce':              'lambda_ce',
 }
 
 best_configs = []
 
+df_nodyn = df[df['dyn_teacher'].astype(str).str.lower() != 'true'].copy()
+
 for val_col, test_col in VAL_TEST_PAIRS:
     metric_name = val_col.replace('val_', '')
-    sorted_df = df.sort_values(val_col, ascending=False).reset_index(drop=True)
+    sorted_df = df_nodyn.sort_values(val_col, ascending=False).reset_index(drop=True)
     top2 = sorted_df.head(2)[HYPERPARAM_COLS + ['stage0_checkpoint', val_col, test_col]].copy()
 
-    # 3 significant digits for display
     display = top2[HYPERPARAM_COLS + [val_col, test_col]].map(
         lambda x: float(f'{x:.3g}') if isinstance(x, float) else x
     )
     print(f'\n=== Top-2 by {val_col} ===')
     print(display.to_string(index=False))
 
-    # Collect JSON entries (3 significant digits)
     for rank, (_, row) in enumerate(top2.iterrows(), start=1):
+        args = {}
+        for c in HYPERPARAM_COLS:
+            if c not in COL_TO_ARG:
+                continue
+            val = row[c]
+            arg_name = COL_TO_ARG[c]
+            if c == 'dyn_teacher':
+                args[arg_name] = bool(str(val).strip().lower() == 'true')
+            else:
+                args[arg_name] = float(f"{val:.3g}")
         entry = {
             'selected_by': metric_name,
             'rank':        rank,
             'val_score':   float(f"{row[val_col]:.3g}"),
             'test_score':  float(f"{row[test_col]:.3g}"),
             'stage0_checkpoint': row['stage0_checkpoint'],
-            'args': {COL_TO_ARG[c]: float(f"{row[c]:.3g}") for c in HYPERPARAM_COLS if c in COL_TO_ARG},
+            'args': args,
         }
         best_configs.append(entry)
 
 # Save JSON
-os.makedirs('artifacts', exist_ok=True)
-json_path = 'artifacts/sweep_best.json'
+out_dir = 'res/delulu-sweep/artifacts'
+os.makedirs(out_dir, exist_ok=True)
+json_path = f'{out_dir}/sweep_best.json'
 with open(json_path, 'w') as f:
     json.dump(best_configs, f, indent=2)
 print(f'\nSaved {len(best_configs)} configs to {json_path}')  # 4 metrics × 2 = 8
@@ -94,22 +101,18 @@ print(f'\nSaved {len(best_configs)} configs to {json_path}')  # 4 metrics × 2 =
 # Val vs test scatter plots
 # ---------------------------------------------------------------------------
 
-os.makedirs('artifacts', exist_ok=True)
-
 fig, axes = plt.subplots(1, 4, figsize=(18, 4))
-fig.suptitle('Val vs Test — dfc2020 s2_rgb→s1 (prefusion+distill+ce+latent)', fontsize=12)
+fig.suptitle('Val vs Test — benv2 s2→s1 (no-MAE sweep)', fontsize=12)
 
 for ax, (val_col, test_col) in zip(axes, VAL_TEST_PAIRS):
     x = df[val_col]
     y = df[test_col]
     ax.scatter(x, y, alpha=0.6, s=20)
 
-    # y=x reference line
     lo = min(x.min(), y.min()) - 1
     hi = max(x.max(), y.max()) + 1
     ax.plot([lo, hi], [lo, hi], 'k--', linewidth=0.8, label='y=x')
 
-    # Pearson r
     r = x.corr(y)
     ax.set_xlabel(val_col, fontsize=9)
     ax.set_ylabel(test_col, fontsize=9)
@@ -118,8 +121,8 @@ for ax, (val_col, test_col) in zip(axes, VAL_TEST_PAIRS):
     ax.legend(fontsize=8)
 
 plt.tight_layout()
-out = 'artifacts/sweep_val_vs_test.png'
+out = f'{out_dir}/sweep_val_vs_test.png'
 plt.savefig(out, dpi=150)
-print(f'\nSaved plot to {out}')
+print(f'Saved plot to {out}')
 
-# python res/sweep_analysis.py
+# python res/delulu-sweep/sweep_analysis.py

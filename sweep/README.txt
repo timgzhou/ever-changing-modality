@@ -28,14 +28,14 @@ python sweep/create_sweep.py --script shot --starting rgb --newmod nir
 # Any other dataset (provide checkpoint explicitly):
 python sweep/create_sweep.py --script shot \
     --dataset benv2 \
-    --starting s2_rgb --newmod s1 \
+    --starting s2 --newmod s1 \
     --stage0_checkpoint checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
 
 # PLDC sweep (no MAE, sweeps prefusion/latent/distill/ce lambdas + weight_decay):
 python sweep/create_sweep.py --script pldc \
-    --dataset dfc2020 \
-    --starting s2_rgb --newmod s1 \
-    --stage0_checkpoint checkpoints/dfc2020_s2rgb_dinov3init_sft.pt
+    --dataset benv2 \
+    --starting s2 --newmod s1 \
+    --stage0_checkpoint checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
 
 # Stage-0 SFT:
 python sweep/create_sweep.py --script sft --dataset dfc2020 --modalities s2_rgb
@@ -53,7 +53,7 @@ Optionally paste it into sweep_registry.txt as a personal log.
 Step 2: Submit to the cluster
 ------------------------------
 sbatch sweep/run_sweep.sh tgz/delulu-sweep-dfc2020-s2_rgb-s1/<sweep_id>
-for i in {1..4}; do sbatch sweep/run_sweep.sh tgz/delulu-sweep-dfc2020-s2_rgb-s1/<sweep_id>; done
+
 
 To smoke-test locally (single trial, no SLURM):
   wandb agent tgz/delulu-sweep-dfc2020-s2_rgb-s1/<sweep_id> --count 1

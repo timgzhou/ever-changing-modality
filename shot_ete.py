@@ -14,9 +14,9 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 
 VALID_NEW_MODS = {
     'eurosat': ['vre', 'nir', 'swir', 'rgb'],
-    'benv2':   ['s1', 's2'],
-    'pastis':  ['s1', 's2'],
-    'dfc2020': ['s1', 's2'],
+    'benv2':   ['s1', 's2', 's2_rgb', 's2_norgb'],
+    'pastis':  ['s1', 's2', 's2_norgb'],
+    'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
 }
 
 def main():
@@ -48,6 +48,9 @@ def main():
     parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for CE loss (default: 1.0)')
     parser.add_argument('--use_mfla', action='store_true',
                         help='Enable MFLA training for hallucinated modalities')
+    parser.add_argument('--dyn_teacher', action='store_true',
+                        help='Dynamic teacher distillation: starting_modality head trains against '
+                             'student peeking (soft-vote), newmod heads train against frozen unimodal teacher')
     parser.add_argument('--warmup_epochs', type=int, default=3,
                         help='Linear LR warmup epochs before cosine decay (default: 1)')
 
@@ -172,6 +175,7 @@ def main():
         use_mfla=args.use_mfla,
         warmup_epochs=args.warmup_epochs,
         asym_lr_multiplier=args.asym_lr,
+        dyn_teacher=args.dyn_teacher,
         task_type=task_config.task_type,
         label_key=task_config.label_key,
         num_classes=task_config.num_classes,

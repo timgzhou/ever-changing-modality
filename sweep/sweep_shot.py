@@ -36,7 +36,7 @@ def main():
                         help='Path to stage 0 checkpoint (required)')
     parser.add_argument('--new_mod_group', type=str, required=True,
                         help='New modality to add (valid values depend on dataset)')
-    parser.add_argument('--results_csv', type=str, default='res/sweep_results.csv',
+    parser.add_argument('--results_csv', type=str, default='res/delulu-sweep/sweep_results_nomae.csv',
                         help='Path to results CSV file')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='Batch size for training (default: 64)')
@@ -53,16 +53,14 @@ def main():
     parser.add_argument('--mae_mask_ratio', type=float, default=0.75)
     parser.add_argument('--modality_dropout', type=float, default=0.3)
     parser.add_argument('--labeled_frequency', type=float, default=0.3)
-    parser.add_argument('--labeled_start_fraction', type=float, default=0.0)
+    parser.add_argument('--labeled_start_fraction', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=0.01)
-    parser.add_argument('--use_mae', type=lambda x: x.lower() == 'true', default=True)
-    parser.add_argument('--use_latent', type=lambda x: x.lower() == 'true', default=True)
-    parser.add_argument('--lambda_mae', type=float, default=1.0)
     parser.add_argument('--lambda_latent', type=float, default=1.0)
     parser.add_argument('--lambda_prefusion', type=float, default=1.0)
     parser.add_argument('--lambda_distill', type=float, default=1.0)
-    parser.add_argument('--lambda_ce', type=float, default=1.0)
+    parser.add_argument('--asym_lr', type=float, default=5.0)
+    parser.add_argument('--dyn_teacher', type=lambda x: x.lower() == 'true', default=False)
     args = parser.parse_args()
 
     # Initialize wandb - sweep will override config
@@ -76,36 +74,27 @@ def main():
     labeled_start_fraction = args.labeled_start_fraction
     lr = args.lr
     weight_decay = args.weight_decay
-    use_mae = args.use_mae
-    use_latent = args.use_latent
+    asym_lr = args.asym_lr
+    dyn_teacher = args.dyn_teacher
     loss_weights = {
-        'mae': args.lambda_mae, 'latent': args.lambda_latent,
+        'mae': 0.0, 'latent': args.lambda_latent,
         'prefusion': args.lambda_prefusion, 'distill': args.lambda_distill,
-        'ce': args.lambda_ce,
+        'ce': 1.0,
     }
 
-    # Build active_losses based on labeled_frequency and optional losses
-    # Base losses: prefusion + distill always, +ce when using labeled data
-    if labeled_frequency == 0:
-        active_losses = ['prefusion', 'distill']
-    else:
-        active_losses = ['prefusion', 'distill', 'ce']
-
-    # Optional losses — also respect lambda=0 as "disabled"
-    if use_mae and args.lambda_mae > 0:
-        active_losses.append('mae')
-    if use_latent and args.lambda_latent > 0:
-        active_losses.append('latent')
+    # Fixed losses: prefusion + distill + latent always; +ce when using labeled data; no mae
+    active_losses = ['prefusion', 'distill', 'latent']
+    if labeled_frequency > 0:
+        active_losses.append('ce')
 
     print(f"\n=== Sweep Configuration ===")
     print(f"  mae_mask_ratio: {mae_mask_ratio}")
     print(f"  modality_dropout: {modality_dropout}")
     print(f"  labeled_frequency: {labeled_frequency}")
     print(f"  labeled_start_fraction: {labeled_start_fraction}")
-    print(f"  lr: {lr}")
+    print(f"  lr: {lr}, asym_lr: {asym_lr}")
     print(f"  weight_decay: {weight_decay}")
-    print(f"  use_mae: {use_mae}")
-    print(f"  use_latent: {use_latent}")
+    print(f"  dyn_teacher: {dyn_teacher}")
     print(f"  active_losses: {active_losses}")
 
     # Create a namespace object to pass to train_shot (mimicking argparse args)
@@ -150,7 +139,7 @@ def main():
         'stage0_checkpoint': args.stage0_checkpoint,
     }, allow_val_change=True)
 
-    wandb.run.name = f"{starting_modality}+={newmod}_lr{lr:.0e}_wd{weight_decay:.0e}_lf{labeled_frequency}"
+    wandb.run.name = f"{starting_modality}+={newmod}_lr{lr:.0e}_alr{asym_lr}_lf{labeled_frequency:.2f}_dt{dyn_teacher}"
 
     # Create datasets
     print("\n=== Creating datasets ===")
@@ -200,6 +189,8 @@ def main():
         label_key=task_config.label_key,
         num_classes=task_config.num_classes,
         ignore_index=getattr(task_config, 'ignore_index', -100),
+        asym_lr_multiplier=asym_lr,
+        dyn_teacher=dyn_teacher,
     )
 
     # Log teacher baselines to wandb
@@ -229,8 +220,8 @@ def main():
             'labeled_start_fraction': labeled_start_fraction,
             'lr': lr,
             'weight_decay': weight_decay,
-            'use_mae': use_mae,
-            'use_latent': use_latent,
+            'asym_lr': asym_lr,
+            'dyn_teacher': dyn_teacher,
             'active_losses': active_losses,
         }
     }
@@ -257,10 +248,10 @@ def main():
     fieldnames = [
         "wandb_run_id", "dataset", "starting_modality", "new_modality",
         "teacher_test_metric",
-        "lr", "weight_decay", "epochs",
+        "lr", "asym_lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
-        "use_mae", "use_latent",
-        "lambda_mae", "lambda_latent", "lambda_prefusion", "lambda_distill", "lambda_ce",
+        "dyn_teacher",
+        "lambda_latent", "lambda_prefusion", "lambda_distill",
         "trainable_params", "active_losses",
         "val_transfer", "test_transfer",
         "val_peeking", "test_peeking",
@@ -280,19 +271,17 @@ def main():
             newmod,
             f"{teacher_test_metric:.2f}" if teacher_test_metric is not None else "",
             lr,
+            asym_lr,
             weight_decay,
             args.epochs,
             mae_mask_ratio,
             modality_dropout,
             labeled_frequency,
             labeled_start_fraction,
-            use_mae,
-            use_latent,
-            loss_weights['mae'],
+            dyn_teacher,
             loss_weights['latent'],
             loss_weights['prefusion'],
             loss_weights['distill'],
-            loss_weights['ce'],
             trainable_total,
             active_losses_str,
             f"{val_transfer:.2f}" if val_transfer is not None else "",

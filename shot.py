@@ -843,6 +843,7 @@ def _unlabeled_batch_step(
     distillation_temperature, use_mfla,
     effective_labeled_freq, patch_size, task_type, device,
     label_key='label', ignore_index=-100,
+    dyn_teacher: bool = False,
 ):
     """Process one unlabeled (multimodal) batch. Returns (total_loss, loss_dict, masking_info)."""
     segmentation = (task_type == "segmentation")
@@ -915,21 +916,59 @@ def _unlabeled_batch_step(
     if 'distill' in active_losses:
         distill_loss = torch.tensor(0.0, device=device)
         distill_count = 0
-        for mod in student_fused.keys():
-            if segmentation and model.modality_decoders is not None and mod in model.modality_decoders:
-                patch_tokens = student_fused[mod]['x_norm_patchtokens']
-                mod_logits = model._apply_decoder(model.modality_decoders[mod], patch_tokens)
+
+        if dyn_teacher:
+            # Peeking: real starting_modality (from unmasked prefusion_features) + hallucinated newmod(s).
+            # Uses prefusion_features, not masked_mod_features — peeking is always grounded in real
+            # starting_mod tokens even when starting_mod was dropped in this unlabeled batch.
+            with torch.no_grad():
+                peek_hal = hallucinate_intermediate_features(
+                    prefusion_features, (starting_modality,), tuple(newmod_list), evan,
+                )
+                peek_input = merge_intermediate_features(
+                    prefusion_features, peek_hal, (starting_modality,), tuple(newmod_list),
+                )
+                _peek_hal_mods = set(newmod_list) if evan.intermediate_projector_type == "cross" else set()
+                peek_fused = evan.forward_fusion_from_modality_features(
+                    peek_input, hallucinated_modalities=_peek_hal_mods
+                )
+                peeking_logits = _model_soft_vote(model, peek_fused, all_modalities)  # detached
+
+            for mod in student_fused.keys():
+                if segmentation:
+                    if model.modality_decoders is None or mod not in model.modality_decoders:
+                        raise RuntimeError(f"dyn_teacher: no decoder registered for modality '{mod}'")
+                    patch_tokens = student_fused[mod]['x_norm_patchtokens']
+                    mod_logits = model._apply_decoder(model.modality_decoders[mod], patch_tokens)
+                else:
+                    if mod not in model.modality_classifiers:
+                        raise RuntimeError(f"dyn_teacher: no classifier registered for modality '{mod}'")
+                    cls_token = student_fused[mod]['x_norm_clstoken']
+                    mod_logits = model.modality_classifiers[mod](cls_token)
+                # starting_modality head → frozen unimodal teacher (consistent with latent loss on newmod)
+                # newmod head(s) → peeking logits (real starting_mod + hallucinated newmod)
+                target = teacher_logits if mod == starting_modality else peeking_logits
                 distill_loss = distill_loss + distillation_loss(
-                    mod_logits, teacher_logits, distillation_temperature, task_type=task_type,
+                    mod_logits, target, distillation_temperature, task_type=task_type,
                 )
                 distill_count += 1
-            elif not segmentation and mod in model.modality_classifiers:
-                cls_token = student_fused[mod]['x_norm_clstoken']
-                mod_logits = model.modality_classifiers[mod](cls_token)
-                distill_loss = distill_loss + distillation_loss(
-                    mod_logits, teacher_logits, distillation_temperature, task_type=task_type,
-                )
-                distill_count += 1
+        else:
+            for mod in student_fused.keys():
+                if segmentation and model.modality_decoders is not None and mod in model.modality_decoders:
+                    patch_tokens = student_fused[mod]['x_norm_patchtokens']
+                    mod_logits = model._apply_decoder(model.modality_decoders[mod], patch_tokens)
+                    distill_loss = distill_loss + distillation_loss(
+                        mod_logits, teacher_logits, distillation_temperature, task_type=task_type,
+                    )
+                    distill_count += 1
+                elif not segmentation and mod in model.modality_classifiers:
+                    cls_token = student_fused[mod]['x_norm_clstoken']
+                    mod_logits = model.modality_classifiers[mod](cls_token)
+                    distill_loss = distill_loss + distillation_loss(
+                        mod_logits, teacher_logits, distillation_temperature, task_type=task_type,
+                    )
+                    distill_count += 1
+
         if distill_count > 0:
             distill_loss = distill_loss / distill_count
         total_loss = total_loss + loss_weights['distill'] * distill_loss
@@ -1118,6 +1157,7 @@ def train_shot(
     ignore_index: int = -100,           # Label value to ignore in CE/mIoU (e.g. 19 for PASTIS void_label)
     teacher_classifier=None,
     asym_lr_multiplier: float | None = None,  # If set, new components get lr * asym_lr_multiplier
+    dyn_teacher: bool = False,
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -1146,6 +1186,10 @@ def train_shot(
     print(f"  Latent modalities (feature matching): {latent_reconstruct_modalities}")
     if use_mfla:
         print(f"  MFLA training: enabled")
+    if dyn_teacher:
+        print(f"  Dynamic teacher distillation: enabled")
+        print(f"    - starting_modality head: distills from student peeking (soft-vote)")
+        print(f"    - newmod heads: distill from frozen unimodal teacher (unchanged)")
     if labeled_train_loader is not None and labeled_frequency > 0:
         print(f"  Mixed training mode: labeled_frequency={labeled_frequency:.2f}")
         print(f"    - labeled_start_fraction={labeled_start_fraction:.2f} (starts at epoch {labeled_start_epoch + 1}/{args.epochs})")
@@ -1352,6 +1396,7 @@ def train_shot(
                     distillation_temperature, use_mfla,
                     effective_labeled_freq, patch_size, task_type, device,
                     label_key=label_key, ignore_index=ignore_index,
+                    dyn_teacher=dyn_teacher,
                 )
                 for mod in all_modalities:
                     if masking_info['modality_dropped'][mod]:
