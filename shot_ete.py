@@ -15,15 +15,14 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 VALID_NEW_MODS = {
     'eurosat': ['vre', 'nir', 'swir', 'rgb'],
     'benv2':   ['s1', 's2', 's2_rgb', 's2_norgb'],
-    'pastis':  ['s1', 's2', 's2_norgb'],
     'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
 }
 
 def main():
     parser = argparse.ArgumentParser(description='End to end training for SHOT model.')
     # IMPORTANT
-    parser.add_argument('--dataset', type=str, default='eurosat',
-                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020'],
+    parser.add_argument('--dataset', type=str, required=True,
+                        choices=['eurosat', 'benv2', 'dfc2020'],
                         help='Dataset to train on (default: eurosat)')
     parser.add_argument('--stage0_checkpoint', type=str, required=True,
                         help='Path to stage 0 checkpoint (required)')
@@ -38,9 +37,9 @@ def main():
                         help='Frequency of labeled monomodal batches from train1 (0-1, default: 0.3)')
     parser.add_argument('--labeled_start_fraction', type=float, default=0.5,
                         help='Fraction of training before labeled mixing starts (0=start, 0.5=halfway, 1=never)')
-    parser.add_argument('--active_losses', type=str, nargs='+', default=None,
+    parser.add_argument('--active_losses', type=str, nargs='+', required=True,
                         choices=['mae', 'latent', 'prefusion', 'distill', 'ce'],
-                        help='Which losses to activate (default: all)')
+                        help='Which losses to activate')
     parser.add_argument('--lambda_mae', type=float, default=1.0, help='Weight for MAE loss (default: 1.0)')
     parser.add_argument('--lambda_latent', type=float, default=1.0, help='Weight for latent loss (default: 1.0)')
     parser.add_argument('--lambda_prefusion', type=float, default=1.0, help='Weight for prefusion loss (default: 1.0)')
@@ -76,7 +75,7 @@ def main():
                              'latent_projectors, new-modality patch_embedder/MSLA/CLS/storage/head). '
                              'If None (default), all params share --lr.')
     parser.add_argument('--weight_decay', type=float, default=0.001)
-    parser.add_argument('--wandb_project', type=str, default='delulu-reBEN')
+    parser.add_argument('--wandb_project', type=str, default='delulu-apr21')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--checkpoint_name', type=str, default=None)
     args = parser.parse_args()
@@ -113,11 +112,6 @@ def main():
     # Create datasets — use the same normalizer that was used during stage 0 training
     print("\n=== Creating datasets ===")
     data_normalizer = None
-    normalization = config.get('normalization', 'zscore')
-    if normalization == 'div10000':
-        from geobench_data_utils import make_div10000_normalizer
-        data_normalizer = make_div10000_normalizer()
-        print(f"Using div10000 normalizer (from stage0 checkpoint config)")
     train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = \
         get_loaders(args.dataset, starting_modality, args.batch_size, args.num_workers,
                     data_normalizer=data_normalizer, new_modality=newmod)
@@ -127,7 +121,6 @@ def main():
 
     evan = model.evan
     model = model.to(device)
-    print(f"SSL-trained components loaded: {newmod} patch embedder, {newmod} modality-specific LoRAs")
 
     num_newmod_channels = len(bands_newmod) if not isinstance(bands_newmod, slice) else \
         (bands_newmod.stop - bands_newmod.start)
@@ -140,21 +133,25 @@ def main():
         evan.create_modality_components(newmod, num_newmod_channels)
         model = model.to(device)
 
-    # ========================================== TRAIN SHOT ===========================================
-    print(f"\n Using SHOT (MAE + Latent Distillation + Sequence Projection) training method for fusion blocks")
-    match args.mae_modalities:
-        case "all":
-            print(f"requiring mae from all modalities.")
-            mae_modalities = [starting_modality, newmod]
-        case "newmod":
-            print(f"requiring mae from newmod only.")
-            mae_modalities = [newmod]
+    # ========================================== TRAIN Delulu ===========================================
+    print(f"\n Using Delulu (MAE + Latent Distillation + Sequence Projection) training method for fusion blocks")
+    mae_modalities = []
+    if "mae" in args.active_losses:
+        match args.mae_modalities:
+            case "all":
+                print(f"requiring mae from all modalities.")
+                mae_modalities = [starting_modality, newmod]
+            case "newmod":
+                print(f"requiring mae from newmod only.")
+                mae_modalities = [newmod]
 
     trainable_total, _, best_checkpoint_summary, teacher_baselines = train_shot(
         model=model,
         train_loader=train2_loader,
         device=device,
         args=args,
+        starting_modality=starting_modality,
+        new_modality=newmod,
         mae_modalities=mae_modalities,
         latent_reconstruct_modalities=[starting_modality],
         modality_bands_dict=modality_bands_dict,
@@ -215,12 +212,13 @@ def main():
         'model_state_dict': model.state_dict(),
         'config': model.get_config(),
     }
-    torch.save(checkpoint_data, checkpoint_shotete)
-    print(f"SHOT checkpoint saved to: {checkpoint_shotete}")
+    # torch.save(checkpoint_data, checkpoint_shotete)
+    # print(f"SHOT checkpoint saved to: {checkpoint_shotete}")
 
     # Log results to CSV
     filename = args.results_csv
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    if d := os.path.dirname(filename):
+        os.makedirs(d, exist_ok=True)
     file_exists = os.path.isfile(filename)
     embed_dim = evan.embed_dim
     model_arch = {384: 'evan_small', 768: 'evan_base', 1024: 'evan_large'}.get(embed_dim, f'evan_d{embed_dim}')
@@ -298,10 +296,11 @@ python -u shot_ete.py \
     --dataset benv2 \
     --new_mod_group s1 \
     --checkpoint_name benv2_s2_to_s1 \
-    --stage0_checkpoint checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt \
+    --stage0_checkpoint checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt \
     --epochs 4 \
     --eval_every_n_epochs 1 \
     --batch_size 32 \
     --results_csv res/shot_ete_benv2.csv \
+    --active_losses latent prefusion distill ce \
     --labeled_frequency 0.3
 """

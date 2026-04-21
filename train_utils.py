@@ -322,6 +322,7 @@ class Trainer:
         kl_type: str = 'kd',
         best_checkpoint_path: str | None = None,
         student_modalities: tuple | None = None,
+        student_pseudo_modalities: list | None = None,
     ) -> tuple:
         """
         Knowledge distillation from teacher (teacher_modality) to student.
@@ -364,6 +365,7 @@ class Trainer:
         best_test_metric = 0.0
         best_epoch = 0
         best_agreement = -1.0
+        test_loss = test_metric = 0.0
 
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         global_step = 0
@@ -377,20 +379,20 @@ class Trainer:
             segmentation=segmentation,
             num_classes=num_classes,
             ignore_index=ignore_index,
+            pseudo_modalities=student_pseudo_modalities,
         )
 
         train_metric = test_metric = 0.0
 
         for epoch in range(num_epochs):
             self.model.train()
-            accum.reset()
             train_loss = 0.0
 
             pbar = tqdm(train_loader,
                         desc=f"Distill Epoch {epoch+1}/{num_epochs} [{student_label}]")
             for batch in pbar:
-                labels = batch[label_key].to(self.device)
-                if multilabel:
+                labels = batch[label_key].to(self.device) if alpha < 1.0 or distillation_mode == 'with_guidance' else None
+                if multilabel and labels is not None:
                     labels = labels.float()
 
                 student_input = create_multimodal_batch(
@@ -422,56 +424,48 @@ class Trainer:
                 else:
                     with torch.no_grad():
                         teacher_logits = teacher_model(teacher_input)
-                    student_logits = self.model(student_input)
+                    student_logits = self.model(student_input, pseudo_modalities=student_pseudo_modalities)
                     distill_loss = distillation_loss(
                         student_logits, teacher_logits, temperature,
                         kl_type=kl_type, task_type=tc.task_type,
                     )
                     if distillation_mode == 'with_guidance':
-                        hard_loss = ce_criterion(student_logits, labels)
-                        loss = 0.5 * distill_loss + 0.5 * hard_loss
+                        raise NotImplementedError("not implemented with guidance")
                     elif alpha < 1.0:
-                        hard_loss = ce_criterion(student_logits, labels)
-                        loss = alpha * distill_loss + (1 - alpha) * hard_loss
+                        raise NotImplementedError("not implemented with guidance")
                     else:
                         loss = distill_loss
 
                 grad_norm = self._step(loss, trainable_params)
-                accum.update(student_logits.detach(), labels.detach())
                 train_loss += loss.item()
 
-                pbar_postfix = {'loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'}
-                if not segmentation and not multilabel:
-                    pbar_postfix['acc'] = f'{accum.compute():.2f}%'
-                pbar.set_postfix(pbar_postfix)
+                pbar.set_postfix({'loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'})
 
                 self._log_step(loss.item(), float(grad_norm), global_step)
                 global_step += 1
 
             train_loss /= len(train_loader)
-            train_metric = accum.compute()
             scheduler.step()
 
-            test_loss, test_metric = evaluate(
-                self.model, test_loader, ce_criterion, self.device, **eval_kwargs
-            )
-
             metric_name = accum.metric_name
-            if (epoch % 8 == 1) or (epoch + 1 == num_epochs):
-                print(f"  Train ({student_label}): Loss={train_loss:.4f}, {metric_name}={train_metric:.2f}%")
+            should_eval = (epoch % 2 == 0) or (epoch + 1 == num_epochs)
+            if should_eval:
+                test_loss, test_metric = evaluate(
+                    self.model, test_loader, ce_criterion, self.device, **eval_kwargs
+                )
+                best_test_metric = max(best_test_metric, test_metric)
+                best_epoch = epoch + 1
+                print(f"  Train ({student_label}): Loss={train_loss:.4f}")
                 print(f"  Test  ({student_label}): Loss={test_loss:.4f}, {metric_name}={test_metric:.2f}%")
 
-            if test_metric > best_test_metric:
-                best_test_metric = test_metric
-                best_epoch = epoch + 1
-
             # Val checkpoint: teacher-agreement on val2 (unlabeled)
-            if val2_loader is not None:
+            if should_eval and val2_loader is not None:
                 agreement = _compute_teacher_agreement(
                     self.model, teacher_model, val2_loader, self.device,
                     student_modality_bands_dict, teacher_modality_bands_dict,
                     student_modalities, teacher_modality, label_key,
                     segmentation=segmentation, ignore_index=ignore_index,
+                    student_pseudo_modalities=student_pseudo_modalities,
                 )
                 print(f"  Val2 teacher-agreement: {agreement:.2f}%")
                 if best_checkpoint_path is not None and agreement > best_agreement:
@@ -484,11 +478,12 @@ class Trainer:
                         f'{self.wandb_prefix}/epoch': epoch + 1,
                     })
 
-            self._log_epoch(epoch, train_loss, train_metric, metric_name,
-                            self.optimizer.param_groups[0]['lr'],
-                            test_loss, test_metric)
+            if should_eval:
+                self._log_epoch(epoch, train_loss, 0.0, metric_name,
+                                self.optimizer.param_groups[0]['lr'],
+                                test_loss, test_metric)
 
-        return train_metric, test_metric, best_test_metric, best_epoch, best_agreement
+        return 0.0, test_metric, best_test_metric, best_epoch, best_agreement
 
     # ------------------------------------------------------------------
     # Linear probe / LP-FT (replaces train_classifier_with_frozen_backbone body)
@@ -1188,6 +1183,7 @@ def _compute_teacher_agreement(
     student_modalities, teacher_modality, label_key,
     segmentation: bool = False,
     ignore_index: int = -100,
+    student_pseudo_modalities=None,
 ) -> float:
     """
     Compute fraction of val2 samples where student prediction matches teacher prediction.
@@ -1215,7 +1211,7 @@ def _compute_teacher_agreement(
             )
             teacher_input = {k: v.to(device) for k, v in teacher_input.items()}
 
-            student_logits = student_model(student_input)
+            student_logits = student_model(student_input, pseudo_modalities=student_pseudo_modalities)
             teacher_logits = teacher_model(teacher_input)
 
             if segmentation:
@@ -1413,7 +1409,7 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
             modal_input = {k: v.to(device) for k, v in modal_input.items()}
 
             if pseudo_modalities is not None:
-                outputs = model(modal_input, pseudo_modalities=pseudo_modalities, intermediate_projectors=intermediate_projectors)
+                outputs = model(modal_input, pseudo_modalities=pseudo_modalities)
             else:
                 outputs = model(modal_input)
 

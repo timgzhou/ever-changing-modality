@@ -328,14 +328,14 @@ def get_bigearthnet_loaders(
 
     timeout = 120 if num_workers > 0 else 0
     train1_loader = DataLoader(
-        train1_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, timeout=timeout
+        train1_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, timeout=timeout
     )
-    val1_loader = DataLoader(val1_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    val1_loader = DataLoader(val1_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     train2_loader = DataLoader(
-        train2_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, timeout=timeout
+        train2_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, timeout=timeout
     )
-    val2_loader = DataLoader(val2_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-    test_loader = DataLoader(test_full, batch_size=batch_size, shuffle=False, num_workers=0)
+    val2_loader = DataLoader(val2_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    test_loader = DataLoader(test_full, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
     # Build modality_slices (S2 starts at 0, S1 starts at 12)
     modality_slices = {

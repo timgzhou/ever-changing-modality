@@ -564,44 +564,6 @@ def get_default_transform(target_size=224):
         )
     )
 
-
-def get_loaders(bs=32,nw=4):
-    bands_full = tuple(ALL_BAND_NAMES)
-    resize_transform = DictTransform(transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True))
-
-    train_dataset_full = EuroSAT(
-        root='datasets',
-        split='train',
-        bands=bands_full,
-        transforms=resize_transform,
-        download=True,
-        checksum=False
-    )
-
-    train1_indices = load_split_indices('datasets/eurosat-train1.txt', train_dataset_full)
-    train1_dataset = Subset(train_dataset_full, train1_indices)
-    train2_indices = load_split_indices('datasets/eurosat-train2.txt', train_dataset_full)
-    train2_dataset = Subset(train_dataset_full, train2_indices)
-
-    test_dataset_full = EuroSAT(
-        root='datasets',
-        split='test',
-        bands=bands_full,
-        transforms=resize_transform,
-        download=True,
-        checksum=False
-    )
-
-    print(f"Loaded {len(train1_indices)} and {len(train2_indices)} samples from train1 and train2 splits.")
-    print(f"Test samples: {len(test_dataset_full)}")
-
-    # Create dataloaders
-    train1_loader = DataLoader(train1_dataset, batch_size=bs, shuffle=True, num_workers=nw)
-    train2_loader = DataLoader(train2_dataset, batch_size=bs, shuffle=True, num_workers=nw)
-    test_loader = DataLoader(test_dataset_full, batch_size=bs, shuffle=False, num_workers=nw)
-    return train1_loader, train2_loader, test_loader
-
-
 def get_loaders_with_val(bs=32, nw=4, seed=42, raw_pixels=False):
     """
     Get dataloaders with validation splits.
@@ -687,9 +649,9 @@ def get_loaders_with_val(bs=32, nw=4, seed=42, raw_pixels=False):
     print(f"Test samples: {len(test_dataset_full)}")
 
     # Create dataloaders
-    train1_loader = DataLoader(train1_dataset, batch_size=bs, shuffle=True, num_workers=nw)
-    val1_loader = DataLoader(val1_dataset, batch_size=bs, shuffle=False, num_workers=nw)
-    train2_loader = DataLoader(train2_dataset, batch_size=bs, shuffle=True, num_workers=nw)
-    val2_loader = DataLoader(val2_dataset, batch_size=bs, shuffle=False, num_workers=nw)
-    test_loader = DataLoader(test_dataset_full, batch_size=bs, shuffle=False, num_workers=nw)
+    train1_loader = DataLoader(train1_dataset, batch_size=bs, shuffle=True, num_workers=nw, pin_memory=True)
+    val1_loader = DataLoader(val1_dataset, batch_size=bs, shuffle=False, num_workers=nw, pin_memory=True)
+    train2_loader = DataLoader(train2_dataset, batch_size=bs, shuffle=True, num_workers=nw, pin_memory=True)
+    val2_loader = DataLoader(val2_dataset, batch_size=bs, shuffle=False, num_workers=nw, pin_memory=True)
+    test_loader = DataLoader(test_dataset_full, batch_size=bs, shuffle=False, num_workers=nw, pin_memory=True)
     return train1_loader, val1_loader, train2_loader, val2_loader, test_loader

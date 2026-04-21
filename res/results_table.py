@@ -1,91 +1,85 @@
 """Unified per-dataset result tables.
 
-Table 1 (SFT): rows = method × init × model size, cols = modality
-Table 2 (Distillation/MKE): rows = method × model, cols = teacher_mod → student_mod
+Table A (SFT baseline): rows = init × model size, cols = modality
+Table B (Transfer): one row per (dataset, starting_mod → new_mod),
+  cols = random-init SFT | DINO SFT | KD | MTD | Delulu (ours) | labeled SFT (oracle) | Panopticon | OlmoEarth
 
 Run from repo root:
     python res/results_table.py
 """
 
 import os
+import glob
+import numpy as np
 import pandas as pd
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-# evan model_type → display label
 EVAN_MODEL_LABELS = {
     'evan_small': 'ViT-S',
     'evan_base':  'ViT-B',
     'evan_large': 'ViT-L',
 }
 
-# RSFM model string → (init_label, model_label)
-# model strings in rsfm_results.csv: panopticon, olmoearth, olmoearth-large,
-# dinov3-vitb-lvd, dinov3-vitl-lvd, dinov3-vitl-sat, etc.
+DATASET_NAMES = {
+    'benv2':   'reBEN (Multi-Label Classification, mAP)',
+    'dfc2020': 'DFC2020 (Semantic Segmentation, mIoU)',
+    'eurosat': 'EuroSAT (Classification, Acc)',
+}
+
+DATASETS = ['benv2', 'dfc2020', 'eurosat']
+
+# Valid transfers per dataset for the Transfer table
+VALID_TRANSFERS = {
+    'benv2':   [('s2_rgb', 's1'), ('s2_rgb', 's2_norgb'), ('s1', 's2'), ('s2', 's1')],
+    'dfc2020': [('s2_rgb', 's1'), ('s2_rgb', 's2_norgb'), ('s1', 's2'), ('s2', 's1')],
+    'eurosat': [('rgb', 'nir'), ('rgb', 'vre'), ('swir', 'nir'), ('swir', 'rgb'), ('swir', 'vre'), ('vre', 'nir'), ('vre', 'rgb')],
+}
+
+# Display names for modalities
+MOD_DISPLAY = {
+    's2_rgb': 'S2-RGB', 's2': 'S2', 's1': 'S1',
+    's2_norgb': 'S2-noRGB', 'rgb': 'RGB', 'vre': 'VRE',
+    'nir': 'NIR', 'swir': 'SWIR',
+}
+
+# SFT table: modality columns per dataset
+SFT_COLUMNS = {
+    'benv2':   {'S2-RGB': ['s2_rgb'], 'S2': ['s2'], 'S1': ['s1'], 'S2+S1': ['s2+s1', 's1+s2', 's2s1']},
+    'dfc2020': {'S2-RGB': ['s2_rgb'], 'S2': ['s2'], 'S1': ['s1'], 'S2+S1': ['s2+s1', 's1+s2', 's2s1']},
+    'eurosat': {'RGB': ['rgb'], 'VRE': ['vre'], 'SWIR': ['swir'], 'S2': ['s2']},
+}
+
+# SFT row order: (init_group, model_label)
+SFT_ROW_ORDER = [
+    ('Random init', 'ViT-S'),
+    ('Random init', 'ViT-B'),
+    ('Random init', 'ViT-L'),
+    ('DINO v3',    'ViT-S'),
+    ('DINO v3',    'ViT-B'),
+    ('DINO v3',    'ViT-L'),
+    ('Panopticon', 'Panopticon-B'),
+    ('OlmoEarth',  'OlmoEarth-B'),
+    ('OlmoEarth',  'OlmoEarth-L'),
+]
+
+
 def _rsfm_model_info(model_str):
-    """Return (init_group, model_label) matching ROW_ORDER init_group names."""
     m = model_str.lower()
     if 'panopticon' in m:
         return 'Panopticon', 'Panopticon-B'
     if 'olmoearth' in m:
         size = 'OlmoEarth-L' if 'large' in m else 'OlmoEarth-B'
-        return 'Olmoearth', size
-    if 'dinov3' in m or 'dino' in m:
+        return 'OlmoEarth', size
+    if 'dino' in m:
         if 'vitl' in m:
             variant = 'SAT' if 'sat' in m else 'LVD'
             return 'DINO v3', f'DINO-L {variant}'
-        if 'vitb' in m:
-            variant = 'SAT' if 'sat' in m else 'LVD'
-            return 'DINO v3', f'DINO-B {variant}'
+        variant = 'SAT' if 'sat' in m else 'LVD'
+        return 'DINO v3', f'DINO-B {variant}'
     return 'Pretrained', model_str
-
-
-# Per-dataset: display column name → modality aliases in CSVs
-COLUMNS = {
-    'benv2': {
-        'S2-RGB': ['s2_rgb'],
-        'S2':     ['s2'],
-        'S1':     ['s1'],
-        'S2+S1':  ['s2+s1', 's1+s2', 's2s1', 's1s2'],
-    },
-    'dfc2020': {
-        'S2-RGB': ['s2_rgb'],
-        'S2':     ['s2'],
-        'S1':     ['s1'],
-        'S2+S1':  ['s2+s1', 's1+s2', 's2s1', 's1s2'],
-    },
-    'eurosat': {
-        'RGB':  ['rgb'],
-        'VRE':  ['vre'],
-        'SWIR': ['swir'],
-        'S2':   ['s2'],
-    },
-}
-
-DATASETS = list(COLUMNS.keys())
-
-DATASET_NAMES = {
-    'benv2':   'reBEN (Multi Label Classification)',
-    'dfc2020': 'DFC2020 (Semantic Segmentation)',
-    'eurosat': 'EuroSAT (Classification)',
-}
-
-# Row order: (section, init_group, model_label)
-# init_group is the merged row-group label (printed only on first row of group).
-# The grouping matches the paper table: Random init / DINO v3 / Panopticon / Olmoearth.
-ROW_ORDER = [
-    ('SFT', 'Random init', 'ViT-S'),
-    ('SFT', 'Random init', 'ViT-B'),
-    ('SFT', 'Random init', 'ViT-L'),
-    ('SFT', 'DINO v3',    'ViT-S'),
-    ('SFT', 'DINO v3',    'ViT-B'),
-    ('SFT', 'DINO v3',    'ViT-L'),
-    ('SFT', 'Panopticon', 'Panopticon-B'),
-    ('SFT', 'Olmoearth',  'OlmoEarth-B'),
-    ('SFT', 'Olmoearth',  'OlmoEarth-L'),
-]
 
 
 # ---------------------------------------------------------------------------
@@ -96,499 +90,558 @@ def _read_csv(path):
     if not os.path.isfile(path):
         return None
     df = pd.read_csv(path)
+    # Drop header-repeat rows (CSVs sometimes have repeated header rows)
+    if 'dataset' in df.columns:
+        df = df[df['dataset'] != 'dataset']
     return df if not df.empty else None
 
 
-def _best(df, group_cols, score_col):
+def _fmt(val, decimals=2):
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return '--'
+    return f'{float(val):.{decimals}f}'
+
+
+def _best_val_test(df, group_cols, val_col, test_col):
+    """For each group, pick row with best val_col, return test_col value."""
     return (
-        df.sort_values(score_col, ascending=False)
+        df.sort_values(val_col, ascending=False)
         .groupby(group_cols, as_index=False)
         .first()
-    )
+    )[group_cols + [test_col]]
 
 
-def _top3(df, group_cols, score_col):
-    """Return top-3 rows per group by score_col (descending)."""
-    return (
-        df.sort_values(score_col, ascending=False)
-        .groupby(group_cols, as_index=False)
-        .head(3)
-    )
-
-
-def _params_str(params):
-    """Format trainable_params as e.g. '87M'."""
-    try:
-        p = int(params)
-        if p >= 1_000_000:
-            return f'{round(p / 1_000_000)}M'
-        if p >= 1_000:
-            return f'{round(p / 1_000)}K'
-        return str(p)
-    except (TypeError, ValueError):
-        return ''
+def _avg_test(df, group_cols, test_col):
+    """Average test_col over HP runs per group (no val selection available)."""
+    return df.groupby(group_cols, as_index=False)[test_col].mean()
 
 
 # ---------------------------------------------------------------------------
-# Loaders — each returns a list of dicts:
-#   {dataset, col_aliases, method, init, model_label, params, score}
+# SFT table loaders
 # ---------------------------------------------------------------------------
 
-def load_sft():
+def load_sft_records():
+    """Returns list of dicts: {dataset, modality_aliases, init_group, model_label, test_metric}"""
     records = []
+
+    # train_sft (DINO-init only so far)
     for dataset in DATASETS:
         df = _read_csv(f'res/train_sft/{dataset}.csv')
         if df is None:
             continue
-        select_col = 'val_metric' if 'val_metric' in df.columns else 'test_metric'
-        top3 = _top3(df, ['modality', 'model_type', 'dino_init'], select_col)
-        for (modality, model_type, dino_init), grp in top3.groupby(['modality', 'model_type', 'dino_init']):
+        df['val_metric'] = pd.to_numeric(df['val_metric'], errors='coerce')
+        df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
+        df['dino_init'] = df['dino_init'].astype(str).str.lower().map(
+            {'true': True, 'false': False, '1': True, '0': False})
+        for (modality, model_type, dino_init), grp in df.groupby(['modality', 'model_type', 'dino_init']):
+            best = grp.sort_values('val_metric', ascending=False).iloc[0]
             model_label = EVAN_MODEL_LABELS.get(model_type, model_type)
-            init_group  = 'DINO v3' if dino_init else 'Random init'
+            init_group = 'DINO v3' if dino_init else 'Random init'
             records.append(dict(
                 dataset=dataset,
                 col_aliases=[modality],
-                init_group=init_group, model_label=model_label,
-                params=grp['trainable_params'].iloc[0],
-                scores=grp['test_metric'].tolist(),
+                init_group=init_group,
+                model_label=model_label,
+                test_metric=best['test_metric'],
             ))
-    return records
 
-
-def load_rsfm():
+    # rsfm (panopticon, olmoearth — exclude dino which is in train_sft)
     df = _read_csv('res/rsfm/rsfm_results.csv')
-    if df is None:
-        return []
-    df = df[df['train_mode'] == 'fft']
-    # Exclude DINO v3 models — those come from train_sft instead
-    df = df[~df['model'].str.lower().str.contains('dino')]
-    # Select top-3 checkpoints by val_metric (HP selection), report their test_metrics
-    select_col = 'val_metric' if 'val_metric' in df.columns else 'test_metric'
-    top3 = _top3(df, ['dataset', 'modality', 'model'], select_col)
-    records = []
-    for (dataset, modality, model), grp in top3.groupby(['dataset', 'modality', 'model']):
-        if dataset not in COLUMNS:
-            continue
-        init_group, model_label = _rsfm_model_info(model)
-        records.append(dict(
-            dataset=dataset,
-            col_aliases=[modality],
-            init_group=init_group, model_label=model_label,
-            params=grp['trainable_params'].iloc[0],
-            scores=grp['test_metric'].tolist(),
-        ))
-    return records
-
-
-# ---------------------------------------------------------------------------
-# Transfer table: teacher mod → student mod sub-columns
-# Each entry: (teacher_display, student_display, student_aliases)
-# Distillation student = single other modality
-# MKE student = strict superset (teacher + others), aliases are '+'-joined sorted sets
-# ---------------------------------------------------------------------------
-
-TRANSFER_COLS = {
-    'benv2': {
-        # teacher_display → list of (student_display, [csv_aliases])
-        'S2-RGB': [
-            ('S2',    ['s2']),
-            ('S1',    ['s1']),
-            ('+S2',   ['s2_rgb+s2', 's2+s2_rgb']),
-            ('+S1',   ['s2_rgb+s1', 's1+s2_rgb']),
-            ('S2+S1', ['s2+s1', 's1+s2']),
-            ('All',   ['s2_rgb+s2+s1', 's2+s2_rgb+s1', 's1+s2+s2_rgb']),
-        ],
-        'S2': [
-            ('S1',   ['s1']),
-            ('+S1',  ['s2+s1', 's1+s2']),
-            ('All',  ['s2+s2_rgb+s1', 's2+s1+s2_rgb']),
-        ],
-        'S1': [
-            ('S2',   ['s2']),
-            ('+S2',  ['s1+s2', 's2+s1']),
-            ('All',  ['s1+s2_rgb+s2', 's1+s2+s2_rgb']),
-        ],
-    },
-    'dfc2020': {
-        'S2-RGB': [
-            ('S2',    ['s2']),
-            ('S1',    ['s1']),
-            ('+S2',   ['s2_rgb+s2', 's2+s2_rgb']),
-            ('+S1',   ['s2_rgb+s1', 's1+s2_rgb']),
-            ('S2+S1', ['s2+s1', 's1+s2']),
-            ('All',   ['s2_rgb+s2+s1', 's2+s2_rgb+s1']),
-        ],
-        'S2': [
-            ('S1',   ['s1']),
-            ('+S1',  ['s2+s1', 's1+s2']),
-            ('All',  ['s2+s2_rgb+s1', 's2+s1+s2_rgb']),
-        ],
-        'S1': [
-            ('S2',   ['s2']),
-            ('+S2',  ['s1+s2', 's2+s1']),
-            ('All',  ['s1+s2_rgb+s2', 's1+s2+s2_rgb']),
-        ],
-    },
-    'eurosat': {
-        'RGB': [
-            ('VRE',      ['vre']),
-            ('NIR',      ['nir']),
-            ('SWIR',     ['swir']),
-            ('+VRE',     ['rgb+vre', 'vre+rgb']),
-            ('+NIR',     ['rgb+nir', 'nir+rgb']),
-            ('+SWIR',    ['rgb+swir', 'swir+rgb']),
-            ('+VRE+NIR', ['rgb+vre+nir']),
-            ('All',      ['rgb+vre+nir+swir']),
-        ],
-        'VRE': [
-            ('RGB',      ['rgb']),
-            ('NIR',      ['nir']),
-            ('SWIR',     ['swir']),
-            ('+RGB',     ['vre+rgb', 'rgb+vre']),
-            ('+NIR',     ['vre+nir', 'nir+vre']),
-            ('+SWIR',    ['vre+swir', 'swir+vre']),
-            ('All',      ['vre+rgb+nir+swir']),
-        ],
-        'NIR': [
-            ('RGB',      ['rgb']),
-            ('VRE',      ['vre']),
-            ('SWIR',     ['swir']),
-            ('+RGB',     ['nir+rgb', 'rgb+nir']),
-            ('+VRE',     ['nir+vre', 'vre+nir']),
-            ('+SWIR',    ['nir+swir', 'swir+nir']),
-            ('All',      ['nir+rgb+vre+swir']),
-        ],
-        'SWIR': [
-            ('RGB',      ['rgb']),
-            ('VRE',      ['vre']),
-            ('NIR',      ['nir']),
-            ('+RGB',     ['swir+rgb', 'rgb+swir']),
-            ('+VRE',     ['swir+vre', 'vre+swir']),
-            ('+NIR',     ['swir+nir', 'nir+swir']),
-            ('All',      ['swir+rgb+vre+nir']),
-        ],
-    },
-}
-
-TRANSFER_ROW_ORDER = [
-    ('Distillation', 'ViT-S'),
-    ('Distillation', 'ViT-B'),
-    ('Distillation', 'ViT-L'),
-    ('MKE',          'ViT-S'),
-    ('MKE',          'ViT-B'),
-    ('MKE',          'ViT-L'),
-]
-
-
-# ---------------------------------------------------------------------------
-# Loaders for transfer table
-# ---------------------------------------------------------------------------
-
-def _norm_modset(s):
-    """Canonicalise a '+'-joined modality string: sort parts, lower, strip."""
-    return '+'.join(sorted(p.strip().lower() for p in s.split('+')))
-
-
-def load_distillation(dataset):
-    """
-    Returns list of dicts:
-      {model_label, teacher_aliases, student_aliases, score}
-    teacher_aliases / student_aliases: lists of canonical modality strings
-    """
-    records = []
-    base = f'res/baselines/distillation/{dataset}'
-    if not os.path.isdir(base):
-        return records
-
-    # benv2 has per-model subdirs; dfc2020 does not
-    subdirs = []
-    for entry in os.listdir(base):
-        full = os.path.join(base, entry)
-        if os.path.isdir(full):
-            subdirs.append((entry, full))   # entry = model name or whatever
-    if not subdirs:
-        subdirs = [('', base)]
-
-    for subdir_name, subdir_path in subdirs:
-        model_label = EVAN_MODEL_LABELS.get(subdir_name, subdir_name if subdir_name else None)
-        for fname in os.listdir(subdir_path):
-            if not fname.endswith('.csv'):
+    if df is not None:
+        df = df[df['train_mode'] == 'fft']
+        df = df[~df['model'].str.lower().str.contains('dino')]
+        df['val_metric'] = pd.to_numeric(df['val_metric'], errors='coerce')
+        df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
+        for (dataset, modality, model), grp in df.groupby(['dataset', 'modality', 'model']):
+            if dataset not in DATASETS:
                 continue
-            df = _read_csv(os.path.join(subdir_path, fname))
-            if df is None:
-                continue
-            # Use best_test_metric(oracle) if present, else test_metric
-            score_col = 'best_test_metric(oracle)' if 'best_test_metric(oracle)' in df.columns else 'test_metric'
-            best = _best(df, ['model_type', 'teacher_modality', 'student_modality'], score_col)
-            for _, row in best.iterrows():
-                ml = EVAN_MODEL_LABELS.get(row['model_type'], row['model_type'])
-                if model_label and ml != model_label:
-                    continue  # subdir model doesn't match row
-                records.append(dict(
-                    model_label=ml,
-                    teacher_aliases=[_norm_modset(row['teacher_modality'])],
-                    student_aliases=[_norm_modset(row['student_modality'])],
-                    score=row[score_col],
-                ))
+            best = grp.sort_values('val_metric', ascending=False).iloc[0]
+            init_group, model_label = _rsfm_model_info(model)
+            records.append(dict(
+                dataset=dataset,
+                col_aliases=[modality],
+                init_group=init_group,
+                model_label=model_label,
+                test_metric=best['test_metric'],
+            ))
+
     return records
 
 
-def load_mke(dataset):
-    """
-    Returns list of dicts:
-      {model_label, teacher_aliases, student_aliases, score}
-    student_aliases includes the teacher (strict superset).
-    """
-    path = f'res/baselines/mke/{dataset}.csv'
-    df = _read_csv(path)
-    if df is None:
-        return []
-    score_col = 'student_best_test_metric'
-    best = _best(df, ['model_type', 'teacher_modality', 'student_modalities'], score_col)
-    records = []
-    for _, row in best.iterrows():
-        ml = EVAN_MODEL_LABELS.get(row['model_type'], row['model_type'])
-        # student_modalities stored as e.g. "s2+s1" or "s2 s1" — normalise
-        raw_stud = row['student_modalities'].replace(' ', '+')
-        records.append(dict(
-            model_label=ml,
-            teacher_aliases=[_norm_modset(row['teacher_modality'])],
-            student_aliases=[_norm_modset(raw_stud)],
-            score=row[score_col],
-        ))
-    return records
-
-
-# ---------------------------------------------------------------------------
-# Build and print transfer table
-# ---------------------------------------------------------------------------
-
-def build_transfer_table(dataset, distill_records, mke_records):
-    teacher_defs = TRANSFER_COLS.get(dataset, {})
-    if not teacher_defs:
-        return None
-
-    # Build flat column list: (teacher_display, student_display)
-    col_list = []
-    for t_disp, student_cols in teacher_defs.items():
-        for s_disp, _ in student_cols:
-            col_list.append((t_disp, s_disp))
-
-    def _lookup(records, method_label):
-        # score_map: (method, model, teacher_display, student_display) → score
-        score_map = {}
-        for rec in records:
-            ml = rec['model_label']
-            for t_disp, student_cols in teacher_defs.items():
-                t_aliases_display = COLUMNS[dataset].get(t_disp, [t_disp.lower()])
-                t_aliases_norm = [_norm_modset(a) for a in t_aliases_display]
-                if not any(a in rec['teacher_aliases'] for a in t_aliases_norm):
-                    continue
-                for s_disp, s_aliases in student_cols:
-                    s_aliases_norm = [_norm_modset(a) for a in s_aliases]
-                    if not any(a in rec['student_aliases'] for a in s_aliases_norm):
-                        continue
-                    key = (method_label, ml, t_disp, s_disp)
-                    prev = score_map.get(key)
-                    if prev is None or rec['score'] > prev:
-                        score_map[key] = rec['score']
-        return score_map
-
-    distill_map = _lookup(distill_records, 'Distillation')
-    mke_map     = _lookup(mke_records,     'MKE')
-
-    # MKE only valid for strict superset student mods (student contains '→' and teacher)
-    # Already enforced by data, but also by the TRANSFER_COLS structure (supersets listed)
-
-    # Use unique internal keys to avoid collisions (same student label under different teachers),
-    # then rename to student-only display labels for printing.
-    col_keys = []      # internal df column names
-    col_display = []   # display labels (student only)
-    for t_disp, student_cols in teacher_defs.items():
-        for s_disp, _ in student_cols:
-            col_keys.append(f'{t_disp}||{s_disp}')
-            col_display.append(s_disp)
-
-    rows = []
-    prev_method = None
-    for method, model_label in TRANSFER_ROW_ORDER:
-        score_map = distill_map if method == 'Distillation' else mke_map
-        row_vals = {(t, s): score_map.get((method, model_label, t, s)) for t, s in col_list}
-        if all(v is None for v in row_vals.values()):
-            continue
-        row = {
-            'Method': method if method != prev_method else '',
-            'Model':  model_label,
-        }
-        for (t_disp, s_disp), ck in zip(col_list, col_keys):
-            v = row_vals[(t_disp, s_disp)]
-            row[ck] = f'{v:.2f}' if v is not None else ''
-        rows.append(row)
-        prev_method = method
-
-    if not rows:
-        return None
-
-    df = pd.DataFrame(rows)
-    # Rename internal keys to student-only display labels
-    rename = {'Method': 'Method', 'Model': 'Model'}
-    rename.update(dict(zip(col_keys, col_display)))
-    df = df.rename(columns=rename)
-    # col_keys / col_display are returned so the banner knows group widths
-    return df, col_keys, col_display
-
-
-def _print_transfer_table(dataset, df, col_keys, col_display):
-    """Print teacher-group banner (centered, with | separators) then the data table."""
-    teacher_defs = TRANSFER_COLS[dataset]
-    table_str = df.to_string(index=False)
-    lines = table_str.split('\n')
-    header_row = lines[0]
-
-    # Find the start position of the first student column in the header
-    first_col = col_display[0]
-    prefix_len = header_row.index(first_col)
-    prefix = ' ' * prefix_len
-
-    # For each teacher group, find the span [start, end) in the header string.
-    # We scan left-to-right through col_display to find each label's position
-    # strictly after the previous one, avoiding false matches for repeated names.
-    idx = 0
-    groups = []
-    search_from = prefix_len
-    for t_disp, student_cols in teacher_defs.items():
-        n = len(student_cols)
-        sub_labels = col_display[idx:idx + n]
-        start = header_row.index(sub_labels[0], search_from)
-        pos = start
-        for lbl in sub_labels:
-            pos = header_row.index(lbl, pos)
-            pos += len(lbl)
-        end = pos
-        groups.append((t_disp, start, end))
-        search_from = end
-        idx += n
-
-    # Build banner line: centered teacher label within block, | between groups
-    banner = prefix
-    for i, (t_disp, start, end) in enumerate(groups):
-        block_w = end - start
-        label = f' {t_disp} '
-        centered = label.center(block_w)
-        if i < len(groups) - 1:
-            banner += centered + '|'
-        else:
-            banner += centered
-
-    # Build separator line (dashes under each block, | between)
-    sep = ' ' * prefix_len
-    for i, (_, start, end) in enumerate(groups):
-        block_w = end - start
-        if i < len(groups) - 1:
-            sep += '-' * block_w + '+'
-        else:
-            sep += '-' * block_w
-
-    # Insert | separators into data rows at group boundaries
-    def _insert_seps(line):
-        out = line
-        offset = 0
-        for i, (_, start, end) in enumerate(groups[:-1]):
-            pos = end + offset
-            out = out[:pos] + '|' + out[pos:]
-            offset += 1
-        return out
-
-    print(banner)
-    print(sep)
-    for line in lines:
-        print(_insert_seps(line))
-
-
-# ---------------------------------------------------------------------------
-# Build and print tables
-# ---------------------------------------------------------------------------
-
-def _fmt_scores(scores):
-    """Format a list of test scores as 'mean±std' (1 decimal place)."""
-    import numpy as np
-    if not scores:
-        return ''
-    if len(scores) == 1:
-        return f'{scores[0]:.1f}'
-    return f'{float(np.mean(scores)):.1f}±{float(np.std(scores)):.1f}'
-
-
-def build_table(dataset, all_records):
-    col_defs  = COLUMNS[dataset]
+def build_sft_table(dataset, records):
+    col_defs = SFT_COLUMNS[dataset]
     col_names = list(col_defs.keys())
 
-    # lookup: (init_group, model_label, col_name) → list of test scores
-    scores_lookup = {}
-    params_lookup = {}
-
-    for rec in all_records:
+    scores = {}
+    for rec in records:
         if rec['dataset'] != dataset:
             continue
         key = (rec['init_group'], rec['model_label'])
         for col_name, aliases in col_defs.items():
             if any(a in rec['col_aliases'] for a in aliases):
-                lk = (*key, col_name)
-                scores_lookup.setdefault(lk, []).extend(rec['scores'])
-                params_lookup[key] = rec.get('params')
+                scores[(key, col_name)] = rec['test_metric']
 
     rows = []
-    prev_section    = None
-    prev_init_group = None
-    for section, init_group, model_label in ROW_ORDER:
-        key      = (init_group, model_label)
-        row_vals = {col: scores_lookup.get((*key, col)) for col in col_names}
+    prev_init = None
+    for init_group, model_label in SFT_ROW_ORDER:
+        key = (init_group, model_label)
+        row_vals = {col: scores.get((key, col)) for col in col_names}
         if all(v is None for v in row_vals.values()):
             continue
-
-        params = params_lookup.get(key)
         row = {
-            'Section': section    if section    != prev_section    else '',
-            'Init':    init_group if init_group != prev_init_group else '',
-            'Model':   model_label,
-            'Params':  _params_str(params),
+            'Init':  init_group if init_group != prev_init else '',
+            'Model': model_label,
         }
         for col in col_names:
-            row[col] = _fmt_scores(row_vals[col])
+            row[col] = _fmt(row_vals[col])
         rows.append(row)
-        prev_section    = section
-        prev_init_group = init_group
+        prev_init = init_group
 
     return pd.DataFrame(rows) if rows else None
 
 
+# ---------------------------------------------------------------------------
+# Transfer table loaders
+# ---------------------------------------------------------------------------
+
+def _load_distillation_transfer(dataset):
+    """
+    No val metric available — average test_metric per kl_type over HP runs.
+    Returns dict: (teacher_mod, student_mod, kl_type) → score
+    Only for evan_base (ViT-B).
+    """
+    base = f'res/baselines/distillation/{dataset}/evan_base'
+    if not os.path.isdir(base):
+        return {}
+    result = {}
+    for fpath in glob.glob(f'{base}/*.csv'):
+        df = _read_csv(fpath)
+        if df is None or 'teacher_modality' not in df.columns:
+            continue
+        df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
+        for (teacher, student, kl_type), grp in df.groupby(['teacher_modality', 'student_modality', 'kl_type']):
+            result[(teacher, student, kl_type)] = grp['test_metric'].mean()
+    return result
+
+
+def _load_mke_addition(dataset):
+    """
+    MKE (Multimodal Knowledge Expansion): multimodal student trained from unimodal teacher.
+    Val-selected via valchecked_test_metric (teacher-agreement proxy).
+    Returns dict: (start_mod, new_mod) → best valchecked_test_metric
+    Only for evan_base (ViT-B).
+    """
+    df = _read_csv(f'res/baselines/mke/{dataset}.csv')
+    if df is None:
+        return {}
+    df = df[df['model_type'] == 'evan_base']
+    df['valchecked_test_metric'] = pd.to_numeric(df['valchecked_test_metric'], errors='coerce')
+    result = {}
+    for (teacher, student_mods), grp in df.groupby(['teacher_modality', 'student_modalities']):
+        if '+' not in str(student_mods):
+            continue
+        parts = [p.strip() for p in student_mods.split('+')]
+        new_parts = [p for p in parts if p != teacher]
+        if len(new_parts) != 1:
+            continue
+        new_mod = new_parts[0]
+        result[(teacher, new_mod)] = grp['valchecked_test_metric'].max()
+    return result
+
+
+def _load_mke_transfer(dataset):
+    """
+    Uses valchecked_test_metric (val-selected via teacher-agreement proxy).
+    Returns dict: (teacher_mod, student_mod) → best valchecked_test_metric
+    Only for evan_base (ViT-B).
+    """
+    df = _read_csv(f'res/baselines/mke/{dataset}.csv')
+    if df is None:
+        return {}
+    df = df[df['model_type'] == 'evan_base']
+    df['valchecked_test_metric'] = pd.to_numeric(df['valchecked_test_metric'], errors='coerce')
+    result = {}
+    for (teacher, student_mods), grp in df.groupby(['teacher_modality', 'student_modalities']):
+        best = grp['valchecked_test_metric'].max()
+        result[(teacher, student_mods)] = best
+    return result
+
+
+def _load_delulu_transfer(dataset):
+    """
+    Uses valchecked_transfer (test metric at best val_transfer checkpoint).
+    Returns dict: (starting_mod, new_mod) → best valchecked_transfer over HP runs
+    Only for evan_base (ViT-B).
+    """
+    df = _read_csv('res/delulu/hptuned_apr21.csv')
+    if df is None:
+        return {}
+    df = df[(df['dataset'] == dataset) & (df['model_arch'] == 'evan_base')]
+    df['valchecked_transfer'] = pd.to_numeric(df['valchecked_transfer'], errors='coerce')
+    df['valchecked_val_transfer'] = pd.to_numeric(df['valchecked_val_transfer'], errors='coerce')
+    result = {}
+    for (start, new), grp in df.groupby(['starting_modality', 'new_modality']):
+        # pick HP run with best val_transfer metric
+        best_row = grp.sort_values('valchecked_val_transfer', ascending=False).iloc[0]
+        result[(start, new)] = best_row['valchecked_transfer']
+    return result
+
+
+def _load_labeled_sft_transfer(dataset):
+    """
+    Labeled SFT oracle: train_sft test metric for the new modality (DINO init, ViT-B).
+    This is the upper bound — a model trained directly on the new modality with labels.
+    Returns dict: new_mod → test_metric
+    """
+    df = _read_csv(f'res/train_sft/{dataset}.csv')
+    if df is None:
+        return {}
+    df = df[df['model_type'] == 'evan_base']
+    df['val_metric'] = pd.to_numeric(df['val_metric'], errors='coerce')
+    df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
+    result = {}
+    for modality, grp in df.groupby('modality'):
+        best = grp.sort_values('val_metric', ascending=False).iloc[0]
+        result[modality] = best['test_metric']
+    return result
+
+
+def _load_rsfm_transfer(dataset):
+    """
+    Panopticon and OlmoEarth-B/L test metrics for each modality (val-selected).
+    Returns dict: (model_name, modality) → test_metric
+    """
+    df = _read_csv('res/rsfm/rsfm_results.csv')
+    if df is None:
+        return {}
+    df = df[(df['dataset'] == dataset) & (df['train_mode'] == 'fft')]
+    df = df[~df['model'].str.lower().str.contains('dino')]
+    df['val_metric'] = pd.to_numeric(df['val_metric'], errors='coerce')
+    df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
+    result = {}
+    for (model, modality), grp in df.groupby(['model', 'modality']):
+        best = grp.sort_values('val_metric', ascending=False).iloc[0]
+        result[(model, modality)] = best['test_metric']
+    return result
+
+
+def _load_train_sft_starting(dataset):
+    """DINO-init SFT on starting modality (ViT-B). Returns dict: modality → test_metric"""
+    return _load_labeled_sft_transfer(dataset)
+
+
+def _load_mixmatch_peek(dataset):
+    """
+    MixMatch baseline for peeking: trains on starting modality with unlabeled data.
+    Has val metric (best_val_metric) → use best_val_test_metric for reporting.
+    Returns dict: starting_mod → best_val_test_metric  (evan_base only)
+    """
+    df = _read_csv(f'res/baselines/mixmatch/baseline_mixmatch_{dataset}.csv')
+    if df is None:
+        return {}
+    df = df[df['model_type'] == 'evan_base']
+    df['best_val_metric'] = pd.to_numeric(df['best_val_metric'], errors='coerce')
+    df['best_val_test_metric'] = pd.to_numeric(df['best_val_test_metric'], errors='coerce')
+    result = {}
+    for modality, grp in df.groupby('modality'):
+        best = grp.sort_values('best_val_metric', ascending=False).iloc[0]
+        result[modality] = best['best_val_test_metric']
+    return result
+
+
+def _load_delulu_peek(dataset):
+    """
+    Delulu peeking: val-selected via valchecked_val_peek, report valchecked_peek.
+    Returns dict: (starting_mod, peeked_mod) → valchecked_peek
+    """
+    df = _read_csv('res/delulu/hptuned_apr21.csv')
+    if df is None:
+        return {}
+    df = df[(df['dataset'] == dataset) & (df['model_arch'] == 'evan_base')]
+    df['valchecked_peek'] = pd.to_numeric(df['valchecked_peek'], errors='coerce')
+    df['valchecked_val_peek'] = pd.to_numeric(df['valchecked_val_peek'], errors='coerce')
+    result = {}
+    for (start, new), grp in df.groupby(['starting_modality', 'new_modality']):
+        best_row = grp.sort_values('valchecked_val_peek', ascending=False).iloc[0]
+        result[(start, new)] = best_row['valchecked_peek']
+    return result
+
+
+def _load_delulu_addition(dataset):
+    """
+    Delulu addition: val-selected via valchecked_val_add_ens, report valchecked_add_ens.
+    Returns dict: (starting_mod, new_mod) → valchecked_add_ens
+    """
+    df = _read_csv('res/delulu/hptuned_apr21.csv')
+    if df is None:
+        return {}
+    df = df[(df['dataset'] == dataset) & (df['model_arch'] == 'evan_base')]
+    df['valchecked_add_ens'] = pd.to_numeric(df['valchecked_add_ens'], errors='coerce')
+    df['valchecked_val_add_ens'] = pd.to_numeric(df['valchecked_val_add_ens'], errors='coerce')
+    result = {}
+    for (start, new), grp in df.groupby(['starting_modality', 'new_modality']):
+        best_row = grp.sort_values('valchecked_val_add_ens', ascending=False).iloc[0]
+        result[(start, new)] = best_row['valchecked_add_ens']
+    return result
+
+
+def _load_labeled_sft_addition(dataset):
+    """
+    Labeled SFT oracle on combined (start+new) modality (DINO init, ViT-B).
+    Returns dict: (start, new) → test_metric  — keyed by sorted pair for lookup.
+    """
+    df = _read_csv(f'res/train_sft/{dataset}.csv')
+    if df is None:
+        return {}
+    df = df[df['model_type'] == 'evan_base']
+    df['val_metric'] = pd.to_numeric(df['val_metric'], errors='coerce')
+    df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
+    result = {}
+    combined_aliases = SFT_COLUMNS[dataset].get('S2+S1', []) + SFT_COLUMNS[dataset].get('S2+S2', [])
+    for modality, grp in df.groupby('modality'):
+        if '+' not in str(modality) and modality not in combined_aliases:
+            continue
+        best = grp.sort_values('val_metric', ascending=False).iloc[0]
+        result[modality] = best['test_metric']
+    return result
+
+
+def _load_rsfm_addition(dataset):
+    """
+    RSFM baselines on combined modality.
+    Returns dict: (model_name, combined_mod_alias) → test_metric
+    """
+    return _load_rsfm_transfer(dataset)
+
+
+def build_addition_table(dataset):
+    transfers = VALID_TRANSFERS.get(dataset, [])
+    if not transfers:
+        return None
+
+    mke_add      = _load_mke_addition(dataset)
+    delulu_add   = _load_delulu_addition(dataset)
+    sft_combined = _load_labeled_sft_addition(dataset)
+    rsfm         = _load_rsfm_transfer(dataset)
+
+    # Combined modality aliases for RSFM lookup
+    COMBINED_RSFM_ALIASES = {
+        ('s2', 's1'): ['s2s1', 's1+s2', 's2+s1'],
+        ('s1', 's2'): ['s2s1', 's1+s2', 's2+s1'],
+        ('s2_rgb', 's1'): ['s2s1', 's1+s2', 's2+s1'],
+        ('s2_rgb', 's2_norgb'): ['s2', 's2s1'],
+    }
+
+    rows = []
+    for (start, new) in transfers:
+        start_d = MOD_DISPLAY.get(start, start)
+        new_d   = MOD_DISPLAY.get(new, new)
+
+        mke_score = mke_add.get((start, new))
+        del_score = delulu_add.get((start, new))
+
+        # Labeled SFT on combined: try common alias patterns
+        lsft_score = None
+        for alias in [f'{start}+{new}', f'{new}+{start}'] + list(SFT_COLUMNS[dataset].get('S2+S1', [])):
+            if alias in sft_combined:
+                lsft_score = sft_combined[alias]
+                break
+
+        # RSFM on combined modality
+        rsfm_aliases = COMBINED_RSFM_ALIASES.get((start, new), [f'{start}+{new}', f'{new}+{start}'])
+        pan_score  = None
+        olmo_score = None
+        for alias in rsfm_aliases:
+            if pan_score is None:
+                pan_score = rsfm.get(('panopticon', alias))
+            if olmo_score is None:
+                olmo_score = rsfm.get(('olmoearth-base', alias)) or rsfm.get(('olmoearth-large', alias))
+
+        rows.append({
+            'Dataset':    DATASET_NAMES[dataset].split(' ')[0],
+            'Start→New':  f'{start_d}→{new_d}',
+            'rand SFT':   '--',
+            'MKE':        _fmt(mke_score),
+            'Delulu':     _fmt(del_score),
+            'lbl SFT':    _fmt(lsft_score),
+            'Panopticon': _fmt(pan_score),
+            'OlmoEarth':  _fmt(olmo_score),
+        })
+
+    return pd.DataFrame(rows) if rows else None
+
+
+def build_peek_table(dataset):
+    transfers = VALID_TRANSFERS.get(dataset, [])
+    if not transfers:
+        return None
+
+    mixmatch  = _load_mixmatch_peek(dataset)
+    delulu    = _load_delulu_peek(dataset)
+    sft_start = _load_train_sft_starting(dataset)
+    rsfm      = _load_rsfm_transfer(dataset)
+
+    rows = []
+    for (start, new) in transfers:
+        start_d = MOD_DISPLAY.get(start, start)
+        new_d   = MOD_DISPLAY.get(new, new)
+
+        dino_start = sft_start.get(start)
+        mm_score   = mixmatch.get(start)
+        del_score  = delulu.get((start, new))
+        pan_score  = rsfm.get(('panopticon', start))
+        olmo_score = rsfm.get(('olmoearth-base', start))
+
+        rows.append({
+            'Dataset':    DATASET_NAMES[dataset].split(' ')[0],
+            'Start':      start_d,
+            'Peeked':     new_d,
+            'rand SFT':   '--',
+            'DINO SFT':   _fmt(dino_start),
+            'MixMatch':   _fmt(mm_score),
+            'Delulu':     _fmt(del_score),
+            'Panopticon': _fmt(pan_score),
+            'OlmoEarth':  _fmt(olmo_score),
+        })
+
+    return pd.DataFrame(rows) if rows else None
+
+
+def build_transfer_table(dataset):
+    transfers = VALID_TRANSFERS.get(dataset, [])
+    if not transfers:
+        return None
+
+    distill  = _load_distillation_transfer(dataset)
+    delulu   = _load_delulu_transfer(dataset)
+    sft_new  = _load_labeled_sft_transfer(dataset)
+    sft_start = _load_train_sft_starting(dataset)
+    rsfm     = _load_rsfm_transfer(dataset)
+
+    # For random-init SFT on starting modality: not available yet
+    # For DINO SFT on starting modality: from sft_start
+
+    rows = []
+    for (start, new) in transfers:
+        start_d = MOD_DISPLAY.get(start, start)
+        new_d   = MOD_DISPLAY.get(new, new)
+
+        # DINO SFT metric for starting modality (teacher performance)
+        dino_start = sft_start.get(start)
+
+        # KD and TTM (distillation, no val selection — avg test_metric per kl_type)
+        kd_score  = distill.get((start, new, 'kd'))
+        ttm_score = distill.get((start, new, 'ttm'))
+
+        # Delulu
+        del_score = delulu.get((start, new))
+
+        # Labeled SFT oracle for new modality
+        lsft_score = sft_new.get(new)
+
+        # Panopticon for new modality
+        pan_score = rsfm.get(('panopticon', new))
+
+        # OlmoEarth-B for new modality
+        olmo_score = rsfm.get(('olmoearth-base', new))
+
+        rows.append({
+            'Dataset':    DATASET_NAMES[dataset].split(' ')[0],
+            'Start→New':  f'{start_d}→{new_d}',
+            'rand SFT':   '--',
+            'DINO SFT':   _fmt(dino_start),
+            'KD':         _fmt(kd_score),
+            'TTM':        _fmt(ttm_score),
+            'Delulu':     _fmt(del_score),
+            'lbl SFT':    _fmt(lsft_score),
+            'Panopticon': _fmt(pan_score),
+            'OlmoEarth':  _fmt(olmo_score),
+        })
+
+    return pd.DataFrame(rows) if rows else None
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
-    all_records = load_sft() + load_rsfm()
+    print('\n' + '='*80)
+    print('  TABLE A: SFT Baselines (best val checkpoint → test metric)')
+    print('='*80)
 
+    sft_records = load_sft_records()
     for dataset in DATASETS:
-        title = DATASET_NAMES[dataset]
-        print(f'\n{"="*80}')
-        print(f'  {title}')
-        print(f'{"="*80}')
-
-        # --- Table 1: SFT ---
-        df = build_table(dataset, all_records)
-        print(f'\n  -- SFT --')
+        print(f'\n  --- {DATASET_NAMES[dataset]} ---')
+        df = build_sft_table(dataset, sft_records)
         if df is None or df.empty:
             print('  (no data)')
         else:
             print(df.to_string(index=False))
 
-        # --- Table 2: Distillation / MKE ---
-        distill_records = load_distillation(dataset)
-        mke_records     = load_mke(dataset)
-        result2 = build_transfer_table(dataset, distill_records, mke_records)
-        print(f'\n  -- Distillation / MKE (teacher → student) --')
-        if result2 is None:
-            print('  (no data)')
-        else:
-            df2, col_keys2, col_display2 = result2
-            _print_transfer_table(dataset, df2, col_keys2, col_display2)
+    print('\n\n' + '='*80)
+    print('  TABLE B: Transfer (start mod → new mod, ViT-B / evan_base)')
+    print('  Columns: rand SFT = random-init SFT on starting mod (not yet available)')
+    print('           DINO SFT = DINO-init SFT on starting mod (teacher perf)')
+    print('           KD / TTM = Distillation baselines by kl_type (avg over HP, no val sel)')
+    print('           Delulu   = Delulu ours (val-selected transfer metric)')
+    print('           lbl SFT  = Labeled SFT oracle on new mod (upper bound)')
+    print('           Panopticon / OlmoEarth = RSFM baselines on new mod (val-selected)')
+    print('='*80)
+
+    all_rows = []
+    for dataset in DATASETS:
+        df = build_transfer_table(dataset)
+        if df is not None and not df.empty:
+            all_rows.append(df)
+
+    if all_rows:
+        combined = pd.concat(all_rows, ignore_index=True)
+        print(combined.to_string(index=False))
+    else:
+        print('  (no data)')
+
+    print('\n\n' + '='*80)
+    print('  TABLE C: Peeking (predict on start mod, peek unlabeled new mod, ViT-B)')
+    print('  Columns: rand SFT   = random-init SFT on starting mod (not yet available)')
+    print('           DINO SFT   = DINO-init SFT on starting mod (no peeking baseline)')
+    print('           MixMatch   = semi-supervised on starting mod (val-selected)')
+    print('           Delulu     = Delulu ours (val-selected peek metric)')
+    print('           Panopticon / OlmoEarth = RSFM baselines on starting mod (val-selected)')
+    print('='*80)
+
+    peek_rows = []
+    for dataset in DATASETS:
+        df = build_peek_table(dataset)
+        if df is not None and not df.empty:
+            peek_rows.append(df)
+
+    if peek_rows:
+        combined = pd.concat(peek_rows, ignore_index=True)
+        print(combined.to_string(index=False))
+    else:
+        print('  (no data)')
+
+    print('\n\n' + '='*80)
+    print('  TABLE D: Addition (predict on both start+new mod, ViT-B)')
+    print('  Columns: rand SFT   = random-init SFT on combined mod (not yet available)')
+    print('           MKE        = Multimodal Knowledge Expansion: multimodal student')
+    print('           Delulu     = Delulu ours (val-selected addition ensemble metric)')
+    print('           lbl SFT    = Labeled SFT oracle on combined mod (upper bound)')
+    print('           Panopticon / OlmoEarth = RSFM baselines on combined mod (val-selected)')
+    print('='*80)
+
+    add_rows = []
+    for dataset in DATASETS:
+        df = build_addition_table(dataset)
+        if df is not None and not df.empty:
+            add_rows.append(df)
+
+    if add_rows:
+        combined = pd.concat(add_rows, ignore_index=True)
+        print(combined.to_string(index=False))
+    else:
+        print('  (no data)')
 
 
 if __name__ == '__main__':

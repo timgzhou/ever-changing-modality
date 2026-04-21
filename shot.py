@@ -163,7 +163,7 @@ def create_mae_decoders(hidden_dim,patch_size,modality_bands_dict,mae_modalities
 
 # ==================== SHOT TRAINING COMPONENT ====================
 
-def create_latent_projectors(hidden_dim, latent_reconstruct_modalities, device, num_heads=8, ffn_factor=4):
+def create_latent_decoders(hidden_dim, latent_reconstruct_modalities, device, num_heads=8, ffn_factor=4):
     """Create transformer-based projectors for latent matching (CLS + patches jointly)."""
     projectors = nn.ModuleDict()
     for mod in latent_reconstruct_modalities:
@@ -196,7 +196,7 @@ def create_fuse_cls_projectors(hidden_dim, mae_modalities, latent_reconstruct_mo
     return fused_cls_projector
 
 # MASKING HELPER FUNCTION
-def mask_input(evan, batch_size, n_storage_tokens, num_patches, mae_mask_ratio, all_modalities, prefusion_features, modality_dropout, device,
+def mask_input(evan, batch_size, n_storage_tokens, num_patches, token_mask_ratio, all_modalities, prefusion_features, modality_dropout, device,
                protected_modalities=None, active_losses=None, latent_reconstruct_modalities=None, protect_lrm=False):
     """
     Apply masking using projected sequences from other modalities, and compute prefusion loss.
@@ -234,8 +234,8 @@ def mask_input(evan, batch_size, n_storage_tokens, num_patches, mae_mask_ratio, 
             mask_val = mod in drop_candidates
             modality_masks[mod] = torch.full((batch_size, num_patches), mask_val, device=device, dtype=torch.bool)
         else:
-            # MAE mode: randomly mask mae_mask_ratio of tokens per modality
-            len_keep = int(num_patches * (1 - mae_mask_ratio))
+            # token dropping mode: randomly mask mae_mask_ratio of tokens per modality
+            len_keep = int(num_patches * (1 - token_mask_ratio))
             noise = torch.rand(batch_size, num_patches, device=device)
             ids_shuffle = torch.argsort(noise, dim=1)
             mask = torch.ones(batch_size, num_patches, device=device, dtype=torch.bool)
@@ -773,7 +773,7 @@ def _compute_ce_loss(student_fused, labels, model, ce_fn, segmentation, device):
 
 
 def _labeled_batch_step(
-    batch, evan, model, teacher_classifier, latent_projectors,
+    batch, evan, model, unimodal_teacher, latent_projectors,
     active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
     modality_bands_dict, mse_fn, ce_fn, use_mfla,
     multilabel, label_key, segmentation, device,
@@ -792,7 +792,7 @@ def _labeled_batch_step(
 
     for newmod in newmod_list:
         src_seq = prefusion_features[starting_modality]
-        src_seq_norm = F.layer_norm(src_seq, [src_seq.shape[-1]])
+        src_seq_norm = F.layer_norm(src_seq, [src_seq.shape[-1]]) # NOTE TODO there's a layer norm here, should it be in evan._project_sequence? is it present at other hallucination calls?
         key = f"{starting_modality}_to_{newmod}"
         prefusion_features[newmod] = evan._project_sequence(src_seq_norm, key, newmod)
 
@@ -805,6 +805,7 @@ def _labeled_batch_step(
         hallucinated_mods = set()
 
     if use_mfla:
+        raise NotImplementedError("dont mfla")
         set_mfla_training_mode(evan, hallucinated_mods, all_modalities)
 
     student_fused = evan.forward_fusion_from_modality_features(
@@ -818,7 +819,7 @@ def _labeled_batch_step(
 
     if 'latent' in active_losses:
         with torch.no_grad():
-            teacher_out = teacher_classifier.evan.forward_features(monomodal_input)
+            teacher_out = unimodal_teacher.evan.forward_features(monomodal_input)
         latent_loss = _compute_latent_loss(
             student_fused, teacher_out, latent_projectors,
             latent_reconstruct_modalities=[starting_modality],
@@ -883,7 +884,7 @@ def _unlabeled_batch_step(
     dropped_mods = {mod for mod, dropped in modality_dropped.items() if dropped} if evan.intermediate_projector_type == "cross" else set()
     student_fused = evan.forward_fusion_from_modality_features(
         masked_mod_features,
-        hallucinated_modalities=dropped_mods | (hallucinated_mods if use_mfla else set())
+        hallucinated_modalities=dropped_mods
     )
 
     total_loss = loss_weights['prefusion'] * prefusion_loss
@@ -1128,11 +1129,11 @@ def _run_periodic_eval(
 
 # SHOT_TRAINING!
 def train_shot(
-    model, train_loader, device, args,
+    model, train_loader, device, args, starting_modality, new_modality,
     mae_modalities: list[str],
-    latent_reconstruct_modalities: list[str] = ["rgb"],
+    latent_reconstruct_modalities: list[str],
     modality_bands_dict: dict = None,
-    max_norm=4,
+    max_norm=1,
     distillation_temperature: float = 1.0,
     test_loader=None,
     eval_every_n_epochs: int = None,
@@ -1155,7 +1156,7 @@ def train_shot(
     label_key: str = 'label',           # Batch key for labels
     num_classes: int = None,            # Required when task_type='segmentation', for mIoU computation
     ignore_index: int = -100,           # Label value to ignore in CE/mIoU (e.g. 19 for PASTIS void_label)
-    teacher_classifier=None,
+    unimodal_teacher=None,
     asym_lr_multiplier: float | None = None,  # If set, new components get lr * asym_lr_multiplier
     dyn_teacher: bool = False,
 ):
@@ -1178,12 +1179,13 @@ def train_shot(
     - use_mfla: Enable MFLA training for hallucinated modalities
     """
     # Compute epoch at which labeled mixing starts
-    labeled_start_epoch = int(args.epochs * labeled_start_fraction)
+    batch_mising_start_epoch = int(args.epochs * labeled_start_fraction)
 
     print("\n" + "="*70)
-    print(f"=== END TO END SHOT TRAINING===\n")
-    print(f"  MAE modalities (pixel reconstruction): {mae_modalities}")
-    print(f"  Latent modalities (feature matching): {latent_reconstruct_modalities}")
+    print(f"=== END TO END Delulu TRAINING===\n")
+    print(f"  With Losses: {active_losses}")
+    if "mae" in active_losses: print(f"  MAE modalities (pixel reconstruction): {mae_modalities}")
+    if "latent" in active_losses: print(f"  Latent modalities (feature matching): {latent_reconstruct_modalities}")
     if use_mfla:
         print(f"  MFLA training: enabled")
     if dyn_teacher:
@@ -1192,30 +1194,19 @@ def train_shot(
         print(f"    - newmod heads: distill from frozen unimodal teacher (unchanged)")
     if labeled_train_loader is not None and labeled_frequency > 0:
         print(f"  Mixed training mode: labeled_frequency={labeled_frequency:.2f}")
-        print(f"    - labeled_start_fraction={labeled_start_fraction:.2f} (starts at epoch {labeled_start_epoch + 1}/{args.epochs})")
+        print(f"    - labeled_start_fraction={labeled_start_fraction:.2f} (starts at epoch {batch_mising_start_epoch + 1}/{args.epochs})")
         print(f"    - Unlabeled batches (train2): MAE + latent + pre-fusion + distillation losses")
         print(f"    - Labeled batches (train1): CE + latent losses (newmod hallucinated)")
 
-    all_loss_names = ['mae', 'latent', 'prefusion', 'distill', 'ce']
-    if active_losses is None:
-        active_losses = all_loss_names
-    elif set(active_losses) - set(all_loss_names):
-        raise ValueError(f"Invalid loss names: {set(active_losses) - set(all_loss_names)}. Valid: {all_loss_names}")
     print(f"  Active losses: {active_losses}")
-
-    _default_loss_weights = {k: 1.0 for k in all_loss_names}
-    if loss_weights is None:
-        loss_weights = _default_loss_weights
-    else:
-        loss_weights = {**_default_loss_weights, **loss_weights}
     print(f"  Loss weights: {loss_weights}")
 
-    all_modalities = list(set(mae_modalities + latent_reconstruct_modalities))
+    all_modalities = [starting_modality, new_modality]
 
-    if teacher_classifier is None:
-        teacher_classifier = copy.deepcopy(model)
-        teacher_classifier.freeze_all()
-        teacher_classifier.eval()
+    if unimodal_teacher is None:
+        unimodal_teacher = copy.deepcopy(model)
+        unimodal_teacher.freeze_all()
+        unimodal_teacher.eval()
         print(f"\nTeacher classifier created (frozen copy of model)")
 
     is_segmenter = hasattr(model, 'decoder_strategy')
@@ -1242,23 +1233,29 @@ def train_shot(
     embed_dim = evan.embed_dim
     patch_size = evan.patch_size
 
-    mae_decoders = create_mae_decoders(embed_dim, patch_size, modality_bands_dict, mae_modalities, device)
-    latent_projectors = create_latent_projectors(embed_dim, latent_reconstruct_modalities, device)
+    trainable_mae_decoder,trainable_latent_decoder=0,0
+    mae_decoders = nn.ModuleDict()
+    latent_decoders = nn.ModuleDict()
+    if "mae" in active_losses:
+        mae_decoders = create_mae_decoders(embed_dim, patch_size, modality_bands_dict, mae_modalities, device)
+        trainable_mae_decoder = sum(p.numel() for p in mae_decoders.parameters())
+    if "latent" in active_losses:
+        latent_decoders = create_latent_decoders(embed_dim, latent_reconstruct_modalities, device)
+        trainable_latent_decoder = sum(p.numel() for p in latent_decoders.parameters())
+    
     evan.set_requires_grad("all", intermediate_projectors=True)
 
     trainable_in_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
     trainable_in_model = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    trainable_decoder = sum(p.numel() for p in mae_decoders.parameters())
-    trainable_projector = sum(p.numel() for p in latent_projectors.parameters())
     trainable_intermediate_proj = sum(p.numel() for p in evan.intermediate_projectors.parameters())
     # trainable_in_model already includes intermediate_projectors (part of evan); don't double-count
-    trainable_total = trainable_in_model + trainable_decoder + trainable_projector
+    trainable_total = trainable_in_model + trainable_mae_decoder + trainable_latent_decoder
     print(f"\nTrainable parameters: {trainable_total}")
     print(f"    Model (EVAN + Classifier): {trainable_in_model} ({100*trainable_in_model/(sum(p.numel() for p in model.parameters())):.2f}%)")
     print(f"      - EVAN backbone (excl. intermediate_projectors): {trainable_in_evan - trainable_intermediate_proj}")
     print(f"      - Intermediate projectors: {trainable_intermediate_proj}")
-    print(f"    MAE decoders: {trainable_decoder}")
-    print(f"    Latent projectors (CLS + Patch): {trainable_projector}")
+    print(f"    MAE decoders: {trainable_mae_decoder}")
+    print(f"    Latent decoder (CLS + Patch): {trainable_latent_decoder}")
 
     if asym_lr_multiplier is not None:
         # Identify "new" components that get a higher LR
@@ -1293,7 +1290,7 @@ def train_shot(
         if 'mae' in active_losses:
             extra_new += list(mae_decoders.parameters())
         if 'latent' in active_losses:
-            extra_new += list(latent_projectors.parameters())
+            extra_new += list(latent_decoders.parameters())
 
         all_model_params = list(filter(lambda p: p.requires_grad, model.parameters()))
         base_params = [p for p in all_model_params if id(p) not in new_param_ids]
@@ -1312,7 +1309,7 @@ def train_shot(
         if 'mae' in active_losses:
             params += list(mae_decoders.parameters())
         if 'latent' in active_losses:
-            params += list(latent_projectors.parameters())
+            params += list(latent_decoders.parameters())
         print(f"Total trainable parameters: {sum(p.numel() for p in params):,}")
         optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=weight_decay)
     scheduler = make_scheduler(optimizer, args.epochs, warmup_epochs=warmup_epochs)
@@ -1341,7 +1338,7 @@ def train_shot(
         if loader is not None:
             from train_utils import evaluate as _eval_fn
             _, teacher_val_acc = _eval_fn(
-                teacher_classifier, loader,
+                unimodal_teacher, loader,
                 nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss(ignore_index=ignore_index),
                 device, modality_bands_dict, modalities_to_use=(starting_modality,),
                 multilabel=multilabel, label_key=label_key,
@@ -1357,9 +1354,9 @@ def train_shot(
         model.train()
         evan.train()
         mae_decoders.train()
-        latent_projectors.train()
+        latent_decoders.train()
 
-        effective_labeled_freq = labeled_frequency if epoch >= labeled_start_epoch else 0.0
+        effective_labeled_freq = labeled_frequency if epoch >= batch_mising_start_epoch else 0.0
 
         epoch_losses = {'total': 0.0, 'mae': 0.0, 'latent': 0.0, 'prefusion': 0.0, 'distill': 0.0, 'ce': 0.0}
         train_count = labeled_count = unlabeled_count = 0
@@ -1381,7 +1378,7 @@ def train_shot(
         for batch, is_labeled in pbar:
             if is_labeled:
                 total_loss, loss_dict = _labeled_batch_step(
-                    batch, evan, model, teacher_classifier, latent_projectors,
+                    batch, evan, model, unimodal_teacher, latent_decoders,
                     active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
                     modality_bands_dict, mse_fn, ce_fn, use_mfla,
                     multilabel, label_key, segmentation, device,
@@ -1389,7 +1386,7 @@ def train_shot(
                 labeled_count += 1
             else:
                 total_loss, loss_dict, masking_info = _unlabeled_batch_step(
-                    batch, evan, model, teacher_classifier, latent_projectors,
+                    batch, evan, model, unimodal_teacher, latent_decoders,
                     mae_decoders, active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
                     latent_reconstruct_modalities, mae_modalities, modality_bands_dict,
                     args.mae_mask_ratio, args.modality_dropout, mse_fn,
@@ -1463,13 +1460,13 @@ def train_shot(
             model.eval()
 
             (best_val_metric, best_checkpoint_state, best_checkpoints,
-             teacher_classifier) = _run_periodic_eval(
-                epoch, model, evan, teacher_classifier,
+             unimodal_teacher) = _run_periodic_eval(
+                epoch, model, evan, unimodal_teacher,
                 test_loader, val_unlabeled_loader, val_labeled_loader,
                 modality_bands_dict, starting_modality, newmod_list, all_modalities,
                 use_mfla, multilabel, label_key, segmentation, num_classes, ignore_index, device,
                 checkpoint_selection, val_weights, best_val_metric, best_checkpoint_state,
-                best_checkpoints, mae_decoders, latent_projectors,
+                best_checkpoints, mae_decoders, latent_decoders,
             )
 
             model.train()
@@ -1479,7 +1476,7 @@ def train_shot(
         for k, v in best_checkpoint_state['mae_decoders'].items():
             mae_decoders[k].load_state_dict(v)
         for k, v in best_checkpoint_state['latent_projectors'].items():
-            latent_projectors[k].load_state_dict(v)
+            latent_decoders[k].load_state_dict(v)
         print(f"\nRestored best checkpoint from epoch {best_checkpoint_state['epoch']+1}")
         print(f"  Val metrics: {best_checkpoint_state['val_metrics']}")
 

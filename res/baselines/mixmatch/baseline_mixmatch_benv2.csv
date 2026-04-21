@@ -48,3 +48,7 @@ evan_small,s2,fft,0.001,0.0001,22493203,20,2,0.5,1.0,75.0,4,mAP,48.53,51.92,48.5
 evan_small,s2,fft,0.001,0.0001,22493203,20,2,0.5,1.0,100.0,4,mAP,47.01,49.36,47.71,checkpoints/evan_mixmatch_benv2_s2_20260413_052229.pt,clstoken,False
 evan_base,s1,fft,0.0003,0.0001,85487635,20,2,0.5,0.5,10.0,4,mAP,50.52,53.64,50.28,checkpoints/evan_mixmatch_benv2_s1_20260414_204056.pt,clstoken,True
 evan_base,s1,fft,0.0003,0.0001,85487635,20,2,0.5,0.5,75.0,4,mAP,45.25,48.91,46.39,checkpoints/evan_mixmatch_benv2_s1_20260414_212450.pt,clstoken,True
+evan_base,s2,fft,0.0003,0.0001,87453715,20,2,0.5,0.5,50.0,4,mAP,47.83,60.05,57.29,checkpoints/evan_mixmatch_benv2_s2_20260421_053201.pt,clstoken,True
+evan_base,s2,fft,0.0003,0.0001,87453715,20,2,0.5,0.5,75.0,4,mAP,51.33,57.87,56.33,checkpoints/evan_mixmatch_benv2_s2_20260421_060004.pt,clstoken,True
+evan_base,s1,fft,0.0003,0.0001,85487635,20,2,0.5,0.5,50.0,4,mAP,44.60,47.19,46.23,checkpoints/evan_mixmatch_benv2_s1_20260421_062803.pt,clstoken,True
+evan_base,s1,fft,0.0003,0.0001,85487635,20,2,0.5,0.5,75.0,4,mAP,43.67,48.86,44.80,checkpoints/evan_mixmatch_benv2_s1_20260421_065446.pt,clstoken,True

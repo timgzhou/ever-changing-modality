@@ -975,10 +975,9 @@ class EVAN(nn.Module):
             rope_sincos = (sin, cos)
         else:
             rope_sincos = None
-        for lora_idx in range(len(self.blocks)):
-
+        for fusion_idx in range(len(self.blocks)):
             # Shared block forward on concatenated representation
-            x_fused = self.blocks[lora_idx](x_fused, rope_sincos)
+            x_fused = self.blocks[fusion_idx](x_fused, rope_sincos)
 
 
         # Step 3: Split fused representation back into modality-specific outputs
@@ -1675,6 +1674,8 @@ class EVANClassifier(EvanPredictor):
                     model.instantiate_modality_head(mod)
 
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        if device is not None:
+            model.to(device)
         print(f"EVANClassifier loaded from checkpoint: {path}")
         return model
 
@@ -1876,6 +1877,8 @@ class EvanSegmenter(EvanPredictor):
                     model.instantiate_modality_head(mod)
 
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        if device is not None:
+            model.to(device)
         print(f"EvanSegmenter loaded from checkpoint: {path}")
         return model
 

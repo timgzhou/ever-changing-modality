@@ -21,8 +21,8 @@ from train_utils import _compute_map, compute_miou, evaluate
 
 VALID_NEW_MODS = {
     'eurosat': ['vre', 'nir', 'swir', 'rgb', 's2'],
-    'benv2':   ['s1', 's2'],
-    'dfc2020': ['s1', 's2', 's2_rgb'],
+    'benv2':   ['s1', 's2', 's2_norgb'],
+    'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
 }
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
@@ -355,6 +355,7 @@ def distillation_training_loop(
     segmentation=False, num_classes=None, ignore_index=-100,
     val_loader=None, best_checkpoint_path=None, warmup_epochs=1,
     task_config=None, student_modalities=None,
+    student_pseudo_modalities=None,
 ):
     """
     Knowledge distillation from teacher (teacher_modality) to student.
@@ -406,6 +407,7 @@ def distillation_training_loop(
         kl_type=kl_type,
         best_checkpoint_path=best_checkpoint_path,
         student_modalities=student_modalities,
+        student_pseudo_modalities=student_pseudo_modalities,
     )
 
 
@@ -448,8 +450,8 @@ def main():
     parser.add_argument('--alpha', type=float, default=1.0,
                         help='Weight for distillation loss. alpha=1.0 means pure distillation (default: 1.0)')
     parser.add_argument('--distillation_mode', type=str, default='regular',
-                        choices=['regular', 'with_guidance', 'feature'],
-                        help='Distillation mode: regular (KL on logits), with_guidance (0.5 supervision + 0.5 distillation), feature (MSE on cls+patch tokens)')
+                        choices=['regular', 'feature'],
+                        help='Distillation mode: regular (KL on logits), feature (MSE on cls+patch tokens)')
     parser.add_argument('--kl_type', type=str, default='kd',
                         choices=['kd', 'ttm', 'wttm'])
     parser.add_argument('--init_from_teacher', action='store_true',
@@ -541,7 +543,7 @@ def main():
     all_student_n_chans = [_n_chans(modality_bands_dict[m]) for m in student_modalities]
 
     # Evaluate teacher on test split before distillation
-    print(f"\n=== Teacher baseline ({teacher_modality.upper()}) on test split ===")
+    print(f"\n=== Teacher baseline ({teacher_modality.upper()}) on different splits ===")
     if is_segmentation:
         _ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
     elif multilabel:
@@ -556,6 +558,22 @@ def main():
         ignore_index=ignore_index,
     )
     print(f"  Teacher test {metric_name}: {teacher_test_metric:.2f}%")
+    _, teacher_train1_metric = evaluate(
+        teacher_model, train1_loader, _ce, device,
+        teacher_modality_bands_dict, modalities_to_use=(teacher_modality,),
+        multilabel=multilabel, label_key=label_key,
+        segmentation=is_segmentation, num_classes=task_config.num_classes,
+        ignore_index=ignore_index,
+    )
+    _, teacher_train2_metric = evaluate(
+        teacher_model, train2_loader, _ce, device,
+        teacher_modality_bands_dict, modalities_to_use=(teacher_modality,),
+        multilabel=multilabel, label_key=label_key,
+        segmentation=is_segmentation, num_classes=task_config.num_classes,
+        ignore_index=ignore_index,
+    )
+    print(f"  Teacher train1 {metric_name}: {teacher_train1_metric:.2f}%")
+    print(f"  Teacher train2 {metric_name}: {teacher_train2_metric:.2f}%")
 
     # Initialize wandb if enabled
     if args.wandb_project:
@@ -594,7 +612,7 @@ def main():
             starting_n_chans=all_student_n_chans,
             img_size=task_config.img_size,
             device=device,
-            load_weights=True,
+            load_weights=False, # was true
         )
 
         if is_segmentation:
@@ -700,26 +718,6 @@ def main():
     teacher_classifier_acc = None
     supervised_classifier_acc = None
     supervised_classifier_best_acc = None
-
-    if args.distillation_mode == 'feature' and not multilabel and not is_segmentation:
-        print("\n=== Feature Mode: Additional Evaluations ===")
-
-        print("\n--- Evaluation 1: Using teacher's classifier on student features ---")
-        teacher_classifier_acc = evaluate_with_teacher_classifier(
-            student_model, teacher_model, test_loader, device,
-            student_modality_bands_dict, primary_modality, teacher_modality,
-            global_rep=args.global_rep, label_key=label_key,
-        )
-        print(f"  Test accuracy (teacher classifier): {teacher_classifier_acc:.2f}%")
-
-        print("\n--- Evaluation 2: Training classifier with frozen backbone (supervised) ---")
-        supervised_classifier_acc, supervised_classifier_best_acc = train_classifier_with_frozen_backbone(
-            student_model, train1_loader, test_loader, device,
-            student_modality_bands_dict, primary_modality,
-            lr=args.lr, epochs=min(args.epochs, 10), global_rep=args.global_rep,
-            multilabel=multilabel, label_key=label_key,
-        )
-        print(f"  Test accuracy (supervised classifier): {supervised_classifier_acc:.2f}% (best: {supervised_classifier_best_acc:.2f}%)")
 
     print(f"\nDistillation Final metrics ({student_label.upper()}):")
     print(f"  Train {metric_name}: {train_metric:.2f}%")

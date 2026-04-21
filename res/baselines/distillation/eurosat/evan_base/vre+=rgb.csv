@@ -1,0 +1,13 @@
+model_type,teacher_modality,student_modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,trainable_params,epoch,temperature,alpha,distillation_mode,kl_type,metric_name,teacher_test_metric,test_metric,best_test_metric(oracle),best_epoch,best_val_agreement,ensemble_metric_logits,ensemble_metric_softmax,teacher_classifier_acc,supervised_classifier_acc,supervised_classifier_best_acc,saved_checkpoint,global_rep,teacher_checkpoint
+evan_base,vre,rgb,fft,0,fft,0.001,85677322,16,2.0,1.0,regular,ttm,Acc,90.65,87.74,87.78,16,,92.80,92.39,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.0003,85677322,16,2.0,1.0,regular,ttm,Acc,90.65,88.61,88.61,16,,92.72,92.54,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.0003,85677322,16,1.0,1.0,regular,kd,Acc,90.65,89.43,89.43,16,,92.72,92.56,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.0003,85677322,16,1.0,1.0,regular,ttm,Acc,90.65,89.00,89.02,16,,92.70,92.63,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.001,85677322,16,2.0,1.0,regular,kd,Acc,90.65,86.07,86.20,16,,92.57,92.09,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.001,85677322,16,1.0,1.0,regular,ttm,Acc,90.65,87.31,87.52,16,,92.35,92.19,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.0003,85677322,16,2.0,1.0,regular,kd,Acc,90.65,86.61,86.89,16,,92.33,92.04,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.0003,85677322,16,0.5,1.0,regular,ttm,Acc,90.65,88.56,88.56,16,,92.26,91.83,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.0003,85677322,16,0.5,1.0,regular,kd,Acc,90.65,84.46,84.46,16,,92.19,91.81,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.001,85677322,16,1.0,1.0,regular,kd,Acc,90.65,80.54,80.69,16,,92.00,91.87,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.001,85677322,16,0.5,1.0,regular,kd,Acc,90.65,84.43,84.43,16,,91.81,91.74,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
+evan_base,vre,rgb,fft,0,fft,0.001,85677322,16,0.5,1.0,regular,ttm,Acc,90.65,79.22,79.22,16,,91.67,91.39,,,,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt

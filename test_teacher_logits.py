@@ -191,7 +191,7 @@ student.freeze_all()
 student.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=False, msla=True, patch_embedders=True, head=True)
 student.set_requires_grad("backbone", blocks=True, norm=True)
 
-from shot import create_mae_decoders, create_latent_projectors
+from shot import create_mae_decoders, create_latent_decoders
 embed_dim = evan.embed_dim
 patch_size = evan.patch_size
 modality_bands_dict2 = task_config.modality_bands_dict
@@ -200,7 +200,7 @@ latent_reconstruct_modalities = ['s2']
 active_losses = ['distill', 'ce']  # mimicking user's test run
 
 mae_decoders = create_mae_decoders(embed_dim, patch_size, modality_bands_dict2, mae_modalities, DEVICE)
-latent_projectors = create_latent_projectors(embed_dim, latent_reconstruct_modalities, DEVICE)
+latent_projectors = create_latent_decoders(embed_dim, latent_reconstruct_modalities, DEVICE)
 evan.set_requires_grad("all", intermediate_projectors=True)
 
 params = list(filter(lambda p: p.requires_grad, student.parameters()))

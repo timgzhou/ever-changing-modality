@@ -152,23 +152,9 @@ def get_loaders(
         # else: leave default (ZScoreNormalizer) in get_benv2_loaders
         return get_benv2_loaders(**kwargs)
     elif dataset == 'benv2full':
-        from benv2full_data_utils import get_bigearthnet_loaders
-        # data_root can be e.g. '$TMPDIR' or 'datasets'; will look for BigEarthNet-{S2,S1} subdirs
-        kwargs = dict(
-            batch_size=batch_size, num_workers=num_workers,
-            starting_modality=starting_modality, new_modality=new_modality,
-        )
-        if data_root:
-            kwargs['s2_root'] = f"{data_root}/BigEarthNet-S2"
-            kwargs['s1_root'] = f"{data_root}/BigEarthNet-S1"
-        return get_bigearthnet_loaders(**kwargs)
+        raise NotImplementedError("No support for benv2full yet")
     elif dataset == 'pastis':
-        from geobench_data_utils import get_pastis_loaders
-        return get_pastis_loaders(
-            batch_size=batch_size, num_workers=num_workers,
-            starting_modality=starting_modality, new_modality=new_modality,
-            data_normalizer=data_normalizer, num_time_steps=num_time_steps,
-        )
+        raise NotImplementedError("No support for PASTIS yet")
     elif dataset == 'dfc2020':
         from dfc2020_data_utils import get_dfc2020_loaders
         kwargs = dict(batch_size=batch_size, num_workers=num_workers,
