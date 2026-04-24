@@ -15,23 +15,26 @@ from train_utils import single_modality_training_loop
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 EUROSAT_MODALITIES    = ['rgb', 'vre', 'nir', 'swir', 'aw', 's2']
-BENV2_MODALITIES      = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
+BENV2_MODALITIES      = ['s2', 's1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
 BENV2FULL_MODALITIES  = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
 PASTIS_MODALITIES     = ['s2', 's1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir']
-DFC2020_MODALITIES    = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
+DFC2020_MODALITIES    = ['s2', 's1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
 
 
 def get_task_config_and_loaders(dataset, modalities, batch_size, num_workers, data_normalizer=None, num_time_steps=10, data_root=None):
     """Return (train1_loader, val1_loader, test_loader, task_config, modality_bands_dict).
 
     modalities: list of modality names; first is primary (used for loaders).
+    When two modalities are given, the loader is initialized with both so that
+    task_config.modality_bands_dict contains entries for both.
     """
     from data_utils import get_loaders
     primary = modalities[0]
+    new_mod = modalities[1] if len(modalities) > 1 else None
     train1, val1, _, _, test, task_config = get_loaders(
         dataset, primary, batch_size, num_workers,
         data_normalizer=data_normalizer, num_time_steps=num_time_steps,
-        new_modality=None, data_root=data_root,
+        new_modality=new_mod, data_root=data_root,
     )
     modality_bands_dict = {m: task_config.modality_bands_dict[m] for m in modalities}
     return train1, val1, test, task_config, modality_bands_dict
@@ -84,6 +87,7 @@ def main():
     parser.add_argument('--data_root', type=str, default=None,
                         help='Root directory for benv2full dataset. Should contain BigEarthNet-S2 and BigEarthNet-S1 subdirs. '
                              'Default: looks in current dir.')
+    parser.add_argument('--skipsave', action='store_true')
     args = parser.parse_args()
 
     # Validate modalities against dataset
@@ -265,15 +269,16 @@ def main():
         num_classes=task_config.num_classes if is_segmentation else None,
         ignore_index=ignore_index if is_segmentation else -100,
         val_loader=val1_loader,
-        best_checkpoint_path=checkpoint_path,
+        best_checkpoint_path=checkpoint_path if not args.skipsave else None,
         val_per_epoch=args.val_per_epoch,
         warmup_epochs=args.warmup_epochs,
     )
 
     # Patch normalization into checkpoint config so shot_ete.py can read it back
-    ckpt = torch.load(checkpoint_path, map_location='cpu')
-    ckpt['config']['normalization'] = normalization
-    torch.save(ckpt, checkpoint_path)
+    if not args.skipsave:
+        ckpt = torch.load(checkpoint_path, map_location='cpu')
+        ckpt['config']['normalization'] = normalization
+        torch.save(ckpt, checkpoint_path)
 
     print(f"\n=== Stage 0 Training complete ===")
     print(f"  Train {metric_name}: {train_metric:.2f}%")
@@ -313,5 +318,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-# for run example see sh/{dataset}

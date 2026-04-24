@@ -55,3 +55,11 @@ evan_base,rgb,rgb+nir,fft,0,fft,0.0001,1e-05,107342602,20,True,Acc,100.00,98.57,
 evan_base,rgb,rgb+vre,fft,0,fft,0.0001,1e-05,107539210,20,True,Acc,100.00,98.57,98.63,98.09,98.19,18,98.07,98.09,,clstoken,checkpoints/sft_evan_base_eurosat_rgb_fft_lr0.0005_20260418_002329.pt
 evan_base,vre,vre+rgb,fft,0,fft,0.0001,1e-05,107539210,20,True,Acc,100.00,90.06,90.67,90.04,90.43,18,91.11,90.43,,clstoken,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0005_20260418_051940.pt
 evan_base,swir,swir+rgb,fft,0,fft,0.0001,1e-05,107539210,20,True,Acc,100.00,89.20,88.59,89.56,89.65,19,90.52,89.65,,clstoken,checkpoints/sft_evan_base_eurosat_swir_fft_lr0.0005_20260418_052634.pt
+evan_base,swir,swir+nir,fft,0,fft,0.001,0.01,107342602,20,True,Acc,100.00,89.20,88.59,75.11,75.11,20,77.30,75.11,,clstoken,checkpoints/sft_evan_base_eurosat_swir_fft_lr0.0005_20260418_052634.pt
+evan_base,swir,swir+nir,fft,0,fft,0.001,1e-05,107342602,20,True,Acc,100.00,89.20,88.59,76.20,76.20,20,78.33,76.20,,clstoken,checkpoints/sft_evan_base_eurosat_swir_fft_lr0.0005_20260418_052634.pt
+evan_large,swir,swir+nir,fft,0,fft,0.001,0.01,341488650,20,True,Acc,100.00,95.96,95.57,89.94,90.19,16,91.07,90.00,,clstoken,checkpoints/sft_evan_large_eurosat_swir_fft_lr0.0005_20260418_042950.pt
+evan_base,swir,swir+nir,fft,0,fft,0.0003,0.01,107342602,20,True,Acc,100.00,89.20,88.59,88.09,88.09,20,90.74,88.09,,clstoken,checkpoints/sft_evan_base_eurosat_swir_fft_lr0.0005_20260418_052634.pt
+evan_base,swir,swir+nir,fft,0,fft,0.0003,1e-05,107342602,20,True,Acc,100.00,89.20,88.59,88.61,88.63,19,90.33,88.63,,clstoken,checkpoints/sft_evan_base_eurosat_swir_fft_lr0.0005_20260418_052634.pt
+evan_base,swir,swir+nir,fft,0,fft,0.0001,0.01,107342602,20,True,Acc,100.00,89.20,88.59,88.33,88.33,20,90.56,88.19,,clstoken,checkpoints/sft_evan_base_eurosat_swir_fft_lr0.0005_20260418_052634.pt
+evan_large,swir,swir+nir,fft,0,fft,0.001,1e-05,341488650,20,True,Acc,100.00,95.96,95.57,89.87,89.87,20,91.56,89.87,,clstoken,checkpoints/sft_evan_large_eurosat_swir_fft_lr0.0005_20260418_042950.pt
+evan_base,swir,swir+nir,fft,0,fft,0.0001,1e-05,107342602,20,True,Acc,100.00,89.20,88.59,88.37,88.39,19,90.44,88.37,,clstoken,checkpoints/sft_evan_base_eurosat_swir_fft_lr0.0005_20260418_052634.pt

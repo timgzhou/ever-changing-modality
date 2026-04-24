@@ -70,11 +70,16 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 logger = logging.getLogger(__name__)
 
 MODALITY_CONFIGS = {
-    'eurosat': ['s2', 'rgb', 'vre', 'nir', 'swir', 'aw'],  # s2 = all 13 bands
-    'benv2': ['s2', 's1', 's2s1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
-    'benv2full': ['s2', 's1', 's2s1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
+    'eurosat': ['s2', 'rgb', 'vre', 'nir', 'swir', 'aw',
+                'rgb+nir', 'rgb+vre', 'rgb+swir',
+                'swir+nir', 'swir+rgb', 'swir+vre', 'vre+nir', 'vre+rgb'],
+    'benv2': ['s2', 's1', 's2s1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw',
+              's2_rgb+s1', 's2_rgb+s2_norgb', 's1+s2', 's2+s1'],
+    'benv2full': ['s2', 's1', 's2s1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw',
+                  's2_rgb+s1', 's2_rgb+s2_norgb', 's1+s2', 's2+s1'],
     'pastis': ['s2', 's1', 's2s1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir'],
-    'dfc2020': ['s2', 's1', 's2s1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw'],
+    'dfc2020': ['s2', 's1', 's2s1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw',
+                's2_rgb+s1', 's2_rgb+s2_norgb', 's1+s2', 's2+s1'],
 }
 
 # Short model names → HuggingFace repo IDs for DINOv3 ViT models
@@ -384,11 +389,45 @@ class DinoWrapper(ModelWrapper):
             return ModelOutput(tokens[:, 0, :])              # CLS token [B, D]
 
 
+# (dataset, modality) → band name strings (S2, passed to get_band_wavelengths)
+#                     or int tuples (synthetic SAR IDs, used directly).
+# Raises at PanopticonWrapper construction time for unregistered combos.
+# Combined modalities (e.g. 's2_rgb+s1') are split and each part looked up separately.
+PANOPTICON_CHANNEL_IDS = {
+    # ── EuroSAT (13-band S2: B01–B12 incl. B10) ──────────────────────────
+    ('eurosat', 's2'):       ('B01','B02','B03','B04','B05','B06','B07','B08','B8A','B09','B10','B11','B12'),
+    ('eurosat', 'rgb'):      ('B04','B03','B02'),
+    ('eurosat', 's2_rgb'):   ('B04','B03','B02'),
+    ('eurosat', 'vre'):      ('B05','B06','B07'),
+    ('eurosat', 's2_vre'):   ('B05','B06','B07'),
+    ('eurosat', 'nir'):      ('B08','B8A'),
+    ('eurosat', 's2_nir'):   ('B08','B8A'),
+    ('eurosat', 'swir'):     ('B10','B11','B12'),
+    ('eurosat', 's2_swir'):  ('B10','B11','B12'),
+    ('eurosat', 'aw'):       ('B01','B09'),
+    ('eurosat', 's2_aw'):    ('B01','B09'),
+    ('eurosat', 's2_norgb'): ('B01','B02','B05','B06','B07','B08','B8A','B09','B10','B11','B12'),
+    # ── BEN-v2 (12-band S2: no B10) ──────────────────────────────────────
+    ('benv2', 's2'):         ('B01','B02','B03','B04','B05','B06','B07','B08','B8A','B09','B11','B12'),
+    ('benv2', 's1'):         (-1, -2),   # VV, VH
+    ('benv2', 's2_rgb'):     ('B04','B03','B02'),
+    ('benv2', 's2_norgb'):   ('B01','B05','B06','B07','B08','B8A','B09','B11','B12'),
+    # ── DFC2020 (13-band S2: incl. B10) ──────────────────────────────────
+    ('dfc2020', 's2'):       ('B01','B02','B03','B04','B05','B06','B07','B08','B8A','B09','B10','B11','B12'),
+    ('dfc2020', 's1'):       (-1, -2),
+    ('dfc2020', 's2_rgb'):   ('B04','B03','B02'),
+    ('dfc2020', 's2_norgb'): ('B01','B02','B05','B06','B07','B08','B8A','B09','B10','B11','B12'),
+    # PASTIS: not yet implemented — will raise at construction time
+}
+
+
 class PanopticonWrapper(ModelWrapper):
     """
     Wraps Panopticon to accept [B, C, H, W] and automatically build chn_ids.
 
-    Channel IDs are Sentinel-2 band centre wavelengths (nm) or synthetic IDs for other datasets.
+    Channel IDs are Sentinel-2 band centre wavelengths (nm) or synthetic IDs for SAR.
+    Looked up from PANOPTICON_CHANNEL_IDS at construction time; raises immediately on
+    unrecognized dataset+modality combos.
     """
 
     def __init__(self, model, modality='s2', dataset=None):
@@ -397,25 +436,25 @@ class PanopticonWrapper(ModelWrapper):
         self.modality = modality
         self.dataset = dataset
 
-        # Sentinel-2 Channel IDs (band centre wavelengths in nm)
-        # 12-band S2 (BEN-v2 / BEN-v2full / PASTIS — no B10)
-        self.S2_CHN_IDS = torch.tensor([442, 492, 559, 664, 704, 740, 782, 827, 864, 945, 1613, 2203],
-                                       dtype=torch.int16)
-        # 13-band S2 (DFC2020 — includes B10 at ~1375 nm)
-        self.S2_13_CHN_IDS = torch.tensor([442, 492, 559, 664, 704, 740, 782, 827, 864, 945, 1375, 1613, 2203],
-                                          dtype=torch.int16)
-        self.S1_CHN_IDS = torch.tensor([-1, -2], dtype=torch.int16)
-        self.S2S1_CHN_IDS = torch.cat([self.S2_CHN_IDS, self.S1_CHN_IDS])        # 14ch
-        self.S2S1_13_CHN_IDS = torch.cat([self.S2_13_CHN_IDS, self.S1_CHN_IDS])  # 15ch (DFC2020)
+        from eurosat_data_utils import get_band_wavelengths
 
-        # Pre-compute channel IDs for any S2 sub-band modality (rgb, vre, nir, swir, aw, s2_rgb, ...)
-        # using the authoritative BAND_WAVELENGTHS table from eurosat_data_utils.
-        from eurosat_data_utils import get_band_wavelengths, MODALITY_BANDS, ALL_BAND_NAMES
-        self.subband_chn_ids = None
-        if modality in MODALITY_BANDS:
-            band_names = ALL_BAND_NAMES if modality == 's2' else MODALITY_BANDS[modality]
-            wavelengths = get_band_wavelengths(band_names)
-            self.subband_chn_ids = torch.tensor(wavelengths, dtype=torch.int16)
+        def _resolve_ids(ds, mod):
+            key = (ds, mod)
+            if key not in PANOPTICON_CHANNEL_IDS:
+                raise ValueError(
+                    f"PanopticonWrapper: no channel ID mapping for "
+                    f"dataset={ds!r}, modality={mod!r}. "
+                    f"Add it to PANOPTICON_CHANNEL_IDS in rsfm_sft.py."
+                )
+            spec = PANOPTICON_CHANNEL_IDS[key]
+            if spec and isinstance(spec[0], str):
+                return list(get_band_wavelengths(spec))
+            return list(spec)
+
+        ids = []
+        for part in modality.split('+'):
+            ids.extend(_resolve_ids(dataset, part))
+        self.chn_ids = torch.tensor(ids, dtype=torch.int16)
 
     def forward(self, imgs, output_hidden_states=False):
         """
@@ -424,37 +463,11 @@ class PanopticonWrapper(ModelWrapper):
         last_hidden_state is:
           - [B, 768] (CLS token) when output_hidden_states=False (classification)
           - [B, N, 768] (patch tokens) when output_hidden_states=True (segmentation)
-
-        Panopticon's channel fusion layer handles arbitrary channel counts.
-        We provide chn_ids (band wavelengths in nm) for each channel.
         """
         B, C, H, W = imgs.shape
         device = imgs.device
 
-        # Determine channel IDs based on channel count / dataset
-        if C == 15:
-            # DFC2020 S2(13ch)+S1(2ch)
-            chn_ids = self.S2S1_13_CHN_IDS.to(device)
-        elif C == 14:
-            # BEN-v2 / PASTIS S2(12ch)+S1(2ch)
-            chn_ids = self.S2S1_CHN_IDS.to(device)
-        elif C == 13:
-            # DFC2020 S2-only (13 bands including B10)
-            chn_ids = self.S2_13_CHN_IDS.to(device)
-        elif C == 12:
-            # BEN-v2 / PASTIS S2-only (12 bands, no B10)
-            chn_ids = self.S2_CHN_IDS.to(device)
-        elif C == 2:
-            # S1 only (VV, VH)
-            chn_ids = self.S1_CHN_IDS.to(device)
-        elif self.subband_chn_ids is not None:
-            # Sub-band S2 modality (rgb, vre, nir, swir, aw, s2_rgb, ...): use known wavelengths
-            chn_ids = self.subband_chn_ids.to(device)
-        else:
-            raise ValueError(f"Unknown modality {self.modality!r} ({C} channels) — add it to MODALITY_BANDS in eurosat_data_utils.py")
-
-        # Expand to batch
-        chn_ids = chn_ids.unsqueeze(0).expand(B, -1)
+        chn_ids = self.chn_ids.to(device).unsqueeze(0).expand(B, -1)
 
         x_dict = dict(imgs=imgs, chn_ids=chn_ids)
 
@@ -661,18 +674,31 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
     For OlmoEarth/DINO (raw_pixels=True) normalization is handled inside the model wrapper,
     so preprocess_fn only slices.
 
+    Combined modalities (e.g. 'rgb+nir', 's2_rgb+s1') are supported: the '+' is the
+    separator between start and new modality. The loader initializes with both, and
+    preprocess_fn concatenates their channels.
+
     Args:
         raw_pixels: If True, skip dataset-level normalization (for models like OlmoEarth
                     that apply their own normalization internally).
     """
     from data_utils import get_loaders, create_multimodal_batch
 
-    # s2s1 = concatenated all-bands; load with both modalities so the stacked image is available
-    starting_modality = 's2' if modality == 's2s1' else modality
-    new_modality = 's1' if modality == 's2s1' else None
-
     # data_normalizer=False signals loaders to skip normalization (OlmoEarth path)
     data_normalizer = False if raw_pixels else None
+
+    # Determine whether this is a combined modality ('+'-separated)
+    if '+' in modality:
+        parts = modality.split('+', 1)
+        starting_modality, new_modality = parts[0], parts[1]
+        is_combined = True
+    elif modality == 's2s1':
+        # Legacy combined token: s2 + s1
+        starting_modality, new_modality = 's2', 's1'
+        is_combined = True
+    else:
+        starting_modality, new_modality = modality, None
+        is_combined = False
 
     train1, val1, _, _, test, task_config = get_loaders(
         dataset, starting_modality, batch_size, num_workers,
@@ -680,15 +706,36 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
         new_modality=new_modality, data_root=data_root,
     )
 
-    if modality == 's2s1':
-        # Build a slice spanning the full stacked image (s2 then s1, already concatenated)
-        mbd = task_config.modality_bands_dict
-        s2_sl = mbd['s2']
-        s1_sl = mbd['s1']
-        s2s1_slice = slice(s2_sl.start, s1_sl.stop)
-        modality_bands_dict = {'s2s1': s2s1_slice}
+    mbd = task_config.modality_bands_dict
+
+    if is_combined:
+        # Build a combined modality_bands_dict entry by concatenating both slices.
+        # For GeoBench/DFC2020 the values are slices or int-lists; we build a list of indices.
+        # For EuroSAT the values are band-name tuples; we concatenate them.
+        start_entry = mbd[starting_modality]
+        new_entry   = mbd[new_modality]
+        if isinstance(start_entry, slice) and isinstance(new_entry, slice):
+            # Both are contiguous slices — span them if adjacent, else use index list
+            if start_entry.stop == new_entry.start:
+                combined_entry = slice(start_entry.start, new_entry.stop)
+            else:
+                combined_entry = list(range(*start_entry.indices(mbd.get('_total', 9999)))) + \
+                                 list(range(*new_entry.indices(mbd.get('_total', 9999))))
+        elif isinstance(start_entry, slice):
+            combined_entry = list(range(start_entry.start, start_entry.stop)) + list(new_entry)
+        elif isinstance(new_entry, slice):
+            combined_entry = list(start_entry) + list(range(new_entry.start, new_entry.stop))
+        elif isinstance(start_entry, tuple) and isinstance(new_entry, tuple):
+            # EuroSAT: band-name tuples
+            combined_entry = start_entry + new_entry
+        else:
+            combined_entry = list(start_entry) + list(new_entry)
+        if modality == 's2s1':
+            modality_bands_dict = {'s2s1': combined_entry}
+        else:
+            modality_bands_dict = {modality: combined_entry}
     else:
-        modality_bands_dict = {modality: task_config.modality_bands_dict[modality]}
+        modality_bands_dict = {modality: mbd[modality]}
 
     # Build preprocess_fn: for EuroSAT the dict values are band-name tuples, so we must
     # go through create_multimodal_batch which does min-max + optional ImageNet norm.
@@ -702,25 +749,49 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
     _EUROSAT_RAW_SLICES = {
         # EuroSAT ALL_BAND_NAMES: [B01,B02,B03,B04,B05,B06,B07,B08,B8A,B09,B10,B11,B12]
         #                  index:    0    1    2    3    4    5    6    7    8    9   10   11   12
-        'rgb':  [3, 2, 1],   # B04, B03, B02
-        'vre':  [4, 5, 6],   # B05, B06, B07
-        'nir':  [7, 8],      # B08, B8A
-        'swir': [11, 12],    # B11, B12 (drop B10 — not in OlmoEarth's band set)
+        'rgb':   [3, 2, 1],          # B04, B03, B02
+        'vre':   [4, 5, 6],          # B05, B06, B07
+        'nir':   [7, 8],             # B08, B8A
+        'swir':  [11, 12],           # B11, B12 (drop B10 — not in OlmoEarth's band set)
+        'rgb+nir':  [3, 2, 1, 7, 8],
+        'rgb+vre':  [3, 2, 1, 4, 5, 6],
+        'rgb+swir': [3, 2, 1, 11, 12],
+        'swir+nir': [11, 12, 7, 8],
+        'swir+rgb': [11, 12, 3, 2, 1],
+        'swir+vre': [11, 12, 4, 5, 6],
+        'vre+nir':  [4, 5, 6, 7, 8],
+        'vre+rgb':  [4, 5, 6, 3, 2, 1],
         # s2: reorder EuroSAT bands to match OlmoEarth's S2_BAND_ORDER_12
         # S2_BAND_ORDER_12 = [B02,B03,B04,B08,B05,B06,B07,B8A,B11,B12,B01,B09]
-        's2':   [1, 2, 3, 7, 4, 5, 6, 8, 11, 12, 0, 9],
+        's2':    [1, 2, 3, 7, 4, 5, 6, 8, 11, 12, 0, 9],
     }
     first_val = next(iter(modality_bands_dict.values()))
     if isinstance(first_val, (slice, list)):
-        # GeoBench / DFC2020: batch already normalized; just slice the channel dim.
-        _slice = first_val  # the single modality's slice or list
+        # GeoBench / DFC2020: batch already normalized; concatenate channel slices.
+        _entry = first_val
         def preprocess_fn(batch):
-            return batch['image'][:, _slice]
+            return batch['image'][:, _entry]
     elif raw_pixels and modality in _EUROSAT_RAW_SLICES:
         # EuroSAT + raw_pixels model (OlmoEarth, DINO): slice raw DN channels, skip normalization.
         _ch = _EUROSAT_RAW_SLICES[modality]
         def preprocess_fn(batch):
             return batch['image'][:, _ch]
+    elif isinstance(first_val, tuple):
+        if is_combined:
+            # EuroSAT combined: normalize each sub-modality separately then cat
+            _start_bands = mbd[starting_modality]
+            _new_bands   = mbd[new_modality]
+            def preprocess_fn(batch):
+                r_start = create_multimodal_batch(batch, modality_bands_dict={starting_modality: _start_bands}, modalities=(starting_modality,))
+                r_new   = create_multimodal_batch(batch, modality_bands_dict={new_modality: _new_bands},         modalities=(new_modality,))
+                return torch.cat([r_start[starting_modality], r_new[new_modality]], dim=1)
+        else:
+            # EuroSAT single modality: band-name tuples — delegate to create_multimodal_batch.
+            _mbd = modality_bands_dict
+            _mod = modality
+            def preprocess_fn(batch):
+                result = create_multimodal_batch(batch, modality_bands_dict=_mbd, modalities=(_mod,))
+                return result[_mod]
     else:
         # EuroSAT: band-name tuples — delegate to create_multimodal_batch for normalization.
         _mbd = modality_bands_dict
@@ -1145,3 +1216,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# python rsfm_sft.py --model allenai/OlmoEarth-v1-Base --dataset benv2 --modality s2 --train_mode lp --epochs 5

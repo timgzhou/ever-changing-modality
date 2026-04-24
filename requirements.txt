@@ -12,7 +12,9 @@ accelerate
 torchgeo
 seaborn
 geobenchv2
+h5py==3.15.0
 torchinfo
 scikit-learn
 rslearn
 olmoearth-pretrain
+huggingface_hub[hf_xet]

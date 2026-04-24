@@ -738,7 +738,7 @@ def main():
                   "best_val_agreement",
                   "ensemble_metric_logits", "ensemble_metric_softmax",
                   "teacher_classifier_acc", "supervised_classifier_acc", "supervised_classifier_best_acc",
-                  "saved_checkpoint", "global_rep", "teacher_checkpoint"]
+                  "saved_checkpoint", "global_rep", "teacher_checkpoint", "init_from_teacher"]
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
         if not file_exists:
@@ -753,7 +753,7 @@ def main():
             f"{teacher_classifier_acc:.2f}" if teacher_classifier_acc is not None else "",
             f"{supervised_classifier_acc:.2f}" if supervised_classifier_acc is not None else "",
             f"{supervised_classifier_best_acc:.2f}" if supervised_classifier_best_acc is not None else "",
-            "", args.global_rep, teacher_checkpoint_path,
+            "", args.global_rep, teacher_checkpoint_path, args.init_from_teacher,
         ])
 
     print(f"\nResults appended to {filename}")

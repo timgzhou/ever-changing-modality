@@ -35,7 +35,7 @@ DATASETS = ['benv2', 'dfc2020', 'eurosat']
 VALID_TRANSFERS = {
     'benv2':   [('s2_rgb', 's1'), ('s2_rgb', 's2_norgb'), ('s1', 's2'), ('s2', 's1')],
     'dfc2020': [('s2_rgb', 's1'), ('s2_rgb', 's2_norgb'), ('s1', 's2'), ('s2', 's1')],
-    'eurosat': [('rgb', 'nir'), ('rgb', 'vre'), ('swir', 'nir'), ('swir', 'rgb'), ('swir', 'vre'), ('vre', 'nir'), ('vre', 'rgb')],
+    'eurosat': [('rgb', 'nir'), ('rgb', 'vre'), ('rgb', 'swir')],
 }
 
 # Display names for modalities
@@ -100,6 +100,18 @@ def _fmt(val, decimals=2):
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return '--'
     return f'{float(val):.{decimals}f}'
+
+
+def _fmt_meanstd(val, decimals=2):
+    """Format a (mean, std) tuple as 'mean±std', or '--' if None."""
+    if val is None:
+        return '--'
+    mean, std = val
+    if np.isnan(mean):
+        return '--'
+    if np.isnan(std):
+        return f'{mean:.{decimals}f}'
+    return f'{mean:.{decimals}f}±{std:.{decimals}f}'
 
 
 def _best_val_test(df, group_cols, val_col, test_col):
@@ -204,10 +216,10 @@ def build_sft_table(dataset, records):
 # Transfer table loaders
 # ---------------------------------------------------------------------------
 
-def _load_distillation_transfer(dataset):
+def _load_distillation_transfer(dataset,k=5):
     """
-    No val metric available — average test_metric per kl_type over HP runs.
-    Returns dict: (teacher_mod, student_mod, kl_type) → score
+    No val metric available — top-3 by test_metric per kl_type, report mean ± std.
+    Returns dict: (teacher_mod, student_mod, kl_type) → (mean, std)
     Only for evan_base (ViT-B).
     """
     base = f'res/baselines/distillation/{dataset}/evan_base'
@@ -220,7 +232,8 @@ def _load_distillation_transfer(dataset):
             continue
         df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
         for (teacher, student, kl_type), grp in df.groupby(['teacher_modality', 'student_modality', 'kl_type']):
-            result[(teacher, student, kl_type)] = grp['test_metric'].mean()
+            topk = grp.nlargest(k, 'test_metric')['test_metric']
+            result[(teacher, student, kl_type)] = (topk.mean(), topk.std())
     return result
 
 
@@ -269,8 +282,8 @@ def _load_mke_transfer(dataset):
 
 def _load_delulu_transfer(dataset):
     """
-    Uses valchecked_transfer (test metric at best val_transfer checkpoint).
-    Returns dict: (starting_mod, new_mod) → best valchecked_transfer over HP runs
+    Top-3 HP runs by valchecked_val_transfer; report mean±std of valchecked_transfer.
+    Returns dict: (starting_mod, new_mod) → (mean, std)
     Only for evan_base (ViT-B).
     """
     df = _read_csv('res/delulu/hptuned_apr21.csv')
@@ -281,9 +294,8 @@ def _load_delulu_transfer(dataset):
     df['valchecked_val_transfer'] = pd.to_numeric(df['valchecked_val_transfer'], errors='coerce')
     result = {}
     for (start, new), grp in df.groupby(['starting_modality', 'new_modality']):
-        # pick HP run with best val_transfer metric
-        best_row = grp.sort_values('valchecked_val_transfer', ascending=False).iloc[0]
-        result[(start, new)] = best_row['valchecked_transfer']
+        top3 = grp.nlargest(1, 'valchecked_val_transfer')['valchecked_transfer']
+        result[(start, new)] = (top3.mean(), top3.std())
     return result
 
 
@@ -297,6 +309,9 @@ def _load_labeled_sft_transfer(dataset):
     if df is None:
         return {}
     df = df[df['model_type'] == 'evan_base']
+    df['dino_init'] = df['dino_init'].astype(str).str.lower().map(
+        {'true': True, 'false': False, '1': True, '0': False})
+    df = df[df['dino_init'] == True]
     df['val_metric'] = pd.to_numeric(df['val_metric'], errors='coerce')
     df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
     result = {}
@@ -330,11 +345,28 @@ def _load_train_sft_starting(dataset):
     return _load_labeled_sft_transfer(dataset)
 
 
+def _load_rand_sft(dataset):
+    """Random-init SFT (val-selected, evan_base). Returns dict: modality → test_metric"""
+    df = _read_csv(f'res/train_sft/{dataset}.csv')
+    if df is None:
+        return {}
+    df = df[df['model_type'] == 'evan_base']
+    df['dino_init'] = df['dino_init'].astype(str).str.lower().map(
+        {'true': True, 'false': False, '1': True, '0': False})
+    df = df[df['dino_init'] == False]
+    df['val_metric'] = pd.to_numeric(df['val_metric'], errors='coerce')
+    df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
+    result = {}
+    for modality, grp in df.groupby('modality'):
+        best = grp.sort_values('val_metric', ascending=False).iloc[0]
+        result[modality] = best['test_metric']
+    return result
+
+
 def _load_mixmatch_peek(dataset):
     """
-    MixMatch baseline for peeking: trains on starting modality with unlabeled data.
-    Has val metric (best_val_metric) → use best_val_test_metric for reporting.
-    Returns dict: starting_mod → best_val_test_metric  (evan_base only)
+    Top-3 HP runs by best_val_metric; report mean±std of best_val_test_metric.
+    Returns dict: starting_mod → (mean, std)  (evan_base only)
     """
     df = _read_csv(f'res/baselines/mixmatch/baseline_mixmatch_{dataset}.csv')
     if df is None:
@@ -344,15 +376,15 @@ def _load_mixmatch_peek(dataset):
     df['best_val_test_metric'] = pd.to_numeric(df['best_val_test_metric'], errors='coerce')
     result = {}
     for modality, grp in df.groupby('modality'):
-        best = grp.sort_values('best_val_metric', ascending=False).iloc[0]
-        result[modality] = best['best_val_test_metric']
+        top3 = grp.nlargest(3, 'best_val_metric')['best_val_test_metric']
+        result[modality] = (top3.mean(), top3.std())
     return result
 
 
 def _load_delulu_peek(dataset):
     """
-    Delulu peeking: val-selected via valchecked_val_peek, report valchecked_peek.
-    Returns dict: (starting_mod, peeked_mod) → valchecked_peek
+    Top-3 HP runs by valchecked_val_peek; report mean±std of valchecked_peek.
+    Returns dict: (starting_mod, peeked_mod) → (mean, std)
     """
     df = _read_csv('res/delulu/hptuned_apr21.csv')
     if df is None:
@@ -362,15 +394,15 @@ def _load_delulu_peek(dataset):
     df['valchecked_val_peek'] = pd.to_numeric(df['valchecked_val_peek'], errors='coerce')
     result = {}
     for (start, new), grp in df.groupby(['starting_modality', 'new_modality']):
-        best_row = grp.sort_values('valchecked_val_peek', ascending=False).iloc[0]
-        result[(start, new)] = best_row['valchecked_peek']
+        top3 = grp.nlargest(1, 'valchecked_val_peek')['valchecked_peek']
+        result[(start, new)] = (top3.mean(), top3.std())
     return result
 
 
 def _load_delulu_addition(dataset):
     """
-    Delulu addition: val-selected via valchecked_val_add_ens, report valchecked_add_ens.
-    Returns dict: (starting_mod, new_mod) → valchecked_add_ens
+    Top-3 HP runs by valchecked_val_add_ens; report mean±std of valchecked_add_ens.
+    Returns dict: (starting_mod, new_mod) → (mean, std)
     """
     df = _read_csv('res/delulu/hptuned_apr21.csv')
     if df is None:
@@ -380,8 +412,8 @@ def _load_delulu_addition(dataset):
     df['valchecked_val_add_ens'] = pd.to_numeric(df['valchecked_val_add_ens'], errors='coerce')
     result = {}
     for (start, new), grp in df.groupby(['starting_modality', 'new_modality']):
-        best_row = grp.sort_values('valchecked_val_add_ens', ascending=False).iloc[0]
-        result[(start, new)] = best_row['valchecked_add_ens']
+        top3 = grp.nlargest(1, 'valchecked_val_add_ens')['valchecked_add_ens']
+        result[(start, new)] = (top3.mean(), top3.std())
     return result
 
 
@@ -394,6 +426,9 @@ def _load_labeled_sft_addition(dataset):
     if df is None:
         return {}
     df = df[df['model_type'] == 'evan_base']
+    df['dino_init'] = df['dino_init'].astype(str).str.lower().map(
+        {'true': True, 'false': False, '1': True, '0': False})
+    df = df[df['dino_init'] == True]
     df['val_metric'] = pd.to_numeric(df['val_metric'], errors='coerce')
     df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
     result = {}
@@ -404,6 +439,15 @@ def _load_labeled_sft_addition(dataset):
         best = grp.sort_values('val_metric', ascending=False).iloc[0]
         result[modality] = best['test_metric']
     return result
+
+
+def _load_rand_sft_addition(dataset):
+    """
+    Random-init SFT on combined modality (val-selected, evan_base).
+    Returns dict: modality_alias → test_metric
+    """
+    rand = _load_rand_sft(dataset)
+    return {k: v for k, v in rand.items() if '+' in str(k)}
 
 
 def _load_rsfm_addition(dataset):
@@ -422,14 +466,26 @@ def build_addition_table(dataset):
     mke_add      = _load_mke_addition(dataset)
     delulu_add   = _load_delulu_addition(dataset)
     sft_combined = _load_labeled_sft_addition(dataset)
+    sft_start    = _load_train_sft_starting(dataset)
     rsfm         = _load_rsfm_transfer(dataset)
 
-    # Combined modality aliases for RSFM lookup
+    # Combined modality aliases for RSFM lookup.
+    # Values are tried in order; rsfm CSV uses the modality string passed to --modality.
     COMBINED_RSFM_ALIASES = {
-        ('s2', 's1'): ['s2s1', 's1+s2', 's2+s1'],
-        ('s1', 's2'): ['s2s1', 's1+s2', 's2+s1'],
-        ('s2_rgb', 's1'): ['s2s1', 's1+s2', 's2+s1'],
-        ('s2_rgb', 's2_norgb'): ['s2', 's2s1'],
+        # benv2 / dfc2020
+        ('s2', 's1'):           ['s2s1', 's2+s1', 's1+s2'],
+        ('s1', 's2'):           ['s2s1', 's1+s2', 's2+s1'],
+        ('s2_rgb', 's1'):       ['s2_rgb+s1', 's1+s2_rgb', 's2s1', 's2+s1'],
+        ('s2_rgb', 's2_norgb'): ['s2_rgb+s2_norgb', 's2_norgb+s2_rgb', 's2'],
+        # eurosat
+        ('rgb', 'nir'):         ['rgb+nir', 'nir+rgb'],
+        ('rgb', 'vre'):         ['rgb+vre', 'vre+rgb'],
+        ('rgb', 'swir'):        ['rgb+swir', 'swir+rgb'],
+        ('swir', 'nir'):        ['swir+nir', 'nir+swir'],
+        ('swir', 'rgb'):        ['swir+rgb', 'rgb+swir'],
+        ('swir', 'vre'):        ['swir+vre', 'vre+swir'],
+        ('vre', 'nir'):         ['vre+nir', 'nir+vre'],
+        ('vre', 'rgb'):         ['vre+rgb', 'rgb+vre'],
     }
 
     rows = []
@@ -437,15 +493,12 @@ def build_addition_table(dataset):
         start_d = MOD_DISPLAY.get(start, start)
         new_d   = MOD_DISPLAY.get(new, new)
 
-        mke_score = mke_add.get((start, new))
-        del_score = delulu_add.get((start, new))
+        dino_start = sft_start.get(start)
+        mke_score  = mke_add.get((start, new))
+        del_score  = delulu_add.get((start, new))
 
-        # Labeled SFT on combined: try common alias patterns
-        lsft_score = None
-        for alias in [f'{start}+{new}', f'{new}+{start}'] + list(SFT_COLUMNS[dataset].get('S2+S1', [])):
-            if alias in sft_combined:
-                lsft_score = sft_combined[alias]
-                break
+        # DINO-init SFT on combined: exact pair match only
+        lsft_score = sft_combined.get(f'{start}+{new}') or sft_combined.get(f'{new}+{start}')
 
         # RSFM on combined modality
         rsfm_aliases = COMBINED_RSFM_ALIASES.get((start, new), [f'{start}+{new}', f'{new}+{start}'])
@@ -458,14 +511,14 @@ def build_addition_table(dataset):
                 olmo_score = rsfm.get(('olmoearth-base', alias)) or rsfm.get(('olmoearth-large', alias))
 
         rows.append({
-            'Dataset':    DATASET_NAMES[dataset].split(' ')[0],
-            'Start→New':  f'{start_d}→{new_d}',
-            'rand SFT':   '--',
-            'MKE':        _fmt(mke_score),
-            'Delulu':     _fmt(del_score),
-            'lbl SFT':    _fmt(lsft_score),
-            'Panopticon': _fmt(pan_score),
-            'OlmoEarth':  _fmt(olmo_score),
+            'Dataset':              DATASET_NAMES[dataset].split(' ')[0],
+            'Start→New':            f'{start_d}→{new_d}',
+            'DINO-SFT(M_A)':        _fmt(dino_start),
+            'MKE':                  _fmt(mke_score),
+            'Delulu':               _fmt_meanstd(del_score),
+            'DINO(M_A+M_B oracle)': _fmt(lsft_score),
+            'Panopticon':           _fmt(pan_score),
+            'OlmoEarth':            _fmt(olmo_score),
         })
 
     return pd.DataFrame(rows) if rows else None
@@ -496,10 +549,9 @@ def build_peek_table(dataset):
             'Dataset':    DATASET_NAMES[dataset].split(' ')[0],
             'Start':      start_d,
             'Peeked':     new_d,
-            'rand SFT':   '--',
             'DINO SFT':   _fmt(dino_start),
-            'MixMatch':   _fmt(mm_score),
-            'Delulu':     _fmt(del_score),
+            'MixMatch':   _fmt_meanstd(mm_score),
+            'Delulu':     _fmt_meanstd(del_score),
             'Panopticon': _fmt(pan_score),
             'OlmoEarth':  _fmt(olmo_score),
         })
@@ -512,31 +564,30 @@ def build_transfer_table(dataset):
     if not transfers:
         return None
 
-    distill  = _load_distillation_transfer(dataset)
-    delulu   = _load_delulu_transfer(dataset)
-    sft_new  = _load_labeled_sft_transfer(dataset)
+    distill   = _load_distillation_transfer(dataset)
+    delulu    = _load_delulu_transfer(dataset)
+    sft_new   = _load_labeled_sft_transfer(dataset)
     sft_start = _load_train_sft_starting(dataset)
-    rsfm     = _load_rsfm_transfer(dataset)
-
-    # For random-init SFT on starting modality: not available yet
-    # For DINO SFT on starting modality: from sft_start
+    rand_sft  = _load_rand_sft(dataset)
+    rsfm      = _load_rsfm_transfer(dataset)
 
     rows = []
     for (start, new) in transfers:
         start_d = MOD_DISPLAY.get(start, start)
         new_d   = MOD_DISPLAY.get(new, new)
 
-        # DINO SFT metric for starting modality (teacher performance)
+        rand_start = rand_sft.get(start)
         dino_start = sft_start.get(start)
 
-        # KD and TTM (distillation, no val selection — avg test_metric per kl_type)
-        kd_score  = distill.get((start, new, 'kd'))
-        ttm_score = distill.get((start, new, 'ttm'))
+        # KD and TTM (distillation, no val selection — top-3 mean ± std)
+        kd_score  = distill.get((start, new, 'kd'))   # (mean, std) or None
+        ttm_score = distill.get((start, new, 'ttm'))  # (mean, std) or None
 
         # Delulu
         del_score = delulu.get((start, new))
 
-        # Labeled SFT oracle for new modality
+        # rand-init and DINO-init SFT oracle for new modality
+        rand_new  = rand_sft.get(new)
         lsft_score = sft_new.get(new)
 
         # Panopticon for new modality
@@ -546,16 +597,18 @@ def build_transfer_table(dataset):
         olmo_score = rsfm.get(('olmoearth-base', new))
 
         rows.append({
-            'Dataset':    DATASET_NAMES[dataset].split(' ')[0],
-            'Start→New':  f'{start_d}→{new_d}',
-            'rand SFT':   '--',
-            'DINO SFT':   _fmt(dino_start),
-            'KD':         _fmt(kd_score),
-            'TTM':        _fmt(ttm_score),
-            'Delulu':     _fmt(del_score),
-            'lbl SFT':    _fmt(lsft_score),
-            'Panopticon': _fmt(pan_score),
-            'OlmoEarth':  _fmt(olmo_score),
+            'Dataset':              DATASET_NAMES[dataset].split(' ')[0],
+            'Start(M_A)':           start_d,
+            'Transfer(M_B)':        new_d,
+            'rand-ST(M_A)':         _fmt(rand_start),
+            'DINO-SFT (M_A)':       _fmt(dino_start),
+            'KD(M_B)':              _fmt_meanstd(kd_score),
+            'TTM(M_B)':             _fmt_meanstd(ttm_score),
+            'Delulu(M_B)':          _fmt_meanstd(del_score),
+            'rand-ST(M_B oracle)':  _fmt(rand_new),
+            'DINO-SFT(M_B oracle)': _fmt(lsft_score),
+            'Panopticon(M_B oracle)':   _fmt(pan_score),
+            'OlmoEarth(M_B oracle)':    _fmt(olmo_score),
         })
 
     return pd.DataFrame(rows) if rows else None
@@ -580,13 +633,13 @@ def main():
             print(df.to_string(index=False))
 
     print('\n\n' + '='*80)
-    print('  TABLE B: Transfer (start mod → new mod, ViT-B / evan_base)')
-    print('  Columns: rand SFT = random-init SFT on starting mod (not yet available)')
-    print('           DINO SFT = DINO-init SFT on starting mod (teacher perf)')
-    print('           KD / TTM = Distillation baselines by kl_type (avg over HP, no val sel)')
-    print('           Delulu   = Delulu ours (val-selected transfer metric)')
-    print('           lbl SFT  = Labeled SFT oracle on new mod (upper bound)')
-    print('           Panopticon / OlmoEarth = RSFM baselines on new mod (val-selected)')
+    print('  TABLE B: Transfer (start mod M_A → new mod M_B, ViT-B / evan_base)')
+    print('  Columns: rand M_A ST        = random-init supervised training on M_A')
+    print('           DINO M_A SFT       = DINO-init SFT on M_A (teacher perf)')
+    print('           KD/TTM/Delulu(M_B) = predict on M_B (distillation / our method)')
+    print('           rand-ST(M_B oracle)  = random-init SFT oracle on M_B')
+    print('           DINO-SFT(M_B oracle) = DINO-init SFT oracle on M_B (upper bound)')
+    print('           Panopticon/OlmoEarth(M_B oracle) = RSFM trained on M_B with labels')
     print('='*80)
 
     all_rows = []
@@ -603,8 +656,7 @@ def main():
 
     print('\n\n' + '='*80)
     print('  TABLE C: Peeking (predict on start mod, peek unlabeled new mod, ViT-B)')
-    print('  Columns: rand SFT   = random-init SFT on starting mod (not yet available)')
-    print('           DINO SFT   = DINO-init SFT on starting mod (no peeking baseline)')
+    print('  Columns: DINO SFT   = DINO-init SFT on starting mod (no peeking baseline)')
     print('           MixMatch   = semi-supervised on starting mod (val-selected)')
     print('           Delulu     = Delulu ours (val-selected peek metric)')
     print('           Panopticon / OlmoEarth = RSFM baselines on starting mod (val-selected)')
@@ -624,7 +676,7 @@ def main():
 
     print('\n\n' + '='*80)
     print('  TABLE D: Addition (predict on both start+new mod, ViT-B)')
-    print('  Columns: rand SFT   = random-init SFT on combined mod (not yet available)')
+    print('  Columns: DINO(M_A+M_B oracle) = DINO-init SFT on combined modality (upper bound)')
     print('           MKE        = Multimodal Knowledge Expansion: multimodal student')
     print('           Delulu     = Delulu ours (val-selected addition ensemble metric)')
     print('           lbl SFT    = Labeled SFT oracle on combined mod (upper bound)')
@@ -642,6 +694,15 @@ def main():
         print(combined.to_string(index=False))
     else:
         print('  (no data)')
+
+    # Save raw CSVs for the LaTeX prettifier
+    os.makedirs('res/latex', exist_ok=True)
+    if all_rows:
+        pd.concat(all_rows, ignore_index=True).to_csv('res/latex/transfer.csv', index=False)
+    if peek_rows:
+        pd.concat(peek_rows, ignore_index=True).to_csv('res/latex/peek.csv', index=False)
+    if add_rows:
+        pd.concat(add_rows, ignore_index=True).to_csv('res/latex/addition.csv', index=False)
 
 
 if __name__ == '__main__':

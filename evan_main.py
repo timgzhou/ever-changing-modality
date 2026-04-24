@@ -1839,14 +1839,18 @@ class EvanSegmenter(EvanPredictor):
                 all_logits.append(self._apply_decoder(self.modality_heads[mod], patch_tokens))
             return torch.stack(all_logits).mean(dim=0)
 
-    def forward(self, x: dict) -> torch.Tensor:
+    def forward(self, x: dict, pseudo_modalities=None) -> torch.Tensor:
         """
         Args:
             x: Dict {modality: [B, C, H, W]}.
+            pseudo_modalities: Optional list of modalities to hallucinate (mirrors EVANClassifier).
         Returns:
             logits: [B, num_classes, H, W]
         """
-        features_dict = self.evan.forward_features(x)
+        if pseudo_modalities is not None:
+            features_dict = self.evan.forward_features_with_pseudo_modality(x, pseudo_modalities)
+        else:
+            features_dict = self.evan.forward_features(x)
         return self.segment_from_features(features_dict)
 
     def get_config(self) -> dict:
