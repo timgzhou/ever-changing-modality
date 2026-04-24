@@ -212,11 +212,9 @@ datasets
 eval_results
 logs
 references
-*.sh
 ignore
 wandb
 res/legacy
-sh
 res/full/
 
 .DS_Store
