@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=6:00:00
+#SBATCH --time=12:00:00
 #SBATCH --account=aip-gpleiss
 #SBATCH --output=logs/mixmatch/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com
@@ -19,9 +19,9 @@ mkdir -p "$(dirname "$RESULTS_CSV")"
 
 echo "=== MixMatch | ${DATASET} | modality=${MODALITY} ==="
 
-MODELS=('evan_base' 'evan_large')
-DINO_FLAGS=('--use_dino_weights' '')
-LRS=('0.0003')
+MODELS=('evan_large' 'evan_base')
+DINO_FLAGS=('--use_dino_weights')
+LRS=('0.0003' '0.0004')
 ALPHAS=('0.5')
 LAMBDA_US=('50' '75')
 

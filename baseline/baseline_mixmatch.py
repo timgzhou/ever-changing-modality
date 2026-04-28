@@ -318,5 +318,5 @@ python -u baseline/baseline_mixmatch.py --dataset eurosat --modality rgb --epoch
 python -u baseline/baseline_mixmatch.py --dataset benv2 --modality s2 --epochs 5
 
 # DFC2020 S2 (segmentation)
-python -u baseline/baseline_mixmatch.py --dataset dfc2020 --modality s2 --epochs 5
+python -u baseline/baseline_mixmatch.py --dataset dfc2020 --modality s2 --epochs 5 --use_dino_weights
 """

@@ -29,9 +29,22 @@ def _bold(s):
     return r'\textbf{' + str(s) + '}'
 
 
+_MODALITY_DISPLAY = {
+    's2-rgb':   r'$\mathrm{S2}_{rgb}$',
+    's2-norgb': r'$\mathrm{S2}_{\neg rgb}$',
+    's2':       r'$\mathrm{S2}$',
+    's1':       r'$\mathrm{S1}$',
+}
+
+
+def _render_modality(s):
+    return _MODALITY_DISPLAY.get(str(s).lower(), str(s))
+
+
 def _escape(s):
     """Minimal LaTeX escaping for cell content."""
-    return str(s).replace('→', r'$\to$').replace('±', r'$\pm$')
+    s = _render_modality(s)
+    return s.replace('→', r'$\to$').replace('±', r'$\pm$')
 
 
 def _multirow(n, s):
@@ -142,10 +155,10 @@ def make_table_b():
     n_id, n_ma, n_base, n_ours, n_ora = 3, 1, 2, 1, 3
     super_row = (
         _multicolumn(n_id, 'c', '') + ' & ' +
-        _multicolumn(n_ma, 'c|', r'\shortstack[c]{$M_A$\\context}') + ' & ' +
+        _multicolumn(n_ma, 'c|', r'$f_0$ $M_A$') + ' & ' +
         _multicolumn(n_base, 'c|', 'Baselines') + ' & ' +
         _multicolumn(n_ours, 'c|', 'Ours') + ' & ' +
-        _multicolumn(n_ora, 'c', r'\shortstack[c]{$M_B$\\oracle}') +
+        _multicolumn(n_ora, 'c', r'Oracle ($M_B$)') +
         r' \\'
     )
 
@@ -194,10 +207,10 @@ def make_table_c():
     n_id = 3
     super_row = (
         _multicolumn(n_id, 'c', '') + ' & ' +
-        _multicolumn(1, 'c|', r'$M_A$ context') + ' & ' +
+        _multicolumn(1, 'c|', r'$f_0$ $M_A$') + ' & ' +
         _multicolumn(1, 'c|', 'Baseline') + ' & ' +
         _multicolumn(1, 'c|', 'Ours') + ' & ' +
-        _multicolumn(2, 'c', r'$M_A$ oracle') +
+        _multicolumn(2, 'c', r'Oracle ($M_A$)') +
         r' \\'
     )
 
@@ -249,7 +262,7 @@ def make_table_d():
         _multicolumn(1, 'c|', r'$f_0(M_A)$') + ' & ' +
         _multicolumn(1, 'c|', 'Baseline') + ' & ' +
         _multicolumn(1, 'c|', 'Ours') + ' & ' +
-        _multicolumn(3, 'c', r'$M_A+M_B$ oracle') +
+        _multicolumn(3, 'c', r'Oracle ($M_A$+$M_B$)') +
         r' \\'
     )
 

@@ -24,7 +24,7 @@ declare -A STUDENT_MODS
 STUDENT_MODS['benv2']='s2_norgb'
 # STUDENT_MODS['dfc2020']='s1 s2 s1,s2 s2_norgb'
 STUDENT_MODS['dfc2020']='s2_norgb'
-STUDENT_MODS['eurosat']='rgb vre nir swir s2'
+STUDENT_MODS['eurosat']='swir rgb vre nir s2'
 
 
 
@@ -46,7 +46,7 @@ for STUDENT_ENTRY in ${STUDENT_MODS[$DATASET]}; do
     mkdir -p "$(dirname "$RESULTS_CSV")"
 
     for LR in 1e-3 3e-4; do
-        for KL_TYPE in kd ttm; do
+        for KL_TYPE in ttm kd; do
             for TEMP in 0.5 1 2; do
 
                 echo "=== ${DATASET} | ${MODEL} | ${STARTING_MOD} -> ${STUDENT_LABEL} | lr=${LR} kl=${KL_TYPE} temp=${TEMP} ==="

@@ -1,25 +1,21 @@
 \begin{tabular}{llr | r | rrr | rrr}
 \toprule
-\multicolumn{3}{c}{} & \multicolumn{1}{c|}{\shortstack[c]{$M_A$\\context}} & \multicolumn{2}{c|}{Baselines} & \multicolumn{1}{c|}{Ours} & \multicolumn{3}{c}{\shortstack[c]{$M_B$\\oracle}} \\
+\multicolumn{3}{c}{} & \multicolumn{1}{c|}{$f_0$ $M_A$} & \multicolumn{2}{c|}{Baselines} & \multicolumn{1}{c|}{Ours} & \multicolumn{3}{c}{Oracle ($M_B$)} \\
 \midrule
 Dataset & \shortstack[c]{Start\\($M_A$)} & \shortstack[c]{Transfer\\($M_B$)} & \shortstack[c]{DINO\\SFT} & KD & TTM & Delulu & \shortstack[c]{DINO\\SFT} & Panopticon & OlmoEarth \\
 \midrule
-  \multirow{4}{*}{reBEN} & \multirow{2}{*}{S2-RGB} & S1 & 63.37 & 48.96$\pm$1.32 & 48.73$\pm$1.34 & \textbf{49.75} & 49.23 & 55.06 & 54.05 \\
-   &  & S2-noRGB & 63.37 & 57.50$\pm$0.84 & 56.95$\pm$0.66 & \textbf{61.11} & -- & -- & -- \\
-   & S1 & S2 & 49.23 & 48.83$\pm$0.41 & 48.56$\pm$1.48 & \textbf{52.77} & 61.28 & 62.10 & 65.14 \\
-   & S2 & S1 & 61.28 & 48.99$\pm$1.77 & 49.01$\pm$2.08 & \textbf{51.03} & 49.23 & 55.06 & 54.05 \\
+  \multirow{4}{*}{reBEN} & \multirow{2}{*}{$\mathrm{S2}_{rgb}$} & $\mathrm{S1}$ & 63.37 & 48.96$\pm$1.32 & 48.73$\pm$1.34 & \textbf{49.75} & 49.23 & 55.06 & 54.05 \\
+   &  & $\mathrm{S2}_{\neg rgb}$ & 63.37 & 57.50$\pm$0.84 & 56.95$\pm$0.66 & \textbf{61.11} & 57.64 & 61.44 & 69.64 \\
+   & $\mathrm{S1}$ & $\mathrm{S2}$ & 49.23 & 48.83$\pm$0.41 & 48.56$\pm$1.48 & \textbf{52.77} & 61.28 & 62.1 & 65.14 \\
+   & $\mathrm{S2}$ & $\mathrm{S1}$ & 61.28 & 48.99$\pm$1.77 & 49.01$\pm$2.08 & \textbf{51.03} & 49.23 & 55.06 & 54.05 \\
   \midrule
-  \multirow{4}{*}{DFC2020} & \multirow{2}{*}{S2-RGB} & S1 & 41.9 & \textbf{43.77$\pm$1.09} & 43.32$\pm$1.43 & 41.47 & 43.29 & 48.09 & 47.40 \\
-   &  & S2-noRGB & 41.9 & -- & -- & \textbf{50.01} & -- & -- & -- \\
-   & S1 & S2 & 43.29 & 43.57$\pm$1.74 & 43.13$\pm$2.65 & \textbf{45.45} & 45.12 & 50.48 & 52.08 \\
-   & S2 & S1 & 45.12 & \textbf{44.37$\pm$1.19} & 44.10$\pm$0.98 & 43.34 & 43.29 & 48.09 & 47.40 \\
+  \multirow{4}{*}{DFC2020} & \multirow{2}{*}{$\mathrm{S2}_{rgb}$} & $\mathrm{S1}$ & 41.9 & \textbf{43.77$\pm$1.09} & 43.32$\pm$1.43 & 41.47 & 43.29 & 48.09 & 47.4 \\
+   &  & $\mathrm{S2}_{\neg rgb}$ & 41.9 & 42.58$\pm$1.15 & 45.56$\pm$3.77 & \textbf{50.01} & 39.87 & 48.49 & 54.01 \\
+   & $\mathrm{S1}$ & $\mathrm{S2}$ & 43.29 & 43.57$\pm$1.74 & 43.13$\pm$2.65 & \textbf{45.45} & 45.12 & 50.48 & 52.08 \\
+   & $\mathrm{S2}$ & $\mathrm{S1}$ & 45.12 & \textbf{44.37$\pm$1.19} & 44.10$\pm$0.98 & 43.34 & 43.29 & 48.09 & 47.4 \\
   \midrule
-  \multirow{7}{*}{EuroSAT} & \multirow{2}{*}{RGB} & NIR & 98.63 & 74.80$\pm$7.40 & 77.36$\pm$5.75 & \textbf{85.72} & -- & 96.69 & 93.41 \\
-   &  & VRE & 98.63 & 87.52$\pm$0.56 & 88.33$\pm$1.89 & \textbf{96.91} & 90.67 & 97.80 & 96.41 \\
-   & \multirow{3}{*}{SWIR} & NIR & 88.57 & 72.48$\pm$2.47 & 74.01$\pm$3.69 & \textbf{76.67} & -- & 96.69 & 93.41 \\
-   &  & RGB & 88.57 & 87.54$\pm$1.90 & 86.47$\pm$3.45 & \textbf{90.76} & 98.63 & 98.43 & 97.69 \\
-   &  & VRE & 88.57 & 86.20$\pm$2.41 & 87.01$\pm$1.43 & \textbf{89.33} & 90.67 & 97.80 & 96.41 \\
-   & \multirow{2}{*}{VRE} & NIR & 90.67 & 75.26$\pm$3.88 & 74.96$\pm$3.70 & \textbf{76.22} & -- & 96.69 & 93.41 \\
-   &  & RGB & 90.67 & 86.20$\pm$2.05 & 88.24$\pm$0.69 & \textbf{90.5} & 98.63 & 98.43 & 97.69 \\
+  \multirow{3}{*}{EuroSAT} & \multirow{3}{*}{RGB} & NIR & 98.63 & 74.80$\pm$7.40 & 77.36$\pm$5.75 & \textbf{89.43} & 80.91 & 96.69 & 93.41 \\
+   &  & VRE & 98.63 & 87.52$\pm$0.56 & 88.33$\pm$1.89 & \textbf{96.91} & 90.67 & 97.8 & 96.41 \\
+   &  & SWIR & 98.63 & 87.13$\pm$1.36 & 87.41$\pm$0.93 & \textbf{94.76} & 88.57 & 96.07 & 94.87 \\
 \bottomrule
 \end{tabular}

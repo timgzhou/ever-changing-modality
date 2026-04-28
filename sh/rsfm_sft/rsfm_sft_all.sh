@@ -17,7 +17,8 @@ MODALITY_CONFIGS['eurosat']='rgb+nir rgb+vre rgb+swir'
 MODALITY_CONFIGS['benv2']='s2_norgb'
 MODALITY_CONFIGS['dfc2020']='s2_norgb'
 
-MODELS=('panopticon' 'olmoearth-base')
+MODELS=('olmoearth-large')
+# DATASETS=('eurosat' 'benv2' 'dfc2020')
 DATASETS=('benv2' 'dfc2020')
 TRAIN_MODES=('fft')
 

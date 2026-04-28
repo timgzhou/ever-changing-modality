@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=6:00:00
+#SBATCH --time=12:00:00
 #SBATCH --account=aip-gpleiss
 #SBATCH --output=logs/mke/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com

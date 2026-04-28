@@ -952,37 +952,37 @@ class Trainer:
                 self.model.eval()
                 with torch.no_grad():
                     if segmentation:
-                        # For segmentation: invert each view's augmentation on its
-                        # prediction map before averaging so spatial positions align.
-                        # Must work in prob space for inversion, so sharpen via
-                        # softmax(log(avg_prob) / T) rather than logit/T directly.
+                        # Average probs in original frame, then argmax → hard pseudo-labels.
+                        # Re-apply each view's flip to the hard label map so image and
+                        # pseudo-label are in the same (augmented) coordinate frame.
                         avg_prob = None
                         for v, aug_params in views_and_params:
-                            logits_v = self.model({modality: v})   # [B_u, C, H, W]
-                            prob_v = F.softmax(logits_v, dim=1)    # [B_u, C, H, W]
-                            # Invert the spatial transform → original coordinate frame.
+                            logits_v = self.model({modality: v})        # [B_u, C, H, W]
+                            prob_v = F.softmax(logits_v, dim=1)         # [B_u, C, H, W]
                             prob_v = weak_aug.inverse(prob_v, params=aug_params)
                             avg_prob = prob_v if avg_prob is None else avg_prob + prob_v
-                        avg_prob = avg_prob / K                    # [B_u, C, H, W]
-                        # Sharpen: softmax(log(p) / T) — correct temperature in logit space
-                        log_p = torch.log(avg_prob.clamp(min=1e-8))
-                        q_spatial = F.softmax(log_p / temperature, dim=1)  # [B_u, C, H, W]
-                        # Re-apply each view's augmentation to q so that the training
-                        # target is in the same (augmented) coordinate frame as the image.
-                        H_s, W_s = q_spatial.shape[2], q_spatial.shape[3]
+                        avg_prob = avg_prob / K                         # [B_u, C, H, W]
+                        hard_pseudo = avg_prob.argmax(dim=1)            # [B_u, H, W]
+                        # Build one hard-label map per view, flipped to match that view.
                         q_views = []
                         for _, aug_params in views_and_params:
-                            q_aug = weak_aug(q_spatial, params=aug_params)  # [B_u, C, H, W]
-                            q_views.append(
-                                q_aug.permute(0, 2, 3, 1).reshape(B_u, H_s * W_s, num_classes)
-                            )
-                        # q_views is a list of K tensors [B_u, H*W, C] — used below in all_y
-                        q = q_views  # sentinel: segmentation uses q_views not a single q
+                            lbl = hard_pseudo.clone()
+                            for param in aug_params:
+                                bp = param.data['batch_prob'].bool()
+                                if 'Horizontal' in param.name:
+                                    lbl[bp] = lbl[bp].flip(-1)
+                                elif 'Vertical' in param.name:
+                                    lbl[bp] = lbl[bp].flip(-2)
+                            q_views.append(lbl)                         # [B_u, H, W]
+                        q = q_views
                     elif multilabel:
-                        avg_logits = sum(
-                            self.model({modality: v}) for v in views
+                        avg_prob = sum(
+                            torch.sigmoid(self.model({modality: v})) for v in views
                         ) / K  # [B_u, C]
-                        q = torch.sigmoid(avg_logits / temperature)  # [B_u, C]
+                        # Sharpen in logit space: sigmoid(logit(p) / T)
+                        avg_logit = torch.log(avg_prob.clamp(1e-6, 1 - 1e-6) /
+                                              (1 - avg_prob).clamp(1e-6))
+                        q = torch.sigmoid(avg_logit / temperature)  # [B_u, C]
                     else:
                         avg_logits = sum(
                             self.model({modality: v}) for v in views
@@ -990,13 +990,21 @@ class Trainer:
                         q = F.softmax(avg_logits / temperature, dim=1)  # [B_u, C]
 
                 self.model.train()
-                # --- Step 2: Build one-hot / soft labeled targets ---
+                # --- Step 2: Build labeled targets; MixUp labeled batch ---
                 x_l_aug = weak_aug(x_l_tensor)
 
                 if segmentation:
                     H, W = x_l_tensor.shape[2], x_l_tensor.shape[3]
-                    valid = (labels != ignore_index)  # [B_l, H, W]
-                    labels_clipped = labels.clone()
+                    # Flip integer label map to match x_l_aug.
+                    labels_aug = labels.clone()
+                    for param in weak_aug._params:
+                        bp = param.data['batch_prob'].bool()
+                        if 'Horizontal' in param.name:
+                            labels_aug[bp] = labels_aug[bp].flip(-1)
+                        elif 'Vertical' in param.name:
+                            labels_aug[bp] = labels_aug[bp].flip(-2)
+                    valid = (labels_aug != ignore_index)
+                    labels_clipped = labels_aug.clone()
                     labels_clipped[~valid] = 0
                     y_l = F.one_hot(labels_clipped.long(), num_classes).float()  # [B_l, H, W, C]
                     y_l[~valid] = 0.0
@@ -1006,97 +1014,88 @@ class Trainer:
                 else:
                     y_l = F.one_hot(labels.long(), num_classes).float()  # [B_l, C]
 
-                # --- Step 3: Concatenate W = Shuffle(Concat(X̂, Ũ)) (Algorithm 1, line 12) ---
-                # X̂ = augmented labeled: [B_l, ...]
-                # Ũ = K augmented views of unlabeled each paired with q: [K*B_u, ...]
-                all_x = torch.cat([x_l_aug] + views, dim=0)         # [B_l + K*B_u, ...]
-                # For segmentation q is a list of K per-view targets (each re-augmented);
-                # for other tasks q is a single tensor repeated K times.
-                q_list = q if segmentation else [q] * K
-                all_y = torch.cat([y_l] + q_list, dim=0)            # [B_l + K*B_u, ...]
-
-                # Shuffle W
-                perm = torch.randperm(all_x.size(0), device=self.device)
-                W_x = all_x[perm]
-                W_y = all_y[perm]
-
-                # --- Step 4: MixUp (Algorithm 1, lines 13-14) ---
-                # X' = MixUp(X̂, W[:B_l])  — labeled mixed with first B_l entries of W
-                # U' = MixUp(Ũ, W[B_l:])  — unlabeled mixed with remaining entries of W
-                N_total = all_x.size(0)
-                lam_vals = np.random.beta(alpha, alpha, size=N_total)
-                lam_vals = np.maximum(lam_vals, 1 - lam_vals)
-                mean_lam = float(lam_vals.mean())
-
-                lam_x = torch.tensor(lam_vals, dtype=torch.float32, device=self.device)
-                lam_x_img = lam_x.view(-1, *([1] * (all_x.ndim - 1)))
-                lam_y_t  = lam_x.view(-1, *([1] * (all_y.ndim - 1)))
-
-                # MixUp labeled with W[:B_l]
-                mixed_x_l = lam_x_img[:B_l] * x_l_aug + (1 - lam_x_img[:B_l]) * W_x[:B_l]
-                mixed_y_l = lam_y_t[:B_l]  * y_l      + (1 - lam_y_t[:B_l])  * W_y[:B_l]
-
-                # MixUp each unlabeled view with its W slice
-                u_views_x = torch.cat(views, dim=0)    # [K*B_u, ...]
-                u_views_y = torch.cat(q_list, dim=0)  # [K*B_u, ...]
-                mixed_x_u = lam_x_img[B_l:] * u_views_x + (1 - lam_x_img[B_l:]) * W_x[B_l:]
-                mixed_y_u = lam_y_t[B_l:]  * u_views_y + (1 - lam_y_t[B_l:])  * W_y[B_l:]
-
-                mixed_x = torch.cat([mixed_x_l, mixed_x_u], dim=0)
-                mixed_y = torch.cat([mixed_y_l, mixed_y_u], dim=0)
-
-                # --- Step 5: Forward pass ---
-                logits_all = self.model({modality: mixed_x})  # [B_l + K*B_u, C, ...]
-
                 if segmentation:
-                    # logits_all: [B_l+K*B_u, C, H, W] → flatten spatial
-                    _, C_out, H_out, W_out = logits_all.shape
-                    logits_flat = logits_all.permute(0, 2, 3, 1).reshape(-1, C_out * H_out * W_out)
-                    # Actually keep as [N, C, H, W] — split first then flatten
-                    logits_lab = logits_all[:B_l]                   # [B_l, C, H, W]
-                    logits_unl = logits_all[B_l:]                   # [K*B_u, C, H, W]
-                    y_lab = mixed_y[:B_l]                           # [B_l, H*W, C]
-                    y_unl = mixed_y[B_l:]                           # [K*B_u, H*W, C]
-                else:
-                    logits_lab = logits_all[:B_l]                   # [B_l, C]
-                    logits_unl = logits_all[B_l:]                   # [K*B_u, C]
-                    y_lab = mixed_y[:B_l]                           # [B_l, C]
-                    y_unl = mixed_y[B_l:]                           # [K*B_u, C]
+                    # --- Segmentation: MixUp labeled only; unlabeled uses hard CE ---
+                    # MixUp labeled with a random shuffle of itself.
+                    lam_vals_l = np.random.beta(alpha, alpha, size=B_l)
+                    lam_vals_l = np.maximum(lam_vals_l, 1 - lam_vals_l)
+                    mean_lam = float(lam_vals_l.mean())
+                    lam_l = torch.tensor(lam_vals_l, dtype=torch.float32, device=self.device)
+                    perm_l = torch.randperm(B_l, device=self.device)
+                    lam_img = lam_l.view(-1, 1, 1, 1)
+                    lam_y   = lam_l.view(-1, 1, 1)
+                    mixed_x_l = lam_img * x_l_aug + (1 - lam_img) * x_l_aug[perm_l]
+                    mixed_y_l = lam_y   * y_l     + (1 - lam_y)   * y_l[perm_l]
 
-                # --- Step 6: Losses ---
-                if segmentation:
-                    # Supervised: soft CE over valid pixels
-                    log_p_lab = F.log_softmax(logits_lab, dim=1)    # [B_l, C, H, W]
-                    log_p_lab_flat = log_p_lab.permute(0, 2, 3, 1).reshape(-1, num_classes)
-                    y_lab_flat = y_lab.reshape(-1, num_classes)      # [B_l*H*W, C]
-                    # Valid mask: originally-valid pixels had one-hot targets summing
-                    # to 1.0; after MixUp with λ≥0.5 they sum to ≥0.5. Ignore-index
-                    # pixels were zeroed before MixUp so sum near 0 even after mixing.
-                    valid_mask = y_lab_flat.sum(dim=1) > 0.5         # [B_l*H*W]
+                    # --- Step 5: Forward ---
+                    logits_lab = self.model({modality: mixed_x_l})  # [B_l, C, H, W]
+                    # Forward each unlabeled view separately (no MixUp).
+                    logits_unl_views = [
+                        self.model({modality: v}) for v in views
+                    ]  # K × [B_u, C, H, W]
+
+                    # --- Step 6: Losses ---
+                    # Supervised: soft CE over valid pixels (MixUp targets).
+                    log_p_lab = F.log_softmax(logits_lab, dim=1)           # [B_l, C, H, W]
+                    log_p_flat = log_p_lab.permute(0, 2, 3, 1).reshape(-1, num_classes)
+                    y_lab_flat = mixed_y_l.reshape(-1, num_classes)
+                    valid_mask = y_lab_flat.sum(dim=1) > 0.5
                     if valid_mask.sum() > 0:
-                        sup_loss = -(y_lab_flat[valid_mask] * log_p_lab_flat[valid_mask]).sum(dim=1).mean()
+                        sup_loss = -(y_lab_flat[valid_mask] * log_p_flat[valid_mask]).sum(dim=1).mean()
                     else:
                         sup_loss = torch.tensor(0.0, device=self.device)
-                    # Unsupervised: MSE of softmax vs soft q
-                    p_unl = F.softmax(logits_unl, dim=1)            # [K*B_u, C, H, W]
-                    p_unl_flat = p_unl.permute(0, 2, 3, 1).reshape(-1, num_classes)
-                    y_unl_flat = y_unl.reshape(-1, num_classes)
-                    unsup_loss = F.mse_loss(p_unl_flat, y_unl_flat)
-                elif multilabel:
-                    # Supervised: soft BCE
-                    y_lab_c = y_lab.clamp(0.0, 1.0)
-                    log_sig = F.logsigmoid(logits_lab)
-                    log_1msig = F.logsigmoid(-logits_lab)
-                    sup_loss = -(y_lab_c * log_sig + (1 - y_lab_c) * log_1msig).mean()
-                    # Unsupervised: MSE of sigmoid probs vs soft q
-                    p_unl = torch.sigmoid(logits_unl)
-                    unsup_loss = F.mse_loss(p_unl, y_unl.clamp(0.0, 1.0))
+                    # Unsupervised: hard CE against per-view pseudo-labels.
+                    unsup_loss = torch.tensor(0.0, device=self.device)
+                    for logits_v, pseudo_v in zip(logits_unl_views, q_views):
+                        unsup_loss = unsup_loss + F.cross_entropy(
+                            logits_v, pseudo_v.long(), ignore_index=ignore_index,
+                        )
+                    unsup_loss = unsup_loss / K
                 else:
-                    # Supervised: soft CE
-                    sup_loss = -(y_lab * F.log_softmax(logits_lab, dim=1)).sum(dim=1).mean()
-                    # Unsupervised: MSE of softmax vs soft q
-                    p_unl = F.softmax(logits_unl, dim=1)
-                    unsup_loss = F.mse_loss(p_unl, y_unl)
+                    # --- Classification / multilabel: original MixMatch steps 3-6 ---
+                    q_list = [q] * K
+                    all_x = torch.cat([x_l_aug] + views, dim=0)
+                    all_y = torch.cat([y_l] + q_list, dim=0)
+
+                    perm = torch.randperm(all_x.size(0), device=self.device)
+                    W_x = all_x[perm]
+                    W_y = all_y[perm]
+
+                    N_total = all_x.size(0)
+                    lam_vals = np.random.beta(alpha, alpha, size=N_total)
+                    lam_vals = np.maximum(lam_vals, 1 - lam_vals)
+                    mean_lam = float(lam_vals.mean())
+                    lam_x = torch.tensor(lam_vals, dtype=torch.float32, device=self.device)
+                    lam_x_img = lam_x.view(-1, *([1] * (all_x.ndim - 1)))
+                    lam_y_t   = lam_x.view(-1, *([1] * (all_y.ndim - 1)))
+
+                    mixed_x_l = lam_x_img[:B_l] * x_l_aug + (1 - lam_x_img[:B_l]) * W_x[:B_l]
+                    mixed_y_l = lam_y_t[:B_l]   * y_l     + (1 - lam_y_t[:B_l])   * W_y[:B_l]
+                    u_views_x = torch.cat(views, dim=0)
+                    u_views_y = torch.cat(q_list, dim=0)
+                    mixed_x_u = lam_x_img[B_l:] * u_views_x + (1 - lam_x_img[B_l:]) * W_x[B_l:]
+                    mixed_y_u = lam_y_t[B_l:]   * u_views_y + (1 - lam_y_t[B_l:])   * W_y[B_l:]
+
+                    mixed_x = torch.cat([mixed_x_l, mixed_x_u], dim=0)
+                    mixed_y = torch.cat([mixed_y_l, mixed_y_u], dim=0)
+
+                    logits_all = self.model({modality: mixed_x})
+                    logits_lab = logits_all[:B_l]
+                    logits_unl = logits_all[B_l:]
+                    y_lab = mixed_y[:B_l]
+                    y_unl = mixed_y[B_l:]
+
+                    if multilabel:
+                        y_lab_c = y_lab.clamp(0.0, 1.0)
+                        log_sig = F.logsigmoid(logits_lab)
+                        log_1msig = F.logsigmoid(-logits_lab)
+                        sup_loss = -(y_lab_c * log_sig + (1 - y_lab_c) * log_1msig).mean()
+                        p_unl = torch.sigmoid(logits_unl)
+                        unsup_loss = F.mse_loss(p_unl, y_unl.clamp(0.0, 1.0))
+                    else:
+                        sup_loss = -(y_lab * F.log_softmax(logits_lab, dim=1)).sum(dim=1).mean()
+                        p_unl = F.softmax(logits_unl, dim=1)
+                        unsup_loss = F.mse_loss(p_unl, y_unl)
 
                 total_loss = sup_loss + lam_u * unsup_loss
 
@@ -1106,7 +1105,8 @@ class Trainer:
                 # Accumulate train metric using hard labeled logits (before mixing)
                 with torch.no_grad():
                     hard_logits = self.model({modality: x_l_aug})
-                accum.update(hard_logits.detach(), labels.detach())
+                accum.update(hard_logits.detach(),
+                             (labels_aug if segmentation else labels).detach())
 
                 epoch_sup_loss += sup_loss.item()
                 epoch_unsup_loss += unsup_loss.item()

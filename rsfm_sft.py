@@ -39,7 +39,7 @@ Metrics:
 
 Usage:
   # OlmoEarth LP on BEN-v2 S2
-  python rsfm_sft.py --model allenai/OlmoEarth-v1-Base --dataset benv2 --modality s2 --train_mode lp --epochs 50
+  python rsfm_sft.py --model olmoearth-base --dataset benv2 --modality s2 --train_mode lp --epochs 50
 
   # Panopticon LP on BEN-v2 S2 (to verify against lp_panopticon_benv2.py baseline)
   python rsfm_sft.py --model panopticon --dataset benv2 --modality s2 --train_mode lp --epochs 50
@@ -154,6 +154,8 @@ class OlmoEarthWrapper(ModelWrapper):
         's2_swir':([8, 9],     ['B11', 'B12']),
         'aw':     ([10, 11],   ['B01', 'B09']),
         's2_aw':  ([10, 11],   ['B01', 'B09']),
+        # B01,B05,B06,B07,B08,B8A,B09,B11,B12 → positions in S2_BAND_ORDER_12
+        's2_norgb': ([10, 4, 5, 6, 3, 7, 11, 8, 9], ['B01', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B11', 'B12']),
     }
 
     def __init__(self, model, patch_size: int = 8, dataset: str = 'benv2', modality: str = 's2'):
@@ -261,10 +263,18 @@ class OlmoEarthWrapper(ModelWrapper):
                     dtype=torch.int32, device=device,
                 )
 
-        elif modality in self._S2_SUBBAND_INDICES:
-            # Sub-band S2 modality: place bands into correct positions, mask the rest as MISSING
-            positions, band_names = self._S2_SUBBAND_INDICES[modality]
-            # Normalize each input channel with its own per-band stats from s2_lo12/s2_hi12
+        elif modality in self._S2_SUBBAND_INDICES or '+' in modality:
+            # Sub-band S2 modality (single or combined via '+'):
+            # place bands into correct positions in a 12-band S2 tensor, mask the rest MISSING.
+            if '+' in modality:
+                parts = modality.split('+')
+                positions, band_names = [], []
+                for part in parts:
+                    p, b = self._S2_SUBBAND_INDICES[part]
+                    positions.extend(p)
+                    band_names.extend(b)
+            else:
+                positions, band_names = self._S2_SUBBAND_INDICES[modality]
             s2_full = torch.zeros((B, 12, H, W), dtype=imgs.dtype, device=device)
             for in_ch, (out_pos, band_name) in enumerate(zip(positions, band_names)):
                 lo = self.s2_lo12[:, out_pos:out_pos+1]
@@ -416,7 +426,7 @@ PANOPTICON_CHANNEL_IDS = {
     ('dfc2020', 's2'):       ('B01','B02','B03','B04','B05','B06','B07','B08','B8A','B09','B10','B11','B12'),
     ('dfc2020', 's1'):       (-1, -2),
     ('dfc2020', 's2_rgb'):   ('B04','B03','B02'),
-    ('dfc2020', 's2_norgb'): ('B01','B02','B05','B06','B07','B08','B8A','B09','B10','B11','B12'),
+    ('dfc2020', 's2_norgb'): ('B01','B05','B06','B07','B08','B8A','B09','B10','B11','B12'),
     # PASTIS: not yet implemented — will raise at construction time
 }
 
@@ -766,7 +776,15 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
         's2':    [1, 2, 3, 7, 4, 5, 6, 8, 11, 12, 0, 9],
     }
     first_val = next(iter(modality_bands_dict.values()))
-    if isinstance(first_val, (slice, list)):
+    if raw_pixels and dataset == 'dfc2020' and modality == 's2_norgb':
+        # DFC2020 s2_norgb = [B01,B05,B06,B07,B08,B8A,B09,B10,B11,B12] (10 bands).
+        # OlmoEarth has no B10 slot — drop it (position 7 in the 10-band list) so
+        # _build_sample receives the same 9-band tensor as BEN-v2 s2_norgb.
+        _entry = first_val  # list [0,4,5,6,7,8,9,10,11,12] into full image
+        _no_b10 = [_entry[i] for i in [0, 1, 2, 3, 4, 5, 6, 8, 9]]
+        def preprocess_fn(batch):
+            return batch['image'][:, _no_b10]
+    elif isinstance(first_val, (slice, list)):
         # GeoBench / DFC2020: batch already normalized; concatenate channel slices.
         _entry = first_val
         def preprocess_fn(batch):

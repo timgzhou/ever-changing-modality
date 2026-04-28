@@ -20,12 +20,12 @@ RESULTS_CSV="res/train_sft/${DATASET}.csv"
 
 echo "Running: model=${MODEL} dataset=${DATASET} train_mode=${TRAIN_MODE} modalities=${MODALITIES} lr=${LR} wd=${WD}"
 
-for USE_DINO in 0 1; do
-    DINO_VAL="False"
-    DINO_FLAG=""
+for USE_DINO in 1 0; do
+    DINO_VAL="True"
+    DINO_FLAG="--use_dino_weights"
     if [ "${USE_DINO}" = "1" ]; then
-        DINO_VAL="True"
-        DINO_FLAG="--use_dino_weights"
+        DINO_VAL="False"
+        DINO_FLAG=""
     fi
 
     if grep -qP "^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},[^,]+,[^,]+,${LR},${WD},[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,${DINO_VAL}" "${RESULTS_CSV}" 2>/dev/null; then

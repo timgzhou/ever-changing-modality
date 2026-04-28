@@ -1,25 +1,21 @@
 \begin{tabular}{llr | r | rr | rrr}
 \toprule
-\multicolumn{3}{c}{} & \multicolumn{1}{c|}{$f_0(M_A)$} & \multicolumn{1}{c|}{Baseline} & \multicolumn{1}{c|}{Ours} & \multicolumn{3}{c}{$M_A+M_B$ oracle} \\
+\multicolumn{3}{c}{} & \multicolumn{1}{c|}{$f_0(M_A)$} & \multicolumn{1}{c|}{Baseline} & \multicolumn{1}{c|}{Ours} & \multicolumn{3}{c}{Oracle ($M_A$+$M_B$)} \\
 \midrule
 Dataset & \shortstack[c]{Start\\($M_A$)} & \shortstack[c]{New\\($M_B$)} & \shortstack[c]{DINO\\SFT} & MKE & Delulu & \shortstack[c]{DINO\\SFT} & Panopticon & OlmoEarth \\
 \midrule
-  \multirow{4}{*}{reBEN} & \multirow{2}{*}{S2-RGB} & S1 & 63.37 & 62.9 & \textbf{64.32} & -- & 63.41 & 64.56 \\
-   &  & S2-noRGB & 63.37 & 61.97 & \textbf{64.41} & -- & 62.10 & 65.14 \\
-   & S1 & S2 & 49.23 & 49.76 & \textbf{55.29} & 61.49 & 63.41 & 64.56 \\
-   & S2 & S1 & 61.28 & 61.08 & \textbf{63.22} & 61.49 & 63.41 & 64.56 \\
+  \multirow{4}{*}{reBEN} & \multirow{2}{*}{$\mathrm{S2}_{rgb}$} & $\mathrm{S1}$ & 63.37 & 62.9 & \textbf{64.32} & 63.47 & 63.41 & 64.56 \\
+   &  & $\mathrm{S2}_{\neg rgb}$ & 63.37 & 61.97 & \textbf{64.41} & 63.72 & 62.47 & 65.14 \\
+   & $\mathrm{S1}$ & $\mathrm{S2}$ & 49.23 & 49.76 & \textbf{55.29} & 61.49 & 63.41 & 64.56 \\
+   & $\mathrm{S2}$ & $\mathrm{S1}$ & 61.28 & 61.08 & \textbf{63.22} & 61.49 & 63.41 & 64.56 \\
   \midrule
-  \multirow{4}{*}{DFC2020} & \multirow{2}{*}{S2-RGB} & S1 & 41.9 & 48.8 & \textbf{51.3} & -- & 52.35 & 55.51 \\
-   &  & S2-noRGB & 41.9 & \textbf{51.83} & 50.89 & -- & 50.48 & 52.08 \\
-   & S1 & S2 & 43.29 & 46.11 & \textbf{47.76} & 39.36 & 52.35 & 55.51 \\
-   & S2 & S1 & 45.12 & 40.45 & \textbf{51.7} & 39.36 & 52.35 & 55.51 \\
+  \multirow{4}{*}{DFC2020} & \multirow{2}{*}{$\mathrm{S2}_{rgb}$} & $\mathrm{S1}$ & 41.9 & 48.8 & \textbf{51.3} & 45.04 & 52.35 & 55.51 \\
+   &  & $\mathrm{S2}_{\neg rgb}$ & 41.9 & \textbf{51.83} & 50.89 & 49.48 & 50.75 & 52.08 \\
+   & $\mathrm{S1}$ & $\mathrm{S2}$ & 43.29 & 46.11 & \textbf{47.76} & 39.36 & 52.35 & 55.51 \\
+   & $\mathrm{S2}$ & $\mathrm{S1}$ & 45.12 & 40.45 & \textbf{51.7} & 39.36 & 52.35 & 55.51 \\
   \midrule
-  \multirow{7}{*}{EuroSAT} & \multirow{2}{*}{RGB} & NIR & 98.63 & 98.2 & \textbf{98.61} & -- & -- & -- \\
-   &  & VRE & 98.63 & 98.09 & \textbf{98.8} & -- & -- & -- \\
-   & \multirow{3}{*}{SWIR} & NIR & 88.57 & 88.63 & \textbf{91.2} & -- & -- & -- \\
-   &  & RGB & 88.57 & 89.65 & \textbf{92.02} & -- & -- & -- \\
-   &  & VRE & 88.57 & 88.89 & \textbf{91.35} & -- & -- & -- \\
-   & \multirow{2}{*}{VRE} & NIR & 90.67 & 89.83 & \textbf{90.81} & -- & -- & -- \\
-   &  & RGB & 90.67 & 90.43 & \textbf{92.44} & -- & -- & -- \\
+  \multirow{3}{*}{EuroSAT} & \multirow{3}{*}{RGB} & NIR & 98.63 & 98.2 & \textbf{98.52} & 98.8 & 98.52 & 98.83 \\
+   &  & VRE & 98.63 & 98.09 & \textbf{98.8} & 98.57 & 98.74 & 98.33 \\
+   &  & SWIR & 98.63 & 98.04 & \textbf{98.78} & 98.39 & 98.72 & 98.2 \\
 \bottomrule
 \end{tabular}

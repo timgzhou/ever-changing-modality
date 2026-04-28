@@ -42,13 +42,16 @@ for dataset in datasets:
                 new_mods = sorted(row_df["new_modality"].unique())
                 colors = plt.cm.tab10.colors
                 top3_per_mod = []
+                run_counts = []
                 for new_mod in new_mods:
                     mod_df = row_df[row_df["new_modality"] == new_mod].dropna(subset=[vsel, vcol])
+                    run_counts.append(len(row_df[row_df["new_modality"] == new_mod]))
                     top3_per_mod.append(mod_df.nlargest(3, vsel)[vcol].values)
 
+                valid_labels = [f"{m}\n(n={n})" for m, v, n in zip(new_mods, top3_per_mod, run_counts) if len(v) > 0]
                 bp = ax.boxplot(
                     [v for v in top3_per_mod if len(v) > 0],
-                    labels=[m for m, v in zip(new_mods, top3_per_mod) if len(v) > 0],
+                    labels=valid_labels,
                     patch_artist=True, showmeans=True,
                     meanprops=dict(marker="D", markerfacecolor="black", markersize=4),
                     medianprops=dict(visible=False),

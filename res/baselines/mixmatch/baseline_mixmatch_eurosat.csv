@@ -80,3 +80,7 @@ evan_base,nir,fft,0.0003,0.0001,85480714,20,2,0.5,0.5,75.0,4,Acc,20.96,33.63,32.
 evan_base,vre,fft,0.0003,0.0001,85677322,20,2,0.5,0.5,75.0,4,Acc,63.63,63.07,64.20,checkpoints/evan_mixmatch_eurosat_vre_20260421_152232.pt,clstoken,False
 evan_base,swir,fft,0.0003,0.0001,85677322,20,2,0.5,0.5,75.0,4,Acc,64.31,63.11,64.31,checkpoints/evan_mixmatch_eurosat_swir_20260421_152415.pt,clstoken,False
 evan_base,rgb,fft,0.0003,0.0001,85677322,20,2,0.5,0.5,75.0,4,Acc,48.46,48.22,48.50,checkpoints/evan_mixmatch_eurosat_rgb_20260421_153039.pt,clstoken,False
+evan_large,rgb,fft,0.0003,0.0001,303164426,20,2,0.5,0.5,50.0,4,Acc,98.87,98.93,98.87,checkpoints/evan_mixmatch_eurosat_rgb_20260427_204230.pt,clstoken,True
+evan_large,rgb,fft,0.0003,0.0001,303164426,20,2,0.5,0.5,75.0,4,Acc,98.85,98.78,98.85,checkpoints/evan_mixmatch_eurosat_rgb_20260427_233232.pt,clstoken,True
+evan_large,rgb,fft,0.0004,0.0001,303164426,20,2,0.5,0.5,50.0,4,Acc,98.81,98.85,98.93,checkpoints/evan_mixmatch_eurosat_rgb_20260428_022239.pt,clstoken,True
+evan_large,rgb,fft,0.0004,0.0001,303164426,20,2,0.5,0.5,75.0,4,Acc,98.59,98.81,98.65,checkpoints/evan_mixmatch_eurosat_rgb_20260428_051253.pt,clstoken,True

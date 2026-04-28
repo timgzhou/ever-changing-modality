@@ -4,7 +4,7 @@
 # Usage: bash sh/mixmatch/mixmatch_sweep.sh
 
 declare -A MODALITY_CONFIGS
-MODALITY_CONFIGS['eurosat']='rgb vre nir swir'
+MODALITY_CONFIGS['eurosat']='rgb'
 MODALITY_CONFIGS['benv2']='s2 s1 s2_rgb'
 MODALITY_CONFIGS['dfc2020']='s2 s1 s2_rgb'
 

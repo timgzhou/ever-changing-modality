@@ -12,8 +12,9 @@ STARTING_MODS['dfc2020']='s2_rgb'
 STARTING_MODS['eurosat']='vre swir s2 rgb nir'
 
 # DATASETS=('benv2' 'dfc2020' 'eurosat')
-DATASETS=('dfc2020')
-MODELS=('evan_base' 'evan_large')
+# MODELS=('evan_base' 'evan_large')
+DATASETS=('eurosat')
+MODELS=('evan_large')
 
 mkdir -p logs/distillation
 

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Launcher: one sbatch job per dataset+model+teacher_mod+student_mods combo.
-# Student modalities = teacher + all non-empty subsets of that teacher's allowed companions.
+# Launcher: one sbatch job per dataset+model+teacher_mod+companion combo.
+# Student modalities = teacher + one companion at a time.
 #
 # Allowed companions per teacher (modalities that make sense to add):
 #   s2    → s1 only          (s2_rgb/s2_norgb are sub-bands of s2, not new sensors)
@@ -23,7 +23,7 @@ declare -A COMPANIONS
 # COMPANIONS['dfc2020/s1']='s2'
 # COMPANIONS['dfc2020/s2_rgb']='s2_norgb s1'
 # COMPANIONS['eurosat/rgb']='s2_norgb'
-COMPANIONS['eurosat/rgb']='nir vre'
+COMPANIONS['eurosat/rgb']='nir vre swir'
 # COMPANIONS['eurosat/swir']='vre rgb nir'
 COMPANIONS['eurosat/vre']='nir rgb'
 COMPANIONS['eurosat/swir']='nir'
@@ -32,11 +32,10 @@ declare -A TEACHER_MODS
 TEACHER_MODS['benv2']='s2 s1 s2_rgb'
 TEACHER_MODS['dfc2020']='s2 s1 s2_rgb'
 # TEACHER_MODS['eurosat']='rgb swir vre'
-TEACHER_MODS['eurosat']='swir'
+TEACHER_MODS['eurosat']='rgb'
 
-# DATASETS=('benv2' 'dfc2020' 'eurosat')
-DATASETS=('eurosat')
-MODELS=('evan_base' 'evan_large')
+DATASETS=('benv2' 'dfc2020' 'eurosat')
+MODELS=('evan_large')
 
 mkdir -p logs/mke
 
@@ -64,15 +63,9 @@ for DATASET in "${DATASETS[@]}"; do
                 continue
             fi
 
-            # Iterate over all non-empty subsets of OTHER_MODS (2^N - 1 combos)
-            for ((mask=1; mask < (1 << N_OTHER); mask++)); do
-                STUDENT_MODS=("$TEACHER_MOD")
-                for ((bit=0; bit < N_OTHER; bit++)); do
-                    if (( (mask >> bit) & 1 )); then
-                        STUDENT_MODS+=("${OTHER_MODS[$bit]}")
-                    fi
-                done
-                STUDENT_STR="${STUDENT_MODS[*]}"  # space-separated for passing to job
+            # One job per companion (teacher + one new modality)
+            for NEW_MOD in "${OTHER_MODS[@]}"; do
+                STUDENT_STR="${TEACHER_MOD} ${NEW_MOD}"
 
                 echo "[submit] ${DATASET} | ${MODEL} | teacher=${TEACHER_MOD} | student=${STUDENT_STR} | ckpt=${TEACHER}"
                 sbatch sh/mke/mke_sweep_job.sh \

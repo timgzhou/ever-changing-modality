@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=11:00:00
+#SBATCH --time=2:00:00
 #SBATCH --account=aip-gpleiss
 #SBATCH --output=logs/rsfm_sft/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com
@@ -33,5 +33,10 @@ for LR in "${LRS[@]}"; do
             --epochs 20 \
             --lr ${LR} \
             --weight_decay ${WD}
+        EXIT_CODE=$?
+        if [ $EXIT_CODE -ne 0 ]; then
+            echo "  → python exited with code ${EXIT_CODE}, stopping remaining configs for this job"
+            exit $EXIT_CODE
+        fi
     done
 done

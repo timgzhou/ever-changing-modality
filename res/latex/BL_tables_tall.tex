@@ -1,0 +1,75 @@
+% Table: Transfer
+\begin{tabular}{lll | r r r r | r r r r | r r r}
+\toprule
+  \multicolumn{3}{c}{} & \multicolumn{4}{c|}{reBEN} & \multicolumn{4}{c|}{DFC2020} & \multicolumn{3}{c}{EuroSAT} \\
+  \multicolumn{3}{c}{} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c|}{$\mathrm{S2}$} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c|}{$\mathrm{S2}$} & \multicolumn{3}{c}{RGB} \\
+  \shortstack[c]{Method\\Group} & Method & Size & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ & NIR & VRE & SWIR \\
+  \midrule
+  \multirow{2}{*}{$f_0(M_A)$} & \multirow{2}{*}{$f_0$} & (B) & 63.37 & 63.37 & 49.23 & 61.28 & 41.90 & 41.90 & 43.29 & 45.12 & 98.63 & 98.63 & 98.63 \\
+   &  & (L) & 65.88 & 65.88 & 51.50 & 64.98 & 47.73 & 47.73 & 44.03 & 49.68 & 99.07 & 99.07 & 99.07 \\
+  \midrule
+  \multirow{4}{*}{Baselines} & \multirow{2}{*}{KD} & (B) & 48.96$\pm$1.32 & 57.50$\pm$0.84 & 48.83$\pm$0.41 & 48.99$\pm$1.77 & 43.77$\pm$1.09 & 42.58$\pm$1.15 & 43.57$\pm$1.74 & 44.37$\pm$1.19 & 74.80$\pm$7.40 & 87.52$\pm$0.56 & 87.13$\pm$1.36 \\
+   &  & (L) & 52.36$\pm$0.81 & 60.20$\pm$1.33 & 53.35$\pm$1.16 & 53.15$\pm$0.75 & 45.48$\pm$1.00 & 48.51$\pm$1.95 & 44.25$\pm$3.87 & 45.36$\pm$1.56 & 85.16$\pm$10.81 & 94.15$\pm$2.98 & 88.81$\pm$0.09 \\
+   & \multirow{2}{*}{TTM} & (B) & 48.73$\pm$1.34 & 56.95$\pm$0.66 & 48.56$\pm$1.48 & 49.01$\pm$2.08 & 43.32$\pm$1.43 & 45.56$\pm$3.77 & 43.13$\pm$2.65 & 44.10$\pm$0.98 & 77.36$\pm$5.75 & 88.33$\pm$1.89 & 87.41$\pm$0.93 \\
+   &  & (L) & 52.05$\pm$1.38 & 59.63$\pm$0.75 & 53.54$\pm$0.74 & 52.35$\pm$1.05 & 45.22$\pm$1.37 & 47.12$\pm$2.69 & 46.57$\pm$2.86 & 44.89$\pm$2.01 & 85.78$\pm$9.43 & 94.68$\pm$1.93 & -- \\
+  \midrule
+  \multirow{2}{*}{Ours} & \multirow{2}{*}{Delulu} & (B) & 49.75 & 61.11 & 52.77 & 51.03 & 41.47 & 50.01 & 45.45 & 43.34 & 89.43 & 96.91 & 94.76 \\
+   &  & (L) & 57.44 & 65.14 & 53.32 & 55.98 & 44.82 & 52.16 & 46.79 & 46.81 & 97.04 & 98.15 & 97.31 \\
+  \midrule
+  \multirow{5}{*}{Oracle} & \multirow{2}{*}{DINO SFT} & (B) & 49.23 & 57.64 & 61.28 & 49.23 & 43.29 & 39.87 & 45.12 & 43.29 & 80.91 & 90.67 & 88.57 \\
+   &  & (L) & 51.50 & 58.99 & 64.98 & 51.50 & 44.03 & 39.15 & 49.68 & 44.03 & -- & 96.35 & 95.57 \\
+   & Panopticon & (B) & 55.06 & 61.44 & 62.10 & 55.06 & 48.09 & 48.49 & 50.48 & 48.09 & 96.69 & 97.80 & 96.07 \\
+   & \multirow{2}{*}{OlmoEarth} & (B) & 54.05 & 69.64 & 65.14 & 54.05 & 47.40 & 54.01 & 52.08 & 47.40 & 93.41 & 96.41 & 94.87 \\
+   &  & (L) & 54.58 & -- & 63.98 & 54.58 & 49.28 & -- & 51.33 & 49.28 & 92.09 & 96.15 & 92.09 \\
+\bottomrule
+\end{tabular}
+
+\bigskip
+
+% Table: Peek
+\begin{tabular}{lll | r r r r | r r r r | r r r}
+\toprule
+  \multicolumn{3}{c}{} & \multicolumn{4}{c|}{reBEN} & \multicolumn{4}{c|}{DFC2020} & \multicolumn{3}{c}{EuroSAT} \\
+  \multicolumn{3}{c}{} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c|}{$\mathrm{S2}$} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c|}{$\mathrm{S2}$} & \multicolumn{3}{c}{RGB} \\
+  \shortstack[c]{Method\\Group} & Method & Size & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ & NIR & VRE & SWIR \\
+  \midrule
+  \multirow{2}{*}{$f_0(M_A)$} & \multirow{2}{*}{$f_0$} & (B) & 63.37 & 63.37 & 49.23 & 61.28 & 41.90 & 41.90 & 43.29 & 45.12 & 98.63 & 98.63 & 98.63 \\
+   &  & (L) & 65.88 & 65.88 & 51.50 & 64.98 & 47.73 & 47.73 & 44.03 & 49.68 & 99.07 & 99.07 & 99.07 \\
+  \midrule
+  \multirow{2}{*}{Baselines} & \multirow{2}{*}{MixMatch} & (B) & 52.08$\pm$6.38 & 52.08$\pm$6.38 & 47.70$\pm$2.23 & 59.49$\pm$2.29 & 39.10$\pm$3.35 & 39.10$\pm$3.35 & 35.36$\pm$2.81 & 40.05$\pm$3.66 & 98.98$\pm$0.06 & 98.98$\pm$0.06 & 98.98$\pm$0.06 \\
+   &  & (L) & 59.63$\pm$0.75 & 59.63$\pm$0.75 & 48.94$\pm$0.97 & 57.47$\pm$0.80 & 27.46$\pm$8.77 & 27.46$\pm$8.77 & 22.30$\pm$12.34 & 36.33$\pm$8.68 & 98.82$\pm$0.15 & 98.82$\pm$0.15 & 98.82$\pm$0.15 \\
+  \midrule
+  \multirow{2}{*}{Ours} & \multirow{2}{*}{Delulu} & (B) & 65.15 & 67.26 & 51.19 & 63.71 & 47.04 & 47.71 & 45.30 & 45.63 & 98.78 & 98.83 & 98.91 \\
+   &  & (L) & 66.60 & 67.56 & 53.75 & 67.12 & 40.83 & 50.56 & 46.46 & 51.51 & 98.89 & 99.07 & 99.19 \\
+  \midrule
+  \multirow{3}{*}{Oracle} & Panopticon & (B) & 59.99 & 59.99 & 55.06 & 62.10 & 45.50 & 45.50 & 48.09 & 50.48 & 98.43 & 98.43 & 98.43 \\
+   & \multirow{2}{*}{OlmoEarth} & (B) & 59.70 & 59.70 & 54.05 & 65.14 & 49.72 & 49.72 & 47.40 & 52.08 & 97.69 & 97.69 & 97.69 \\
+   &  & (L) & 61.18 & 61.18 & 54.58 & 63.98 & 45.31 & 45.31 & 49.28 & 51.33 & 97.31 & 97.31 & 97.31 \\
+\bottomrule
+\end{tabular}
+
+\bigskip
+
+% Table: Addition
+\begin{tabular}{lll | r r r r | r r r r | r r r}
+\toprule
+  \multicolumn{3}{c}{} & \multicolumn{4}{c|}{reBEN} & \multicolumn{4}{c|}{DFC2020} & \multicolumn{3}{c}{EuroSAT} \\
+  \multicolumn{3}{c}{} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c|}{$\mathrm{S2}$} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c|}{$\mathrm{S2}$} & \multicolumn{3}{c}{RGB} \\
+  \shortstack[c]{Method\\Group} & Method & Size & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ & NIR & VRE & SWIR \\
+  \midrule
+  \multirow{2}{*}{$f_0(M_A)$} & \multirow{2}{*}{$f_0$} & (B) & 63.37 & 63.37 & 49.23 & 61.28 & 41.90 & 41.90 & 43.29 & 45.12 & 98.63 & 98.63 & 98.63 \\
+   &  & (L) & 65.88 & 65.88 & 51.50 & 64.98 & 47.73 & 47.73 & 44.03 & 49.68 & 99.07 & 99.07 & 99.07 \\
+  \midrule
+  \multirow{2}{*}{Baselines} & \multirow{2}{*}{MKE} & (B) & 62.90 & 61.97 & 49.76 & 61.08 & 48.80 & 51.83 & 46.11 & 40.45 & 98.20 & 98.09 & 98.04 \\
+   &  & (L) & 64.66 & 63.54 & 54.18 & 62.63 & 50.77 & 51.54 & 48.15 & 52.91 & 98.22 & 98.15 & 96.61 \\
+  \midrule
+  \multirow{2}{*}{Ours} & \multirow{2}{*}{Delulu} & (B) & 64.32 & 64.41 & 55.29 & 63.22 & 51.30 & 50.89 & 47.76 & 51.70 & 98.52 & 98.80 & 98.78 \\
+   &  & (L) & 66.24 & 66.33 & 55.03 & 65.01 & 47.61 & 52.35 & 50.08 & 52.34 & 99.02 & 99.13 & 99.00 \\
+  \midrule
+  \multirow{5}{*}{Oracle} & \multirow{2}{*}{DINO SFT} & (B) & 63.47 & 63.72 & 61.49 & 61.49 & 45.04 & 49.48 & 39.36 & 39.36 & 98.80 & 98.57 & 98.39 \\
+   &  & (L) & 65.97 & 64.52 & 63.64 & 63.64 & 48.79 & 43.25 & 52.22 & 52.22 & -- & -- & -- \\
+   & Panopticon & (B) & 63.41 & 62.47 & 63.41 & 63.41 & 52.35 & 50.75 & 52.35 & 52.35 & 98.52 & 98.74 & 98.72 \\
+   & \multirow{2}{*}{OlmoEarth} & (B) & 64.56 & 65.14 & 64.56 & 64.56 & 55.51 & 52.08 & 55.51 & 55.51 & 98.83 & 98.33 & 98.20 \\
+   &  & (L) & 66.11 & 63.98 & 66.11 & 66.11 & 54.68 & 51.33 & 54.68 & 54.68 & 98.15 & 96.85 & 96.15 \\
+\bottomrule
+\end{tabular}
