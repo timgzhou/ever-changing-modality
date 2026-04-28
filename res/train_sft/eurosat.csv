@@ -151,3 +151,16 @@ eurosat,evan_large,rgb+vre,fft,32,fft,0.0005,0.01,341752842,24,89.07,87.89,Acc,c
 eurosat,evan_large,rgb+vre,fft,32,fft,0.0005,0.0,341752842,24,88.91,88.00,Acc,checkpoints/sft_evan_large_eurosat_rgb+vre_fft_lr0.0005_20260427_204753.pt,clstoken,False
 eurosat,evan_large,rgb+vre,fft,32,fft,0.0001,0.01,341752842,24,89.56,88.81,Acc,checkpoints/sft_evan_large_eurosat_rgb+vre_fft_lr0.0001_20260427_204753.pt,clstoken,False
 eurosat,evan_large,rgb+swir,fft,32,fft,0.0001,0.0,341752842,24,89.33,89.19,Acc,checkpoints/sft_evan_large_eurosat_rgb+swir_fft_lr0.0001_20260427_205020.pt,clstoken,False
+eurosat,evan_large,nir,fft,32,fft,0.0001,0.01,302902282,24,72.33,71.11,Acc,checkpoints/sft_evan_large_eurosat_nir_fft_lr0.0001_20260428_114426.pt,clstoken,False
+eurosat,evan_large,rgb+nir,fft,32,fft,0.0005,0.0,341490698,24,88.31,87.52,Acc,checkpoints/sft_evan_large_eurosat_rgb+nir_fft_lr0.0005_20260428_115406.pt,clstoken,False
+eurosat,evan_large,rgb+nir,fft,32,fft,0.0005,0.01,341490698,24,88.59,87.74,Acc,checkpoints/sft_evan_large_eurosat_rgb+nir_fft_lr0.0005_20260428_115355.pt,clstoken,False
+eurosat,evan_large,rgb+vre,fft,32,fft,0.0001,0.01,341752842,24,89.74,89.07,Acc,checkpoints/sft_evan_large_eurosat_rgb+vre_fft_lr0.0001_20260428_115544.pt,clstoken,False
+eurosat,evan_large,rgb+vre,fft,32,fft,0.0005,0.0,341752842,24,88.59,87.19,Acc,checkpoints/sft_evan_large_eurosat_rgb+vre_fft_lr0.0005_20260428_115512.pt,clstoken,False
+eurosat,evan_large,rgb+nir,fft,32,fft,0.0001,0.0,341490698,24,89.76,89.33,Acc,checkpoints/sft_evan_large_eurosat_rgb+nir_fft_lr0.0001_20260428_115440.pt,clstoken,False
+eurosat,evan_large,rgb+vre,fft,32,fft,0.0001,0.0,341752842,24,89.00,88.74,Acc,checkpoints/sft_evan_large_eurosat_rgb+vre_fft_lr0.0001_20260428_115554.pt,clstoken,False
+eurosat,evan_large,rgb+vre,fft,32,fft,0.0005,0.01,341752842,24,89.26,88.89,Acc,checkpoints/sft_evan_large_eurosat_rgb+vre_fft_lr0.0005_20260428_115508.pt,clstoken,False
+eurosat,evan_large,rgb+swir,fft,32,fft,0.0005,0.0,341752842,24,88.56,87.89,Acc,checkpoints/sft_evan_large_eurosat_rgb+swir_fft_lr0.0005_20260428_115625.pt,clstoken,False
+eurosat,evan_large,rgb+nir,fft,32,fft,0.0001,0.01,341490698,24,89.26,88.48,Acc,checkpoints/sft_evan_large_eurosat_rgb+nir_fft_lr0.0001_20260428_115424.pt,clstoken,False
+eurosat,evan_large,rgb+swir,fft,32,fft,0.0001,0.0,341752842,24,89.30,88.33,Acc,checkpoints/sft_evan_large_eurosat_rgb+swir_fft_lr0.0001_20260428_115753.pt,clstoken,False
+eurosat,evan_large,rgb+swir,fft,32,fft,0.0005,0.01,341752842,24,88.57,87.78,Acc,checkpoints/sft_evan_large_eurosat_rgb+swir_fft_lr0.0005_20260428_115610.pt,clstoken,False
+eurosat,evan_large,rgb+swir,fft,32,fft,0.0001,0.01,341752842,24,89.31,88.37,Acc,checkpoints/sft_evan_large_eurosat_rgb+swir_fft_lr0.0001_20260428_115757.pt,clstoken,False

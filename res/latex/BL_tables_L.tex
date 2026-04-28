@@ -1,0 +1,72 @@
+% Table: Transfer
+\begin{tabular}{llr | r r r r r r}
+\toprule
+\multicolumn{3}{c}{} & \multicolumn{1}{c|}{$f_0(M_A)$} & \multicolumn{2}{c|}{Baselines} & \multicolumn{1}{c|}{Ours} & \multicolumn{2}{c}{Oracle ($M_B$)} \\
+\midrule
+Dataset & \shortstack[c]{Start\\($M_A$)} & \shortstack[c]{Transfer\\($M_B$)} & \shortstack[c]{DINO\\SFT (L)} & \shortstack[c]{KD\\(L)} & \shortstack[c]{TTM\\(L)} & \shortstack[c]{Delulu\\(L)} & \shortstack[c]{DINO\\SFT (L)} & \shortstack[c]{OlmoE.\\(L)} \\
+\midrule
+  \multirow{4}{*}{reBEN} & \multirow{2}{*}{$\mathrm{S2}_{rgb}$} & $\mathrm{S1}$ & 65.88 & 52.36$\pm$0.81 & 52.05$\pm$1.38 & \textbf{57.44} & 51.50 & 54.58 \\
+   &  & $\mathrm{S2}_{\neg rgb}$ & 65.88 & 60.20$\pm$1.33 & 59.63$\pm$0.75 & \textbf{65.14} & 58.99 & 69.15 \\
+   & $\mathrm{S1}$ & $\mathrm{S2}$ & 51.50 & 53.35$\pm$1.16 & \textbf{53.54$\pm$0.74} & 53.32 & 64.98 & 63.98 \\
+   & $\mathrm{S2}$ & $\mathrm{S1}$ & 64.98 & 53.15$\pm$0.75 & 52.35$\pm$1.05 & \textbf{55.98} & 51.50 & 54.58 \\
+  \midrule
+  \multirow{4}{*}{DFC2020} & \multirow{2}{*}{$\mathrm{S2}_{rgb}$} & $\mathrm{S1}$ & 47.73 & \textbf{45.48$\pm$1.00} & 45.22$\pm$1.37 & 44.82 & 44.03 & 49.28 \\
+   &  & $\mathrm{S2}_{\neg rgb}$ & 47.73 & 48.51$\pm$1.95 & 47.12$\pm$2.69 & \textbf{52.16} & 39.15 & 53.15 \\
+   & $\mathrm{S1}$ & $\mathrm{S2}$ & 44.03 & 44.25$\pm$3.87 & 46.57$\pm$2.86 & \textbf{46.79} & 49.68 & 51.33 \\
+   & $\mathrm{S2}$ & $\mathrm{S1}$ & 49.68 & 45.36$\pm$1.56 & 44.89$\pm$2.01 & \textbf{46.81} & 44.03 & 49.28 \\
+  \midrule
+  \multirow{3}{*}{EuroSAT} & \multirow{3}{*}{RGB} & NIR & 99.07 & 85.16$\pm$10.81 & 85.78$\pm$9.43 & \textbf{97.04} & -- & 92.09 \\
+   &  & VRE & 99.07 & 94.15$\pm$2.98 & 94.68$\pm$1.93 & \textbf{98.15} & 96.35 & 96.15 \\
+   &  & SWIR & 99.07 & 88.81$\pm$0.09 & -- & \textbf{97.31} & 95.57 & 92.09 \\
+\bottomrule
+\end{tabular}
+
+\bigskip
+
+% Table: Peek
+\begin{tabular}{llr | r r r r}
+\toprule
+\multicolumn{3}{c}{} & \multicolumn{1}{c|}{$f_0(M_A)$} & \multicolumn{1}{c|}{Baselines} & \multicolumn{1}{c|}{Ours} & \multicolumn{1}{c}{Oracle ($M_A$)} \\
+\midrule
+Dataset & \shortstack[c]{Start\\($M_A$)} & \shortstack[c]{New\\($M_B$)} & \shortstack[c]{DINO\\SFT (L)} & \shortstack[c]{MixMatch\\(L)} & \shortstack[c]{Delulu\\(L)} & \shortstack[c]{OlmoE.\\(L)} \\
+\midrule
+  \multirow{4}{*}{reBEN} & \multirow{2}{*}{$\mathrm{S2}_{rgb}$} & $\mathrm{S1}$ & 65.88 & 59.63$\pm$0.75 & \textbf{66.60} & 61.18 \\
+   &  & $\mathrm{S2}_{\neg rgb}$ & 65.88 & 59.63$\pm$0.75 & \textbf{67.56} & 61.18 \\
+   & $\mathrm{S1}$ & $\mathrm{S2}$ & 51.50 & 48.94$\pm$0.97 & \textbf{53.75} & 54.58 \\
+   & $\mathrm{S2}$ & $\mathrm{S1}$ & 64.98 & 57.47$\pm$0.80 & \textbf{67.12} & 63.98 \\
+  \midrule
+  \multirow{4}{*}{DFC2020} & \multirow{2}{*}{$\mathrm{S2}_{rgb}$} & $\mathrm{S1}$ & 47.73 & 27.46$\pm$8.77 & \textbf{40.83} & 45.31 \\
+   &  & $\mathrm{S2}_{\neg rgb}$ & 47.73 & 27.46$\pm$8.77 & \textbf{50.56} & 45.31 \\
+   & $\mathrm{S1}$ & $\mathrm{S2}$ & 44.03 & 22.30$\pm$12.34 & \textbf{46.46} & 49.28 \\
+   & $\mathrm{S2}$ & $\mathrm{S1}$ & 49.68 & 36.33$\pm$8.68 & \textbf{51.51} & 51.33 \\
+  \midrule
+  \multirow{3}{*}{EuroSAT} & \multirow{3}{*}{RGB} & NIR & 99.07 & 98.82$\pm$0.15 & \textbf{98.89} & 97.31 \\
+   &  & VRE & 99.07 & 98.82$\pm$0.15 & \textbf{99.07} & 97.31 \\
+   &  & SWIR & 99.07 & 98.82$\pm$0.15 & \textbf{99.19} & 97.31 \\
+\bottomrule
+\end{tabular}
+
+\bigskip
+
+% Table: Addition
+\begin{tabular}{llr | r r r r r}
+\toprule
+\multicolumn{3}{c}{} & \multicolumn{1}{c|}{$f_0(M_A)$} & \multicolumn{1}{c|}{Baselines} & \multicolumn{1}{c|}{Ours} & \multicolumn{2}{c}{Oracle ($M_A$+$M_B$)} \\
+\midrule
+Dataset & \shortstack[c]{Start\\($M_A$)} & \shortstack[c]{New\\($M_B$)} & \shortstack[c]{DINO\\SFT (L)} & \shortstack[c]{MKE\\(L)} & \shortstack[c]{Delulu\\(L)} & \shortstack[c]{DINO\\SFT (L)} & \shortstack[c]{OlmoE.\\(L)} \\
+\midrule
+  \multirow{4}{*}{reBEN} & \multirow{2}{*}{$\mathrm{S2}_{rgb}$} & $\mathrm{S1}$ & 65.88 & 64.66 & \textbf{66.24} & 65.97 & 66.11 \\
+   &  & $\mathrm{S2}_{\neg rgb}$ & 65.88 & 63.54 & \textbf{66.33} & 64.52 & 63.98 \\
+   & $\mathrm{S1}$ & $\mathrm{S2}$ & 51.50 & 54.18 & \textbf{55.03} & 63.64 & 66.11 \\
+   & $\mathrm{S2}$ & $\mathrm{S1}$ & 64.98 & 62.63 & \textbf{65.01} & 63.64 & 66.11 \\
+  \midrule
+  \multirow{4}{*}{DFC2020} & \multirow{2}{*}{$\mathrm{S2}_{rgb}$} & $\mathrm{S1}$ & 47.73 & \textbf{50.77} & 47.61 & 48.79 & 54.68 \\
+   &  & $\mathrm{S2}_{\neg rgb}$ & 47.73 & 51.54 & \textbf{52.35} & 43.25 & 51.33 \\
+   & $\mathrm{S1}$ & $\mathrm{S2}$ & 44.03 & 48.15 & \textbf{50.08} & 52.22 & 54.68 \\
+   & $\mathrm{S2}$ & $\mathrm{S1}$ & 49.68 & \textbf{52.91} & 52.34 & 52.22 & 54.68 \\
+  \midrule
+  \multirow{3}{*}{EuroSAT} & \multirow{3}{*}{RGB} & NIR & 99.07 & 98.22 & \textbf{99.02} & -- & 98.15 \\
+   &  & VRE & 99.07 & 98.15 & \textbf{99.13} & -- & 96.85 \\
+   &  & SWIR & 99.07 & 96.61 & \textbf{99.00} & -- & 96.15 \\
+\bottomrule
+\end{tabular}

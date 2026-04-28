@@ -25,8 +25,8 @@ df = pd.read_csv('res/delulu-sweep/sweep_results_nomae.csv')
 print(f"Rows: {len(df)}")
 
 VAL_TEST_PAIRS = [
-    ('val_transfer',    'test_transfer'),
     ('val_peeking',     'test_peeking'),
+    ('val_transfer',    'test_transfer'),
     ('val_addition',    'test_addition'),
     ('val_ens_addition','test_ens_addition'),
 ]
@@ -101,24 +101,37 @@ print(f'\nSaved {len(best_configs)} configs to {json_path}')  # 4 metrics × 2 =
 # Val vs test scatter plots
 # ---------------------------------------------------------------------------
 
-fig, axes = plt.subplots(1, 4, figsize=(18, 4))
-fig.suptitle('Val vs Test — benv2 s2→s1 (no-MAE sweep)', fontsize=12)
+PLOT_PAIRS = [
+    ('val_peeking',  'test_peeking',  'Peeking',  True),
+    ('val_transfer', 'test_transfer', 'Transfer', False),
+    ('val_addition', 'test_addition', 'Addition', False),
+]
 
-for ax, (val_col, test_col) in zip(axes, VAL_TEST_PAIRS):
+METRIC_LABELS = {
+    'peeking':  'Peeking',
+    'transfer': 'Transfer',
+    'addition': 'Addition',
+}
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+fig.suptitle('Validation vs. Test Performance on reBEN\nStarting Modality = S2, New Modality = S1', fontsize=12)
+
+for ax, (val_col, test_col, metric_label, show_identity) in zip(axes, PLOT_PAIRS):
     x = df[val_col]
     y = df[test_col]
     ax.scatter(x, y, alpha=0.6, s=20)
 
-    lo = min(x.min(), y.min()) - 1
-    hi = max(x.max(), y.max()) + 1
-    ax.plot([lo, hi], [lo, hi], 'k--', linewidth=0.8, label='y=x')
+    if show_identity:
+        lo = min(x.min(), y.min()) - 1
+        hi = max(x.max(), y.max()) + 1
+        ax.plot([lo, hi], [lo, hi], 'k--', linewidth=0.8, label='Identity (val = test)')
+        ax.legend(fontsize=8)
 
     r = x.corr(y)
-    ax.set_xlabel(val_col, fontsize=9)
-    ax.set_ylabel(test_col, fontsize=9)
-    metric = val_col.replace('val_', '')
-    ax.set_title(f'{metric}  (r={r:.3f})', fontsize=10)
-    ax.legend(fontsize=8)
+    ax.set_xlabel('Validation Score', fontsize=9)
+    ax.set_ylabel('Test Score', fontsize=9)
+    ax.set_title(f'{metric_label}  (r = {r:.3f})', fontsize=10)
+    ax.grid(True, linestyle='--', alpha=0.4)
 
 plt.tight_layout()
 out = f'{out_dir}/sweep_val_vs_test.png'
