@@ -1,0 +1,2 @@
+model_type,modality,train_mode,learning_rate,weight_decay,trainable_params,epochs,K,temperature,alpha,lambda_u,mixmatch_warmup_epochs,metric_name,test_metric,best_val_metric,best_val_test_metric,saved_checkpoint,global_rep,use_dino_weights
+evan_base,s2,fft,0.0001,0.0001,87453715,1,2,0.5,0.75,75.0,1,mAP,41.21,41.32,41.21,checkpoints/evan_mixmatch_benv2_s2_20260428_193352.pt,clstoken,False

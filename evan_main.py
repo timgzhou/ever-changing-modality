@@ -1021,6 +1021,19 @@ class EVAN(nn.Module):
 
         return output_dict
 
+    def _hallucinate_with_mask_token(self, tgt_mod: str, B: int, device) -> torch.Tensor:
+        """
+        Produce [B, 1+n_patches, D] using only the learned mask token (projector_queries),
+        broadcast without cross-attention. Only supported for cross projector type.
+        """
+        if self.intermediate_projector_type != "cross":
+            raise NotImplementedError("use_mask_token only supported with intermediate_projector_type='cross'")
+        n_patches = (self.img_size // self.patch_size) ** 2
+        queries = self.projector_queries[tgt_mod]                      # [1, 2, D]
+        q_cls   = queries[:, :1, :].expand(B, 1, -1)                  # [B, 1, D]
+        q_patch = queries[:, 1:, :].expand(B, n_patches, -1).clone()  # [B, n_patches, D]
+        return torch.cat([q_cls, q_patch], dim=1)                      # [B, 1+n_patches, D]
+
     def _project_sequence(self, src_seq_norm: Tensor, key: str, tgt_mod: str, src_patch_mask=None) -> Tensor:
         """Call the intermediate projector for (src→tgt), dispatching by projector type."""
         projector = self.intermediate_projectors[key]

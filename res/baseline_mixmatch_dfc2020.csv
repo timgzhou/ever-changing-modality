@@ -3,3 +3,4 @@ evan_base,s2,fft,0.0001,0.0001,87641864,5,2,0.5,0.75,75.0,4,mIoU,16.22,43.34,38.
 evan_base,s2,fft,0.0001,0.0001,87641864,5,2,0.5,0.75,75.0,4,mIoU,24.04,37.95,21.84,checkpoints/evan_mixmatch_dfc2020_s2_20260424_141154.pt,clstoken,True
 evan_base,s2,fft,0.0001,0.0001,87641864,5,2,0.5,0.75,10.0,4,mIoU,34.03,49.24,34.03,checkpoints/evan_mixmatch_dfc2020_s2_20260424_142431.pt,clstoken,True
 evan_base,s2,fft,0.0001,0.0001,87641864,5,2,0.5,0.75,10.0,4,mIoU,28.43,39.60,26.66,checkpoints/evan_mixmatch_dfc2020_s2_20260424_153822.pt,clstoken,True
+evan_base,s2,fft,0.0001,0.0001,87641864,1,2,0.5,0.75,75.0,1,mIoU,24.21,24.26,24.21,checkpoints/evan_mixmatch_dfc2020_s2_20260428_193617.pt,clstoken,True

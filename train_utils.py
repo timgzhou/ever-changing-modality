@@ -959,7 +959,13 @@ class Trainer:
                         for v, aug_params in views_and_params:
                             logits_v = self.model({modality: v})        # [B_u, C, H, W]
                             prob_v = F.softmax(logits_v, dim=1)         # [B_u, C, H, W]
-                            prob_v = weak_aug.inverse(prob_v, params=aug_params)
+                            # Invert flips manually so this works for any C, not just RGB.
+                            for param in reversed(aug_params):
+                                bp = param.data['batch_prob'].bool().to(prob_v.device)
+                                if 'Horizontal' in param.name:
+                                    prob_v[bp] = prob_v[bp].flip(-1)
+                                elif 'Vertical' in param.name:
+                                    prob_v[bp] = prob_v[bp].flip(-2)
                             avg_prob = prob_v if avg_prob is None else avg_prob + prob_v
                         avg_prob = avg_prob / K                         # [B_u, C, H, W]
                         hard_pseudo = avg_prob.argmax(dim=1)            # [B_u, H, W]
@@ -968,7 +974,7 @@ class Trainer:
                         for _, aug_params in views_and_params:
                             lbl = hard_pseudo.clone()
                             for param in aug_params:
-                                bp = param.data['batch_prob'].bool()
+                                bp = param.data['batch_prob'].bool().to(lbl.device)
                                 if 'Horizontal' in param.name:
                                     lbl[bp] = lbl[bp].flip(-1)
                                 elif 'Vertical' in param.name:
@@ -980,8 +986,8 @@ class Trainer:
                             torch.sigmoid(self.model({modality: v})) for v in views
                         ) / K  # [B_u, C]
                         # Sharpen in logit space: sigmoid(logit(p) / T)
-                        avg_logit = torch.log(avg_prob.clamp(1e-6, 1 - 1e-6) /
-                                              (1 - avg_prob).clamp(1e-6))
+                        avg_prob_c = avg_prob.clamp(1e-6, 1 - 1e-6)
+                        avg_logit = torch.log(avg_prob_c / (1 - avg_prob_c))
                         q = torch.sigmoid(avg_logit / temperature)  # [B_u, C]
                     else:
                         avg_logits = sum(
@@ -998,7 +1004,7 @@ class Trainer:
                     # Flip integer label map to match x_l_aug.
                     labels_aug = labels.clone()
                     for param in weak_aug._params:
-                        bp = param.data['batch_prob'].bool()
+                        bp = param.data['batch_prob'].bool().to(labels_aug.device)
                         if 'Horizontal' in param.name:
                             labels_aug[bp] = labels_aug[bp].flip(-1)
                         elif 'Vertical' in param.name:
@@ -1255,22 +1261,29 @@ def hallucinate_intermediate_features(
     source_modalities: tuple,
     target_modalities: tuple,
     evan,
+    use_mask_token: bool = False,
 ) -> dict:
     """
     Hallucinate intermediate features for target modalities from source modalities.
 
-    Uses full sequence projection (CLS + storage + patches) via transformer-based projectors.
-    For each target modality, projects from all available source modalities and takes the mean.
+    Uses full sequence projection (CLS + storage + patches) via transformer-based projectors,
+    or (when use_mask_token=True) a broadcast learned mask token without cross-attention.
 
     Args:
         source_intermediate: Dict of source modality features {mod: [B, seq_len, embed_dim]}
         source_modalities: Tuple of source modality names
         target_modalities: Tuple of target modality names to hallucinate
         evan: EVAN model (projectors accessed via evan.intermediate_projectors and evan._project_sequence)
+        use_mask_token: If True, bypass projectors and use evan._hallucinate_with_mask_token instead.
 
     Returns:
         Dict of hallucinated features {mod: [B, seq_len, embed_dim]}
     """
+    if use_mask_token:
+        B = next(iter(source_intermediate.values())).shape[0]
+        device = next(iter(source_intermediate.values())).device
+        return {mod: evan._hallucinate_with_mask_token(mod, B, device) for mod in target_modalities}
+
     hallucinated = {}
     for tar_mod in target_modalities:
         projected_seqs = []

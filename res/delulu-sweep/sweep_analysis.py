@@ -32,7 +32,7 @@ VAL_TEST_PAIRS = [
 ]
 
 HYPERPARAM_COLS = ['lr', 'weight_decay', 'mask_ratio', 'modality_dropout',
-                   'labeled_frequency', 'labeled_start_fraction', 'dyn_teacher',
+                   'labeled_frequency', 'labeled_start_fraction',
                    'lambda_latent', 'lambda_prefusion', 'lambda_distill']
 
 # ---------------------------------------------------------------------------
@@ -47,7 +47,6 @@ COL_TO_ARG = {
     'modality_dropout':       'modality_dropout',
     'labeled_frequency':      'labeled_frequency',
     'labeled_start_fraction': 'labeled_start_fraction',
-    'dyn_teacher':            'dyn_teacher',
     'lambda_latent':          'lambda_latent',
     'lambda_prefusion':       'lambda_prefusion',
     'lambda_distill':         'lambda_distill',
@@ -75,10 +74,7 @@ for val_col, test_col in VAL_TEST_PAIRS:
                 continue
             val = row[c]
             arg_name = COL_TO_ARG[c]
-            if c == 'dyn_teacher':
-                args[arg_name] = bool(str(val).strip().lower() == 'true')
-            else:
-                args[arg_name] = float(f"{val:.3g}")
+            args[arg_name] = float(f"{val:.3g}")
         entry = {
             'selected_by': metric_name,
             'rank':        rank,

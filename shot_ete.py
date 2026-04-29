@@ -47,6 +47,9 @@ def main():
     parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for CE loss (default: 1.0)')
     parser.add_argument('--use_mfla', action='store_true',
                         help='Enable MFLA training for hallucinated modalities')
+    parser.add_argument('--use_mask_token', action='store_true',
+                        help='Ablation: replace intermediate projectors with broadcast learned mask token '
+                             '(projector_queries). Incompatible with --active_losses prefusion.')
     parser.add_argument('--dyn_teacher', action='store_true',
                         help='Dynamic teacher distillation: starting_modality head trains against '
                              'student peeking (soft-vote), newmod heads train against frozen unimodal teacher')
@@ -173,6 +176,7 @@ def main():
         warmup_epochs=args.warmup_epochs,
         asym_lr_multiplier=args.asym_lr,
         dyn_teacher=args.dyn_teacher,
+        use_mask_token=args.use_mask_token,
         task_type=task_config.task_type,
         label_key=task_config.label_key,
         num_classes=task_config.num_classes,
@@ -225,7 +229,7 @@ def main():
     fieldnames = [
         "dataset", "model_arch", "starting_modality", "new_modality", "lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
-        "trainable_params", "active_losses", "use_mfla", "warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
+        "trainable_params", "active_losses", "use_mfla", "use_mask_token", "warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
         "teacher_test_metric",
         "transfer_metric", "peeking_metric", "addition_metric", "addition_ens_metric",
         "valchecked_transfer", "valchecked_peek", "valchecked_add", "valchecked_add_ens",
@@ -259,9 +263,10 @@ def main():
             trainable_total,
             active_losses_str,
             args.use_mfla,
+            args.use_mask_token,
             args.warmup_epochs,
-            args.intermediate_projector_type,
-            args.tz_fusion_time,
+            evan.intermediate_projector_type,
+            evan.tz_fusion_time,
             metric_name,
             f"{teacher_test_metric:.2f}" if teacher_test_metric is not None else "",
             f"{metrics['transfer']:.2f}",
