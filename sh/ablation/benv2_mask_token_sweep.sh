@@ -4,11 +4,17 @@
 # Usage: bash sh/ablation/benv2_mask_token_sweep.sh
 
 DATASET="benv2"
-STARTING_MOD="s2"
-NEW_MOD="s1"
+STARTING_MOD="$1"
+NEW_MOD="$2"
 MODEL="evan_base"
 TEACHERS_JSON="artifacts/sft_teachers.json"
 RESULTS_CSV="res/ablation/benv2_mask_token.csv"
+
+if [ -z "$STARTING_MOD" ] || [ -z "$NEW_MOD" ]; then
+    echo "Usage: bash sh/ablation/benv2_mask_token_sweep.sh <starting_mod> <new_mod>"
+    echo "  e.g. bash sh/ablation/benv2_mask_token_sweep.sh s2 s1"
+    exit 1
+fi
 
 mkdir -p logs/shot_ete res/ablation
 

@@ -123,6 +123,12 @@ def main():
     bands_newmod = modality_bands_dict[newmod]
 
     evan = model.evan
+
+    checkpoint_ft = evan.tz_fusion_time
+    if args.tz_fusion_time != checkpoint_ft:
+        print(f"  Overriding tz_fusion_time: {checkpoint_ft} → {args.tz_fusion_time}")
+        evan.rewire_fusion_time(args.tz_fusion_time)
+
     model = model.to(device)
 
     num_newmod_channels = len(bands_newmod) if not isinstance(bands_newmod, slice) else \

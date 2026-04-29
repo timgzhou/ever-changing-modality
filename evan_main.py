@@ -309,6 +309,58 @@ class EVAN(nn.Module):
         num_fusion_blocks = self.n_blocks - self.tz_fusion_time
         if self.tz_modality_fusion_layer_augmenter == "lora":
             self.modality_fusion_lora_adaptors[modality] = self.create_lora_list(num_fusion_blocks)
+    def rewire_fusion_time(self, new_ft: int) -> None:
+        """
+        Override tz_fusion_time after loading a checkpoint by moving blocks across the
+        MSLA / fusion boundary. Weights are preserved — no blocks are re-created.
+
+        Only supported in FFT mode with MFLA disabled and exactly one modality registered.
+        Raises NotImplementedError / ValueError rather than silently defaulting.
+        """
+        if self.tz_modality_specific_layer_augmenter != "fft":
+            raise NotImplementedError(
+                f"rewire_fusion_time only supported for tz_modality_specific_layer_augmenter='fft', "
+                f"got {self.tz_modality_specific_layer_augmenter!r}"
+            )
+        if self.tz_modality_fusion_layer_augmenter != "none":
+            raise NotImplementedError(
+                f"rewire_fusion_time does not support MFLA "
+                f"(tz_modality_fusion_layer_augmenter={self.tz_modality_fusion_layer_augmenter!r})"
+            )
+        if len(self.supported_modalities) != 1:
+            raise ValueError(
+                f"rewire_fusion_time must be called before adding new modalities; "
+                f"currently registered: {self.supported_modalities}"
+            )
+        if not (0 <= new_ft <= self.n_blocks):
+            raise ValueError(f"new_ft={new_ft} out of range [0, {self.n_blocks}]")
+
+        old_ft = self.tz_fusion_time
+        if new_ft == old_ft:
+            return
+
+        mod = self.supported_modalities[0]
+        old_msla_list = list(self.modality_specific_layer_adaptors[mod])  # len = old_ft
+        old_blocks_list = list(self.blocks)                                # len = n_blocks - old_ft
+
+        if new_ft < old_ft:
+            # Move last (old_ft - new_ft) MSLA blocks to the front of self.blocks
+            new_blocks_list = old_msla_list[new_ft:] + old_blocks_list
+            new_msla_list   = old_msla_list[:new_ft]
+        else:
+            # Move first (new_ft - old_ft) fusion blocks to the end of MSLA
+            delta = new_ft - old_ft
+            new_blocks_list = old_blocks_list[delta:]
+            new_msla_list   = old_msla_list + old_blocks_list[:delta]
+
+        self.blocks = nn.ModuleList(new_blocks_list)
+        self.modality_specific_layer_adaptors[mod] = nn.ModuleList(new_msla_list)
+        self.tz_fusion_time = new_ft
+        print(
+            f"  [rewire_fusion_time] {old_ft} → {new_ft}: "
+            f"MSLA={len(new_msla_list)} blocks, fusion={len(new_blocks_list)} blocks"
+        )
+
     def _make_intermediate_projector(self, tgt_mod: str) -> nn.Module:
         if self.intermediate_projector_type == "self":
             from train_utils import SequenceProjector
