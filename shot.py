@@ -6,53 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
-from einops import rearrange
 from data_utils import create_multimodal_batch
 from train_utils import SequenceProjector, _compute_map, compute_miou, hallucinate_intermediate_features, merge_intermediate_features, make_scheduler
 import wandb
 import numpy as np
-
-class FullSequenceMAEDecoder(nn.Module):
-    """
-    MAE decoder that takes the full sequence including mask token positions.
-
-    Unlike SimpleMAEDecoder which expects only unmasked tokens + ids_restore,
-    this decoder takes the full sequence where masked positions already contain
-    the mask token. Simpler interface for fusion MAE training.
-    """
-
-    def __init__(self, embed_dim, num_channels, patch_size, decoder_depth=1, decoder_heads=8, ffn_factor=4):
-        super().__init__()
-        self.patch_size = patch_size
-        self.num_channels = num_channels
-        self.embed_dim = embed_dim
-
-        # Transformer decoder
-        from torch.nn import TransformerEncoderLayer, TransformerEncoder
-        decoder_layer = TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=decoder_heads,
-            dim_feedforward=embed_dim * ffn_factor,
-            batch_first=True,
-            norm_first=True
-        )
-        self.decoder = TransformerEncoder(decoder_layer, num_layers=decoder_depth)
-
-        # Linear projection to reconstruct pixels
-        self.pred = nn.Linear(embed_dim, patch_size * patch_size * num_channels)
-
-    def forward(self, x):
-        """
-        Args:
-            x: [B, num_patches, embed_dim] - Full sequence with mask tokens at masked positions
-
-        Returns:
-            reconstructed patches: [B, num_patches, patch_size^2 * channels]
-        """
-        x = self.decoder(x)
-        return self.pred(x)
-
-
 
 def evaluate(model, dataloader, criterion, device, modality_bands_dict,
              modalities_to_use=('rgb',)):
@@ -97,18 +54,6 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
     return avg_loss, accuracy
 
 
-# ==================== MAE Helper Functions ====================
-
-def mae_reconstruction_loss(pred, target, mask):
-    loss = (pred - target) ** 2
-    loss = loss.mean(dim=-1)  # Mean over pixels in patch
-    loss = (loss * mask).sum() / mask.sum()
-    return loss
-
-def patchify(imgs, patch_size):
-    patches = rearrange(imgs, 'b c (h ph) (w pw) -> b (h w) (ph pw c)', ph=patch_size, pw=patch_size)
-    return patches
-
 def distillation_loss(student_logits, teacher_logits, temperature=2.0, task_type="classification"):
     """Distillation loss between student and teacher logits.
 
@@ -146,21 +91,6 @@ def _model_soft_vote(model, fused_output, modalities):
             logits_list.append(model.modality_classifiers[mod](cls_token))
     return torch.stack(logits_list).mean(dim=0)
 
-def create_mae_decoders(hidden_dim,patch_size,modality_bands_dict,mae_modalities,device):
-    mae_decoders = nn.ModuleDict()
-    for mod in mae_modalities:
-        bands = modality_bands_dict[mod]
-        num_channels = (bands.stop - bands.start) if isinstance(bands, slice) else len(bands)
-        mae_decoders[mod] = FullSequenceMAEDecoder(
-            embed_dim=hidden_dim,
-            num_channels=num_channels,
-            patch_size=patch_size,
-            decoder_depth=1,
-            ffn_factor=2
-        ).to(device)
-        print(f"  Initialized FullSequenceMAEDecoder for {mod}, num_channels={num_channels}")
-    return mae_decoders
-
 # ==================== SHOT TRAINING COMPONENT ====================
 
 def create_latent_decoders(hidden_dim, latent_reconstruct_modalities, device, num_heads=8, ffn_factor=4):
@@ -176,24 +106,6 @@ def create_latent_decoders(hidden_dim, latent_reconstruct_modalities, device, nu
         print(f"  Initialized Latent Projector (Transformer) for {mod}")
     return projectors
 
-
-def create_fuse_cls_projectors(hidden_dim, mae_modalities, latent_reconstruct_modalities, device,factor=4):
-    """
-    These are the supervision provided from latent_reconstruction_modalities to mae_modalities.
-    Note we do this to ensure the features extracted from mae_modalities are semantically meaningful.
-    """
-    fused_cls_projector=nn.ModuleDict()
-    for src_mod in mae_modalities:
-        for tgt_mod in latent_reconstruct_modalities:
-            if src_mod != tgt_mod:
-                key = f"{src_mod}_to_{tgt_mod}"
-                fused_cls_projector[key] = nn.Sequential(
-                    nn.Linear(hidden_dim, hidden_dim*factor),
-                    nn.GELU(),
-                    nn.Linear(hidden_dim*factor, hidden_dim),
-                ).to(device)
-                print(f"  Initialized CLS Projector: {src_mod} -> {tgt_mod}")
-    return fused_cls_projector
 
 # MASKING HELPER FUNCTION
 def mask_input(evan, batch_size, n_storage_tokens, num_patches, token_mask_ratio, all_modalities, prefusion_features, modality_dropout, device,
@@ -237,7 +149,7 @@ def mask_input(evan, batch_size, n_storage_tokens, num_patches, token_mask_ratio
             mask_val = mod in drop_candidates
             modality_masks[mod] = torch.full((batch_size, num_patches), mask_val, device=device, dtype=torch.bool)
         else:
-            # token dropping mode: randomly mask mae_mask_ratio of tokens per modality
+            # token dropping mode: randomly mask token_mask_ratio of tokens per modality
             len_keep = int(num_patches * (1 - token_mask_ratio))
             noise = torch.rand(batch_size, num_patches, device=device)
             ids_shuffle = torch.argsort(noise, dim=1)
@@ -252,31 +164,27 @@ def mask_input(evan, batch_size, n_storage_tokens, num_patches, token_mask_ratio
         # Sources in latent_reconstruct_modalities are detached to block encoder gradients.
         # For cross projector: mask out source patches that are also masked (no leakage).
         projected_sequences = {}  # {(src_mod, tgt_mod): [B, seq_len, embed_dim]}
-        use_cross = evan.intermediate_projector_type == "cross"
         lrm = set(latent_reconstruct_modalities) if latent_reconstruct_modalities else set()
         for src_mod in available_modalities:
             src_seq = prefusion_features[src_mod]
             if protect_lrm and (src_mod in lrm):
                 src_seq = src_seq.detach()
             src_seq_norm = F.layer_norm(src_seq, [src_seq.shape[-1]])
-            src_patch_mask = modality_masks[src_mod] if use_cross else None
+            src_patch_mask = modality_masks[src_mod]
             for tgt_mod in all_modalities:
                 if src_mod != tgt_mod:
                     key = f"{src_mod}_to_{tgt_mod}"
                     projected_sequences[(src_mod, tgt_mod)] = evan._project_sequence(src_seq_norm, key, tgt_mod, src_patch_mask=src_patch_mask)
 
-        # cross projector outputs [B, 1+n_patches, D] (no storage tokens); others output full [B, 1+n_storage+n_patches, D]
-        cross_projector = evan.intermediate_projector_type == "cross"
-
+        # cross projector outputs [B, 1+n_patches, D] (no storage tokens)
         # Prefusion loss: MSE between projected and real target features.
-        # For cross projector, strip storage tokens from tgt to match proj_seq shape.
+        # Strip storage tokens from tgt to match proj_seq shape.
         if active_losses and 'prefusion' in active_losses:
             for (src_mod, tgt_mod), proj_seq in projected_sequences.items():
                 tgt_seq = prefusion_features[tgt_mod]  # [B, 1+n_storage+n_patches, D]
                 if protect_lrm and (tgt_mod in lrm):
                     tgt_seq = tgt_seq.detach()
-                if cross_projector:
-                    tgt_seq = torch.cat([tgt_seq[:, :1], tgt_seq[:, n_storage_tokens + 1:]], dim=1)
+                tgt_seq = torch.cat([tgt_seq[:, :1], tgt_seq[:, n_storage_tokens + 1:]], dim=1)
                 prefusion_loss = prefusion_loss + F.mse_loss(proj_seq, tgt_seq)
             if projected_sequences:
                 prefusion_loss = prefusion_loss / len(projected_sequences)
@@ -292,8 +200,7 @@ def mask_input(evan, batch_size, n_storage_tokens, num_patches, token_mask_ratio
             if use_mask_token:
                 masked_mod_features[mod] = evan._hallucinate_with_mask_token(mod, batch_size, device)
             else:
-                # cross projector: proj_seq is [B, 1+n_patches, D] — fusion handles variable prefix size.
-                # other projectors: proj_seq is full [B, 1+n_storage+n_patches, D].
+                # proj_seq is [B, 1+n_patches, D] — fusion handles variable prefix size.
                 projected_list = [projected_sequences[(avail_mod, mod)] for avail_mod in available_modalities]
                 masked_mod_features[mod] = torch.stack(projected_list).mean(dim=0)
         else:
@@ -308,12 +215,9 @@ def mask_input(evan, batch_size, n_storage_tokens, num_patches, token_mask_ratio
                 if other_available:
                     projected_list = [projected_sequences[(avail_mod, mod)] for avail_mod in other_available]
                     proj_seq = torch.stack(projected_list).mean(dim=0)
-                    if cross_projector:
-                        # proj_seq is [B, 1+n_patches, D]; pad storage slots with zeros to match features shape
-                        zeros = torch.zeros(batch_size, n_storage_tokens, proj_seq.shape[-1], device=device)
-                        projected_seq = torch.cat([proj_seq[:, :1], zeros, proj_seq[:, 1:]], dim=1)
-                    else:
-                        projected_seq = proj_seq
+                    # proj_seq is [B, 1+n_patches, D]; pad storage slots with zeros to match features shape
+                    zeros = torch.zeros(batch_size, n_storage_tokens, proj_seq.shape[-1], device=device)
+                    projected_seq = torch.cat([proj_seq[:, :1], zeros, proj_seq[:, 1:]], dim=1)
                 else:
                     projected_seq = torch.zeros_like(features)
 
@@ -369,7 +273,7 @@ def mixed_batch_iterator(unlabeled_loader, labeled_loader, labeled_freq):
 def evaluate_multimodal(
     model, evan, loader, device, modality_bands_dict,
     starting_modality, newmod_modalities, all_modalities,
-    teacher=None, use_mfla=False, multilabel=False, label_key='label',
+    teacher=None, multilabel=False, label_key='label',
     with_labels=False, desc="Evaluating",
     segmentation=False, num_classes=None, ignore_index=-100,
     use_mask_token=False,
@@ -402,12 +306,10 @@ def evaluate_multimodal(
 
     newmod_modalities = list(newmod_modalities)
     all_mods = list(all_modalities)
-    is_cross = evan.intermediate_projector_type == "cross"
     # Cross projector outputs [B, 1+n_patches, D] (no storage tokens) — fusion must
     # always know which modalities are hallucinated so it uses the right prefix size.
-    # use_mfla controls gradient routing (set_mfla_training_mode), not this flag.
-    hallucinated_newmod = set(newmod_modalities) if (is_cross or use_mfla) else None
-    hallucinated_startmod = {starting_modality} if (is_cross or use_mfla) else None
+    hallucinated_newmod = set(newmod_modalities)
+    hallucinated_startmod = {starting_modality}
 
     # Label-based accumulators
     total = 0
@@ -555,7 +457,7 @@ def evaluate_multimodal(
 
 def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dict,
                               starting_modality, all_modalities,
-                              use_mfla=False, multilabel=False, label_key='label',
+                              multilabel=False, label_key='label',
                               segmentation=False, num_classes=None, ignore_index=-100,
                               use_mask_token=False):
     """
@@ -597,8 +499,7 @@ def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dic
                 (starting_modality,), tuple(newmod_modalities)
             )
 
-            is_cross = evan.intermediate_projector_type == "cross"
-            hallucinated_mods = set(newmod_modalities) if (is_cross or use_mfla) else None
+            hallucinated_mods = set(newmod_modalities)
             fused_output = evan.forward_fusion_from_modality_features(
                 fusion_input,
                 hallucinated_modalities=hallucinated_mods
@@ -625,8 +526,7 @@ def compute_peeking_accuracy(model, evan, val_loader, device, modality_bands_dic
 
 
 def compute_teacher_agreement(model, teacher, evan, val_loader, device, modality_bands_dict,
-                               starting_modality, newmod_modalities, all_modalities,
-                               use_mfla=False):
+                               starting_modality, newmod_modalities, all_modalities):
     """
     Compute agreement rate between student and teacher on unlabeled multimodal data.
     Tests transfer path: real newmod + hallucinated starting_mod.
@@ -672,7 +572,7 @@ def compute_teacher_agreement(model, teacher, evan, val_loader, device, modality
             )
 
             # Forward through fusion + classifier (transfer: starting_mod is hallucinated)
-            hallucinated_mods = {starting_modality} if (evan.intermediate_projector_type == "cross" or use_mfla) else None
+            hallucinated_mods = {starting_modality}
             fused_output = evan.forward_fusion_from_modality_features(
                 fusion_input,
                 hallucinated_modalities=hallucinated_mods
@@ -736,25 +636,6 @@ def compute_addition_agreement(model, teacher, evan, val_loader, device, modalit
     return 100.0 * agree / total
 
 
-def set_mfla_training_mode(evan, hallucinated_modalities, all_modalities):
-    """
-    Toggle requires_grad based on which modalities are hallucinated.
-
-    When hallucination: backbone frozen, only hallucinated MFLA trains.
-    When no hallucination: backbone trains, all MFLAs frozen.
-    """
-    has_hallucination = len(hallucinated_modalities) > 0
-    backbone_trainable = not has_hallucination
-
-    for i in range(evan.tz_fusion_time, len(evan.blocks)):
-        for param in evan.blocks[i].parameters():
-            param.requires_grad = backbone_trainable
-
-    for mod in all_modalities:
-        for param in evan.modality_fusion_lora_adaptors[mod].parameters():
-            param.requires_grad = (mod in hallucinated_modalities)
-
-
 def _compute_latent_loss(student_fused, teacher_out, latent_projectors, latent_reconstruct_modalities, mse_fn, device, only_mod=None):
     """Compute latent reconstruction loss: project student CLS+patch tokens to match teacher."""
     latent_loss = torch.tensor(0.0, device=device)
@@ -805,7 +686,7 @@ def _compute_ce_loss(student_fused, labels, model, ce_fn, segmentation, device):
 def _labeled_batch_step(
     batch, evan, model, unimodal_teacher, latent_projectors,
     active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
-    modality_bands_dict, mse_fn, ce_fn, use_mfla,
+    modality_bands_dict, mse_fn, ce_fn,
     multilabel, label_key, segmentation, device,
     use_mask_token=False,
 ):
@@ -833,15 +714,7 @@ def _labeled_batch_step(
 
     # Cross projector outputs [B, 1+n_patches, D] (no storage tokens) — fusion must
     # know these are hallucinated so it uses n_prefix=1 instead of 1+n_storage.
-    # Self projector outputs the full sequence, so no special handling needed.
-    if evan.intermediate_projector_type == "cross":
-        hallucinated_mods = set(newmod_list)
-    else:
-        hallucinated_mods = set()
-
-    if use_mfla:
-        raise NotImplementedError("dont mfla")
-        set_mfla_training_mode(evan, hallucinated_mods, all_modalities)
+    hallucinated_mods = set(newmod_list)
 
     student_fused = evan.forward_fusion_from_modality_features(
         prefusion_features,
@@ -868,19 +741,20 @@ def _labeled_batch_step(
         total_loss = total_loss + loss_weights['ce'] * ce_loss
         ce_loss_val = ce_loss.item()
 
-    return total_loss, {'mae': 0.0, 'latent': latent_loss_val, 'prefusion': 0.0, 'distill': 0.0, 'ce': ce_loss_val}
+    return total_loss, {'latent': latent_loss_val, 'prefusion': 0.0, 'distill': 0.0, 'ce': ce_loss_val}
 
 
 def _unlabeled_batch_step(
     batch, evan, model, teacher_classifier, latent_projectors,
-    mae_decoders, active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
-    latent_reconstruct_modalities, mae_modalities, modality_bands_dict,
-    mae_mask_ratio, modality_dropout, mse_fn,
-    distillation_temperature, use_mfla,
-    effective_labeled_freq, patch_size, task_type, device,
+    active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
+    latent_reconstruct_modalities, modality_bands_dict,
+    token_mask_ratio, modality_dropout, mse_fn,
+    distillation_temperature,
+    effective_labeled_freq, task_type, device,
     label_key='label', ignore_index=-100,
     dyn_teacher: bool = False,
     use_mask_token: bool = False,
+    protect_lrm: bool = False,
 ):
     """Process one unlabeled (multimodal) batch. Returns (total_loss, loss_dict, masking_info)."""
     segmentation = (task_type == "segmentation")
@@ -904,43 +778,25 @@ def _unlabeled_batch_step(
     # Masking + prefusion loss (computed together to share projections and avoid leakage)
     modality_masks, masked_mod_features, modality_dropped, prefusion_loss = mask_input(
         evan, batch_size, evan.n_storage_tokens, num_patches,
-        mae_mask_ratio, all_modalities, prefusion_features, modality_dropout, device,
+        token_mask_ratio, all_modalities, prefusion_features, modality_dropout, device,
         protected_modalities=newmod_list if effective_labeled_freq > 0 else None,
         active_losses=active_losses,
         latent_reconstruct_modalities=latent_reconstruct_modalities,
         use_mask_token=use_mask_token,
+        protect_lrm=protect_lrm,
     )
     prefusion_loss_val = prefusion_loss.item()
 
-    hallucinated_mods = {mod for mod, dropped in modality_dropped.items() if dropped} if use_mfla else set()
-    if use_mfla:
-        raise NotImplementedError()
-        # set_mfla_training_mode(evan, hallucinated_mods, all_modalities)
-
     # cross projector produces [B, 1+n_patches, D] for dropped mods — fusion needs to know prefix is smaller
-    dropped_mods = {mod for mod, dropped in modality_dropped.items() if dropped} if evan.intermediate_projector_type == "cross" else set()
+    dropped_mods = {mod for mod, dropped in modality_dropped.items() if dropped}
     student_fused = evan.forward_fusion_from_modality_features(
         masked_mod_features,
         hallucinated_modalities=dropped_mods
     )
 
     total_loss = loss_weights['prefusion'] * prefusion_loss
-    mae_loss_val = 0.0
     latent_loss_val = 0.0
     distill_loss_val = 0.0
-
-    if 'mae' in active_losses:
-        for mod in mae_modalities:
-            mask_float = modality_masks[mod].float()
-            if mask_float.sum() == 0:
-                continue
-            student_patches = student_fused[mod]['x_norm_patchtokens']
-            pred_pixels = mae_decoders[mod](student_patches)
-            target_img = full_multimodal_input[mod]
-            target_patches = patchify(target_img, patch_size)
-            mae_loss = mae_reconstruction_loss(pred_pixels, target_patches, mask_float)
-            total_loss = total_loss + loss_weights['mae'] * mae_loss
-            mae_loss_val += mae_loss.item()
 
     if 'latent' in active_losses:
         latent_loss = _compute_latent_loss(
@@ -967,7 +823,7 @@ def _unlabeled_batch_step(
                 peek_input = merge_intermediate_features(
                     prefusion_features, peek_hal, (starting_modality,), tuple(newmod_list),
                 )
-                _peek_hal_mods = set(newmod_list) if evan.intermediate_projector_type == "cross" else set()
+                _peek_hal_mods = set(newmod_list)
                 peek_fused = evan.forward_fusion_from_modality_features(
                     peek_input, hallucinated_modalities=_peek_hal_mods
                 )
@@ -1013,10 +869,10 @@ def _unlabeled_batch_step(
         total_loss = total_loss + loss_weights['distill'] * distill_loss
         distill_loss_val = distill_loss.item()
 
-    masking_info = {'modality_dropped': modality_dropped, 'mae_mask_ratio': mae_mask_ratio}
+    masking_info = {'modality_dropped': modality_dropped, 'token_mask_ratio': token_mask_ratio}
     return (
         total_loss,
-        {'mae': mae_loss_val, 'latent': latent_loss_val, 'prefusion': prefusion_loss_val, 'distill': distill_loss_val, 'ce': 0.0},
+        {'latent': latent_loss_val, 'prefusion': prefusion_loss_val, 'distill': distill_loss_val, 'ce': 0.0},
         masking_info,
     )
 
@@ -1024,9 +880,9 @@ def _run_periodic_eval(
     epoch, model, evan, teacher_classifier,
     test_loader, val_unlabeled_loader, val_labeled_loader,
     modality_bands_dict, starting_modality, newmod_list, all_modalities,
-    use_mfla, multilabel, label_key, segmentation, num_classes, ignore_index, device,
+    multilabel, label_key, segmentation, num_classes, ignore_index, device,
     checkpoint_selection, val_weights, best_val_metric, best_checkpoint_state,
-    best_checkpoints, mae_decoders, latent_projectors,
+    best_checkpoints, latent_projectors,
     use_mask_token=False,
 ):
     """Run periodic eval, update checkpoints. Returns updated state."""
@@ -1038,7 +894,7 @@ def _run_periodic_eval(
         starting_modality=starting_modality,
         newmod_modalities=newmod_list,
         all_modalities=all_modalities,
-        use_mfla=use_mfla, multilabel=multilabel, label_key=label_key,
+        multilabel=multilabel, label_key=label_key,
         with_labels=True, desc="Testing",
         segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
         use_mask_token=use_mask_token,
@@ -1070,7 +926,7 @@ def _run_periodic_eval(
             starting_modality=starting_modality,
             newmod_modalities=newmod_list,
             all_modalities=all_modalities,
-            use_mfla=use_mfla, with_labels=False, desc="Val (multimodal)",
+            with_labels=False, desc="Val (multimodal)",
             segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
             use_mask_token=use_mask_token,
         )
@@ -1085,7 +941,7 @@ def _run_periodic_eval(
             modality_bands_dict=modality_bands_dict,
             starting_modality=starting_modality,
             all_modalities=all_modalities,
-            use_mfla=use_mfla, multilabel=multilabel, label_key=label_key,
+            multilabel=multilabel, label_key=label_key,
             segmentation=segmentation, num_classes=num_classes, ignore_index=ignore_index,
             use_mask_token=use_mask_token,
         )
@@ -1117,7 +973,6 @@ def _run_periodic_eval(
         best_val_metric = current_metric
         best_checkpoint_state = {
             'model': copy.deepcopy(model.state_dict()),
-            'mae_decoders': copy.deepcopy({k: v.state_dict() for k, v in mae_decoders.items()}),
             'latent_projectors': copy.deepcopy({k: v.state_dict() for k, v in latent_projectors.items()}),
             'epoch': epoch,
             'val_metrics': val_metrics,
@@ -1172,7 +1027,6 @@ def _run_periodic_eval(
 # SHOT_TRAINING!
 def train_shot(
     model, train_loader, device, args, starting_modality, new_modality,
-    mae_modalities: list[str],
     latent_reconstruct_modalities: list[str],
     modality_bands_dict: dict = None,
     max_norm=1,
@@ -1183,15 +1037,13 @@ def train_shot(
     labeled_frequency: float = 0.0,
     labeled_start_fraction: float = 0.0,
     active_losses: list[str] = None,
-    loss_weights: dict = None,              # Per-loss scaling: {'mae': 0.5, ...}, default all 1.0
+    loss_weights: dict = None,              # Per-loss scaling: {'latent': 0.5, ...}, default all 1.0
     weight_decay: float = 0.01,
     # Validation-based checkpoint selection
     val_unlabeled_loader=None,          # val2 (unlabeled multimodal) for peeking agreement
     val_labeled_loader=None,            # val1 (labeled monomodal) for peeking accuracy
     checkpoint_selection='combined',    # 'combined', 'peeking', 'transfer_score', 'addition_score'
     val_weights=None,                   # {'peeking': 0.5, 'transfer_score': 0.5}
-    # MFLA training options
-    use_mfla: bool = False,             # Enable MFLA training for hallucinated modalities
     warmup_epochs: int = 1,             # Linear LR warmup epochs for cosine scheduler
     # Dataset options
     task_type: str = "classification",  # 'classification', 'multilabel', or 'segmentation'
@@ -1202,10 +1054,10 @@ def train_shot(
     asym_lr_multiplier: float | None = None,  # If set, new components get lr * asym_lr_multiplier
     dyn_teacher: bool = False,
     use_mask_token: bool = False,
+    protect_lrm: bool = False,
 ):
     """
     End-to-end training with hybrid loss combining:
-    - MAE reconstruction loss for mae_modalities (reconstruct raw pixels)
     - Latent reconstruction loss for latent_reconstruct_modalities (match frozen teacher features)
     - Bidirectional sequence projection loss (learn mappings between modality sequences)
     - Label distillation loss (train classifier heads with soft labels from teacher model)
@@ -1219,7 +1071,6 @@ def train_shot(
         - 0.0: start labeled mixing from the beginning
         - 0.5: start labeled mixing at 50% of training
         - 1.0: never use labeled mixing
-    - use_mfla: Enable MFLA training for hallucinated modalities
     """
     if use_mask_token and active_losses and 'prefusion' in active_losses:
         raise ValueError("use_mask_token=True is incompatible with 'prefusion' loss: "
@@ -1231,10 +1082,7 @@ def train_shot(
     print("\n" + "="*70)
     print(f"=== END TO END Delulu TRAINING===\n")
     print(f"  With Losses: {active_losses}")
-    if "mae" in active_losses: print(f"  MAE modalities (pixel reconstruction): {mae_modalities}")
     if "latent" in active_losses: print(f"  Latent modalities (feature matching): {latent_reconstruct_modalities}")
-    if use_mfla:
-        print(f"  MFLA training: enabled")
     if dyn_teacher:
         print(f"  Dynamic teacher distillation: enabled")
         print(f"    - starting_modality head: distills from student peeking (soft-vote)")
@@ -1242,7 +1090,7 @@ def train_shot(
     if labeled_train_loader is not None and labeled_frequency > 0:
         print(f"  Mixed training mode: labeled_frequency={labeled_frequency:.2f}")
         print(f"    - labeled_start_fraction={labeled_start_fraction:.2f} (starts at epoch {batch_mising_start_epoch + 1}/{args.epochs})")
-        print(f"    - Unlabeled batches (train2): MAE + latent + pre-fusion + distillation losses")
+        print(f"    - Unlabeled batches (train2): latent + pre-fusion + distillation losses")
         print(f"    - Labeled batches (train1): CE + latent losses (newmod hallucinated)")
 
     print(f"  Active losses: {active_losses}")
@@ -1273,35 +1121,30 @@ def train_shot(
                 model.instantiate_modality_classifier(mod)
 
     model.freeze_all()
-    model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=use_mfla, msla=True, patch_embedders=True, head=True)
+    model.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=False, msla=True, patch_embedders=True, head=True)
     model.set_requires_grad("backbone", blocks=True, norm=True)
 
     evan = model.evan
     embed_dim = evan.embed_dim
     patch_size = evan.patch_size
 
-    trainable_mae_decoder,trainable_latent_decoder=0,0
-    mae_decoders = nn.ModuleDict()
+    trainable_latent_decoder = 0
     latent_decoders = nn.ModuleDict()
-    if "mae" in active_losses:
-        mae_decoders = create_mae_decoders(embed_dim, patch_size, modality_bands_dict, mae_modalities, device)
-        trainable_mae_decoder = sum(p.numel() for p in mae_decoders.parameters())
     if "latent" in active_losses:
         latent_decoders = create_latent_decoders(embed_dim, latent_reconstruct_modalities, device)
         trainable_latent_decoder = sum(p.numel() for p in latent_decoders.parameters())
-    
+
     evan.set_requires_grad("all", intermediate_projectors=True)
 
     trainable_in_evan = sum(p.numel() for p in evan.parameters() if p.requires_grad)
     trainable_in_model = sum(p.numel() for p in model.parameters() if p.requires_grad)
     trainable_intermediate_proj = sum(p.numel() for p in evan.intermediate_projectors.parameters())
     # trainable_in_model already includes intermediate_projectors (part of evan); don't double-count
-    trainable_total = trainable_in_model + trainable_mae_decoder + trainable_latent_decoder
+    trainable_total = trainable_in_model + trainable_latent_decoder
     print(f"\nTrainable parameters: {trainable_total}")
     print(f"    Model (EVAN + Classifier): {trainable_in_model} ({100*trainable_in_model/(sum(p.numel() for p in model.parameters())):.2f}%)")
     print(f"      - EVAN backbone (excl. intermediate_projectors): {trainable_in_evan - trainable_intermediate_proj}")
     print(f"      - Intermediate projectors: {trainable_intermediate_proj}")
-    print(f"    MAE decoders: {trainable_mae_decoder}")
     print(f"    Latent decoder (CLS + Patch): {trainable_latent_decoder}")
 
     if asym_lr_multiplier is not None:
@@ -1334,8 +1177,6 @@ def train_shot(
                         new_param_ids.add(id(p))
 
         extra_new = []
-        if 'mae' in active_losses:
-            extra_new += list(mae_decoders.parameters())
         if 'latent' in active_losses:
             extra_new += list(latent_decoders.parameters())
 
@@ -1353,8 +1194,6 @@ def train_shot(
         ], weight_decay=weight_decay)
     else:
         params = list(filter(lambda p: p.requires_grad, model.parameters()))
-        if 'mae' in active_losses:
-            params += list(mae_decoders.parameters())
         if 'latent' in active_losses:
             params += list(latent_decoders.parameters())
         print(f"Total trainable parameters: {sum(p.numel() for p in params):,}")
@@ -1400,12 +1239,11 @@ def train_shot(
         epoch_start = time.time()
         model.train()
         evan.train()
-        mae_decoders.train()
         latent_decoders.train()
 
         effective_labeled_freq = labeled_frequency if epoch >= batch_mising_start_epoch else 0.0
 
-        epoch_losses = {'total': 0.0, 'mae': 0.0, 'latent': 0.0, 'prefusion': 0.0, 'distill': 0.0, 'ce': 0.0}
+        epoch_losses = {'total': 0.0, 'latent': 0.0, 'prefusion': 0.0, 'distill': 0.0, 'ce': 0.0}
         train_count = labeled_count = unlabeled_count = 0
         train_drop_count = {mod: 0 for mod in all_modalities}
         train_token_mask_sum = {mod: 0.0 for mod in all_modalities}
@@ -1427,7 +1265,7 @@ def train_shot(
                 total_loss, loss_dict = _labeled_batch_step(
                     batch, evan, model, unimodal_teacher, latent_decoders,
                     active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
-                    modality_bands_dict, mse_fn, ce_fn, use_mfla,
+                    modality_bands_dict, mse_fn, ce_fn,
                     multilabel, label_key, segmentation, device,
                     use_mask_token=use_mask_token,
                 )
@@ -1435,20 +1273,21 @@ def train_shot(
             else:
                 total_loss, loss_dict, masking_info = _unlabeled_batch_step(
                     batch, evan, model, unimodal_teacher, latent_decoders,
-                    mae_decoders, active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
-                    latent_reconstruct_modalities, mae_modalities, modality_bands_dict,
-                    args.mae_mask_ratio, args.modality_dropout, mse_fn,
-                    distillation_temperature, use_mfla,
-                    effective_labeled_freq, patch_size, task_type, device,
+                    active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
+                    latent_reconstruct_modalities, modality_bands_dict,
+                    args.token_mask_ratio, args.modality_dropout, mse_fn,
+                    distillation_temperature,
+                    effective_labeled_freq, task_type, device,
                     label_key=label_key, ignore_index=ignore_index,
                     dyn_teacher=dyn_teacher,
                     use_mask_token=use_mask_token,
+                    protect_lrm=protect_lrm,
                 )
                 for mod in all_modalities:
                     if masking_info['modality_dropped'][mod]:
                         train_drop_count[mod] += 1
                     else:
-                        train_token_mask_sum[mod] += masking_info['mae_mask_ratio']
+                        train_token_mask_sum[mod] += masking_info['token_mask_ratio']
                         train_token_mask_count[mod] += 1
                 unlabeled_count += 1
 
@@ -1459,14 +1298,13 @@ def train_shot(
             optimizer.step()
 
             epoch_losses['total'] += total_loss.item()
-            for k in ('mae', 'latent', 'prefusion', 'distill', 'ce'):
+            for k in ('latent', 'prefusion', 'distill', 'ce'):
                 epoch_losses[k] += loss_dict[k]
             train_count += 1
             global_step += 1
 
             pbar.set_postfix({
                 'loss': f"{total_loss.item():.4f}",
-                'mae': f"{loss_dict['mae']:.4f}",
                 'latent': f"{loss_dict['latent']:.4f}",
                 'pre_fus': f"{loss_dict['prefusion']:.4f}",
                 'distill': f"{loss_dict['distill']:.4f}",
@@ -1477,7 +1315,6 @@ def train_shot(
             if global_step % 20 == 0:
                 wandb.log({
                     'train_loss': total_loss.item(),
-                    'mae_loss': loss_dict['mae'],
                     'latent_loss': loss_dict['latent'],
                     'pre_fusion': loss_dict['prefusion'],
                     'distill_loss': loss_dict['distill'],
@@ -1491,7 +1328,6 @@ def train_shot(
 
         # Epoch summary
         avg_total = epoch_losses['total'] / train_count
-        avg_mae = epoch_losses['mae'] / max(unlabeled_count, 1)
         avg_latent = epoch_losses['latent'] / train_count
         avg_prefusion = epoch_losses['prefusion'] / max(unlabeled_count, 1)
         avg_distill = epoch_losses['distill'] / max(unlabeled_count, 1)
@@ -1501,7 +1337,7 @@ def train_shot(
         scheduler.step()
         epoch_time = time.time() - epoch_start
         print(f"\nEpoch {epoch+1}/{args.epochs} ({epoch_time:.1f}s):")
-        print(f"  Train - Total: {avg_total:.4f}, MAE: {avg_mae:.4f}, Latent: {avg_latent:.4f}, Pre-fusion: {avg_prefusion:.4f}, Distill: {avg_distill:.4f}, CE: {avg_ce:.4f}")
+        print(f"  Train - Total: {avg_total:.4f}, Latent: {avg_latent:.4f}, Pre-fusion: {avg_prefusion:.4f}, Distill: {avg_distill:.4f}, CE: {avg_ce:.4f}")
         print(f"  Batches - Labeled: {labeled_count}, Unlabeled: {unlabeled_count}, Ratio: {labeled_ratio:.2f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
 
         if eval_every_n_epochs is not None and test_loader is not None and (epoch + 1) % eval_every_n_epochs == 0:
@@ -1513,9 +1349,9 @@ def train_shot(
                 epoch, model, evan, unimodal_teacher,
                 test_loader, val_unlabeled_loader, val_labeled_loader,
                 modality_bands_dict, starting_modality, newmod_list, all_modalities,
-                use_mfla, multilabel, label_key, segmentation, num_classes, ignore_index, device,
+                multilabel, label_key, segmentation, num_classes, ignore_index, device,
                 checkpoint_selection, val_weights, best_val_metric, best_checkpoint_state,
-                best_checkpoints, mae_decoders, latent_decoders,
+                best_checkpoints, latent_decoders,
                 use_mask_token=use_mask_token,
             )
 
@@ -1523,8 +1359,6 @@ def train_shot(
 
     if best_checkpoint_state is not None:
         model.load_state_dict(best_checkpoint_state['model'])
-        for k, v in best_checkpoint_state['mae_decoders'].items():
-            mae_decoders[k].load_state_dict(v)
         for k, v in best_checkpoint_state['latent_projectors'].items():
             latent_decoders[k].load_state_dict(v)
         print(f"\nRestored best checkpoint from epoch {best_checkpoint_state['epoch']+1}")

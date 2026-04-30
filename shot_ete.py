@@ -28,28 +28,27 @@ def main():
                         help='Path to stage 0 checkpoint (required)')
     parser.add_argument('--new_mod_group', type=str, required=True,
                         help='New modality to add (eurosat: vre/nir/swir/rgb; benv2/pastis/dfc2020: s1/s2)')
-    parser.add_argument('--mae_mask_ratio', type=float, default=0.75,
-                        help='Mask ratio for MAE training (default: 0.75)')
+    parser.add_argument('--token_mask_ratio', type=float, default=0.75,
+                        help='Ratio of tokens masked per modality during training (default: 0.75)')
     parser.add_argument('--modality_dropout', type=float, default=0.3,
                         help='Probability of fully masking a modality')
-    parser.add_argument('--mae_modalities', type=str, default="all", choices=["all","newmod"])
     parser.add_argument('--labeled_frequency', type=float, default=0.3,
                         help='Frequency of labeled monomodal batches from train1 (0-1, default: 0.3)')
     parser.add_argument('--labeled_start_fraction', type=float, default=0.5,
                         help='Fraction of training before labeled mixing starts (0=start, 0.5=halfway, 1=never)')
     parser.add_argument('--active_losses', type=str, nargs='+', required=True,
-                        choices=['mae', 'latent', 'prefusion', 'distill', 'ce'],
+                        choices=['latent', 'prefusion', 'distill', 'ce'],
                         help='Which losses to activate')
-    parser.add_argument('--lambda_mae', type=float, default=1.0, help='Weight for MAE loss (default: 1.0)')
     parser.add_argument('--lambda_latent', type=float, default=1.0, help='Weight for latent loss (default: 1.0)')
     parser.add_argument('--lambda_prefusion', type=float, default=1.0, help='Weight for prefusion loss (default: 1.0)')
     parser.add_argument('--lambda_distill', type=float, default=1.0, help='Weight for distillation loss (default: 1.0)')
     parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for CE loss (default: 1.0)')
-    parser.add_argument('--use_mfla', action='store_true',
-                        help='Enable MFLA training for hallucinated modalities')
     parser.add_argument('--use_mask_token', action='store_true',
                         help='Ablation: replace intermediate projectors with broadcast learned mask token '
                              '(projector_queries). Incompatible with --active_losses prefusion.')
+    parser.add_argument('--protect_lrm', action='store_true',
+                        help='Detach LRM modality features in prefusion loss so its encoder is not updated '
+                             'to be easier to predict.')
     parser.add_argument('--dyn_teacher', action='store_true',
                         help='Dynamic teacher distillation: starting_modality head trains against '
                              'student peeking (soft-vote), newmod heads train against frozen unimodal teacher')
@@ -58,9 +57,6 @@ def main():
 
     parser.add_argument('--results_csv', type=str, required=True,
                         help='Path to results CSV file')
-    parser.add_argument('--intermediate_projector_type', type=str, default='cross',
-                        choices=['self', 'cross'],
-                        help='Type of intermediate projector: self-attention (self) or cross-attention (cross)')
     parser.add_argument('--intermediate_projector_num_layers', type=int, default=2,
                         help='Number of layers in intermediate projector (default: 2)')
 
@@ -74,7 +70,7 @@ def main():
     parser.add_argument('--eval_every_n_epochs', type=int, default=2)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--asym_lr', type=float, default=None,
-                        help='LR multiplier for new components (intermediate_projectors, mae_decoders, '
+                        help='LR multiplier for new components (intermediate_projectors, '
                              'latent_projectors, new-modality patch_embedder/MSLA/CLS/storage/head). '
                              'If None (default), all params share --lr.')
     parser.add_argument('--weight_decay', type=float, default=0.001)
@@ -135,25 +131,14 @@ def main():
         (bands_newmod.stop - bands_newmod.start)
     if newmod not in evan.patch_embedders:
         print(f"  Creating {newmod} modality components...")
-        evan.intermediate_projector_type = args.intermediate_projector_type
+        evan.intermediate_projector_type = "cross"
         evan.intermediate_projector_num_layers = args.intermediate_projector_num_layers
-        if args.intermediate_projector_type == "cross" and not hasattr(evan, 'projector_queries'):
+        if not hasattr(evan, 'projector_queries'):
             evan.projector_queries = torch.nn.ParameterDict()
         evan.create_modality_components(newmod, num_newmod_channels)
         model = model.to(device)
 
     # ========================================== TRAIN Delulu ===========================================
-    print(f"\n Using Delulu (MAE + Latent Distillation + Sequence Projection) training method for fusion blocks")
-    mae_modalities = []
-    if "mae" in args.active_losses:
-        match args.mae_modalities:
-            case "all":
-                print(f"requiring mae from all modalities.")
-                mae_modalities = [starting_modality, newmod]
-            case "newmod":
-                print(f"requiring mae from newmod only.")
-                mae_modalities = [newmod]
-
     trainable_total, _, best_checkpoint_summary, teacher_baselines = train_shot(
         model=model,
         train_loader=train2_loader,
@@ -161,7 +146,6 @@ def main():
         args=args,
         starting_modality=starting_modality,
         new_modality=newmod,
-        mae_modalities=mae_modalities,
         latent_reconstruct_modalities=[starting_modality],
         modality_bands_dict=modality_bands_dict,
         test_loader=test_loader,
@@ -171,18 +155,18 @@ def main():
         labeled_start_fraction=args.labeled_start_fraction,
         active_losses=args.active_losses,
         loss_weights={
-            'mae': args.lambda_mae, 'latent': args.lambda_latent,
+            'latent': args.lambda_latent,
             'prefusion': args.lambda_prefusion, 'distill': args.lambda_distill,
             'ce': args.lambda_ce,
         },
         weight_decay=args.weight_decay,
         val_unlabeled_loader=val2_loader,
         val_labeled_loader=val1_loader,
-        use_mfla=args.use_mfla,
         warmup_epochs=args.warmup_epochs,
         asym_lr_multiplier=args.asym_lr,
         dyn_teacher=args.dyn_teacher,
         use_mask_token=args.use_mask_token,
+        protect_lrm=args.protect_lrm,
         task_type=task_config.task_type,
         label_key=task_config.label_key,
         num_classes=task_config.num_classes,
@@ -223,7 +207,7 @@ def main():
         'config': model.get_config(),
     }
     # torch.save(checkpoint_data, checkpoint_shotete)
-    # print(f"SHOT checkpoint saved to: {checkpoint_shotete}")
+    # print(f"Delulu checkpoint saved to: {checkpoint_shotete}")
 
     # Log results to CSV
     filename = args.results_csv
@@ -235,7 +219,7 @@ def main():
     fieldnames = [
         "dataset", "model_arch", "starting_modality", "new_modality", "lr", "weight_decay", "epochs",
         "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
-        "trainable_params", "active_losses", "use_mfla", "use_mask_token", "warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
+        "trainable_params", "active_losses", "use_mask_token", "protect_lrm", "warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
         "teacher_test_metric",
         "transfer_metric", "peeking_metric", "addition_metric", "addition_ens_metric",
         "valchecked_transfer", "valchecked_peek", "valchecked_add", "valchecked_add_ens",
@@ -262,14 +246,14 @@ def main():
             args.lr,
             args.weight_decay,
             args.epochs,
-            args.mae_mask_ratio,
+            args.token_mask_ratio,
             args.modality_dropout,
             args.labeled_frequency,
             args.labeled_start_fraction,
             trainable_total,
             active_losses_str,
-            args.use_mfla,
             args.use_mask_token,
+            args.protect_lrm,
             args.warmup_epochs,
             evan.intermediate_projector_type,
             evan.tz_fusion_time,
