@@ -389,6 +389,10 @@ def _bold(s):
     return r'\textbf{' + str(s) + '}'
 
 
+def _gray(s):
+    return r'\textcolor{gray}{' + str(s) + '}'
+
+
 def _multirow(n, s):
     return rf'\multirow{{{n}}}{{*}}{{{s}}}'
 
@@ -433,9 +437,10 @@ def _apply_multirow(col_values):
     return result
 
 
-def _df_to_latex_rows(df, merge_cols):
+def _df_to_latex_rows(df, merge_cols, gray_cols=None):
     df = df.copy()
     merged = {col: _apply_multirow(list(df[col])) for col in merge_cols}
+    gray_set = set(gray_cols or [])
     rows = []
     for i in range(len(df)):
         row = []
@@ -443,7 +448,10 @@ def _df_to_latex_rows(df, merge_cols):
             if col in merged:
                 row.append(merged[col][i])
             else:
-                row.append(_escape(str(df.at[i, col])))
+                val = _escape(str(df.at[i, col]))
+                if col in gray_set and val != '--':
+                    val = _gray(val)
+                row.append(val)
         rows.append(row)
     return rows
 
@@ -513,7 +521,8 @@ def _midrule_after_start_groups(df, ncols, start_col='Start(M_A)'):
 def make_transfer_tex(df, arch='BL'):
     bold_cols = [c for c in ['KD-B', 'KD-L', 'TTM-B', 'TTM-L', 'Delulu-B', 'Delulu-L'] if c in df.columns]
     df = _bold_max_per_row(df, bold_cols)
-    rows = _df_to_latex_rows(df, merge_cols=['Dataset', 'Start(M_A)'])
+    oracle_cols = [c for c in df.columns if 'oracle' in c.lower() or c in ('Panopticon-B', 'OlmoEarth-B', 'OlmoEarth-L')]
+    rows = _df_to_latex_rows(df, merge_cols=['Dataset', 'Start(M_A)'], gray_cols=oracle_cols)
     ncols = len(df.columns)
     midrule  = _midrule_after_datasets(df)
     cmidrule = _midrule_after_start_groups(df, ncols)
@@ -533,7 +542,7 @@ def make_transfer_tex(df, arch='BL'):
     if n_f0:       super_parts.append(_multicolumn(n_f0,       'c|', r'$f_0(M_A)$'))
     if n_baseline: super_parts.append(_multicolumn(n_baseline, 'c|', 'Baselines'))
     if n_ours:     super_parts.append(_multicolumn(n_ours,     'c|', 'Ours'))
-    if n_oracle:   super_parts.append(_multicolumn(n_oracle,   'c',  r'Oracle ($M_B$)'))
+    if n_oracle:   super_parts.append(_multicolumn(n_oracle,   'c',  r'\shortstack[c]{Oracle\\($M_B$)}'))
     super_row = ' & '.join(super_parts) + r' \\'
 
     DISPLAY = {
@@ -562,7 +571,8 @@ def make_transfer_tex(df, arch='BL'):
 def make_peek_tex(df, arch='BL'):
     baseline_cols = [c for c in ['DINO-SFT-B', 'DINO-SFT-L', 'MixMatch-B', 'MixMatch-L', 'Delulu-B', 'Delulu-L'] if c in df.columns]
     df = _bold_max_per_row(df, baseline_cols)
-    rows = _df_to_latex_rows(df, merge_cols=['Dataset', 'Start(M_A)'])
+    oracle_cols = [c for c in df.columns if c in ('Panopticon-B', 'OlmoEarth-B', 'OlmoEarth-L')]
+    rows = _df_to_latex_rows(df, merge_cols=['Dataset', 'Start(M_A)'], gray_cols=oracle_cols)
     ncols = len(df.columns)
     midrule  = _midrule_after_datasets(df)
     cmidrule = _midrule_after_start_groups(df, ncols)
@@ -578,7 +588,7 @@ def make_peek_tex(df, arch='BL'):
     if n_f0:       super_parts.append(_multicolumn(n_f0,       'c|', r'$f_0(M_A)$'))
     if n_baseline: super_parts.append(_multicolumn(n_baseline, 'c|', 'Baselines'))
     if n_ours:     super_parts.append(_multicolumn(n_ours,     'c|', 'Ours'))
-    if n_oracle:   super_parts.append(_multicolumn(n_oracle,   'c',  r'Oracle ($M_A$)'))
+    if n_oracle:   super_parts.append(_multicolumn(n_oracle,   'c',  r'\shortstack[c]{Oracle\\($M_A$)}'))
     super_row = ' & '.join(super_parts) + r' \\'
 
     DISPLAY = {
@@ -610,7 +620,8 @@ def make_addition_tex(df, arch='BL'):
 
     baseline_cols = [c for c in ['DINO-SFT-B(M_A)', 'DINO-SFT-L(M_A)', 'MKE-B', 'MKE-L', 'Delulu-B', 'Delulu-L'] if c in df.columns]
     df = _bold_max_per_row(df, baseline_cols)
-    rows = _df_to_latex_rows(df, merge_cols=['Dataset', 'Start(M_A)'])
+    oracle_cols = [c for c in df.columns if 'ora' in c.lower() or c in ('Panopticon-B', 'OlmoEarth-B', 'OlmoEarth-L')]
+    rows = _df_to_latex_rows(df, merge_cols=['Dataset', 'Start(M_A)'], gray_cols=oracle_cols)
     ncols = len(df.columns)
     midrule  = _midrule_after_datasets(df)
     cmidrule = _midrule_after_start_groups(df, ncols)
@@ -627,7 +638,7 @@ def make_addition_tex(df, arch='BL'):
     if n_f0:       super_parts.append(_multicolumn(n_f0,       'c|', r'$f_0(M_A)$'))
     if n_baseline: super_parts.append(_multicolumn(n_baseline, 'c|', 'Baselines'))
     if n_ours:     super_parts.append(_multicolumn(n_ours,     'c|', 'Ours'))
-    if n_oracle:   super_parts.append(_multicolumn(n_oracle,   'c',  r'Oracle ($M_A$+$M_B$)'))
+    if n_oracle:   super_parts.append(_multicolumn(n_oracle,   'c',  r'\shortstack[c]{Oracle\\($M_A$+$M_B$)}'))
     super_row = ' & '.join(super_parts) + r' \\'
 
     DISPLAY = {
@@ -658,30 +669,30 @@ def make_addition_tex(df, arch='BL'):
 # Each entry: (method_label, group_label, col_B, col_L)
 # col_L=None means no L variant (e.g. Panopticon).
 _TRANSFER_METHOD_ROWS = [
-    (r'$f_0$',       r'$f_0(M_A)$',       'DINO-SFT-B(M_A)',        'DINO-SFT-L(M_A)'        ),
-    ('KD',           'Baselines',          'KD-B',                    'KD-L'                   ),
-    ('TTM',          'Baselines',          'TTM-B',                   'TTM-L'                  ),
-    ('Delulu',       'Ours',               'Delulu-B',                'Delulu-L'               ),
-    ('DINOv3',     r'Oracle ($M_B$)',    'DINO-SFT-B(M_B oracle)',  'DINO-SFT-L(M_B oracle)' ),
-    ('Panopticon',   r'Oracle ($M_B$)',    'Panopticon-B',             None                    ),
-    ('OlmoEarth',    r'Oracle ($M_B$)',    'OlmoEarth-B',             'OlmoEarth-L'            ),
+    (r'$f_0$',       r'$f_0(M_A)$',                              'DINO-SFT-B(M_A)',        'DINO-SFT-L(M_A)'        ),
+    ('KD',           'Baselines',                                 'KD-B',                    'KD-L'                   ),
+    ('TTM',          'Baselines',                                 'TTM-B',                   'TTM-L'                  ),
+    ('Delulu',       'Ours',                                      'Delulu-B',                'Delulu-L'               ),
+    ('DINOv3',       r'\shortstack[c]{Oracle\\($M_B$)}',         'DINO-SFT-B(M_B oracle)',  'DINO-SFT-L(M_B oracle)' ),
+    ('Panopticon',   r'\shortstack[c]{Oracle\\($M_B$)}',         'Panopticon-B',             None                    ),
+    ('OlmoEarth',    r'\shortstack[c]{Oracle\\($M_B$)}',         'OlmoEarth-B',             'OlmoEarth-L'            ),
 ]
 
 _PEEK_METHOD_ROWS = [
-    (r'$f_0$',      r'$f_0(M_A)$',    'DINO-SFT-B',  'DINO-SFT-L' ),
-    ('MixMatch',    'Baselines',       'MixMatch-B',  'MixMatch-L' ),
-    ('Delulu',      'Ours',            'Delulu-B',    'Delulu-L'   ),
-    ('Panopticon',  r'Oracle ($M_A$)', 'Panopticon-B', None        ),
-    ('OlmoEarth',   r'Oracle ($M_A$)', 'OlmoEarth-B', 'OlmoEarth-L'),
+    (r'$f_0$',      r'$f_0(M_A)$',                               'DINO-SFT-B',  'DINO-SFT-L' ),
+    ('MixMatch',    'Baselines',                                  'MixMatch-B',  'MixMatch-L' ),
+    ('Delulu',      'Ours',                                       'Delulu-B',    'Delulu-L'   ),
+    ('Panopticon',  r'\shortstack[c]{Oracle\\($M_A$)}',          'Panopticon-B', None        ),
+    ('OlmoEarth',   r'\shortstack[c]{Oracle\\($M_A$)}',          'OlmoEarth-B', 'OlmoEarth-L'),
 ]
 
 _ADDITION_METHOD_ROWS = [
-    (r'$f_0$',      r'$f_0(M_A)$',          'DINO-SFT-B(M_A)',         'DINO-SFT-L(M_A)'        ),
-    ('MKE',         'Baselines',             'MKE-B',                   'MKE-L'                  ),
-    ('Delulu',      'Ours',                  'Delulu-B',                'Delulu-L'               ),
-    ('DINOv3',    r'Oracle ($M_A$+$M_B$)', 'DINO-SFT-B(M_A+M_B ora)', 'DINO-SFT-L(M_A+M_B ora)'),
-    ('Panopticon',  r'Oracle ($M_A$+$M_B$)', 'Panopticon-B',             None                    ),
-    ('OlmoEarth',   r'Oracle ($M_A$+$M_B$)', 'OlmoEarth-B',             'OlmoEarth-L'            ),
+    (r'$f_0$',      r'$f_0(M_A)$',                               'DINO-SFT-B(M_A)',         'DINO-SFT-L(M_A)'        ),
+    ('MKE',         'Baselines',                                  'MKE-B',                   'MKE-L'                  ),
+    ('Delulu',      'Ours',                                       'Delulu-B',                'Delulu-L'               ),
+    ('DINOv3',      r'\shortstack[c]{Oracle\\($M_A$+$M_B$)}',   'DINO-SFT-B(M_A+M_B ora)', 'DINO-SFT-L(M_A+M_B ora)'),
+    ('Panopticon',  r'\shortstack[c]{Oracle\\($M_A$+$M_B$)}',   'Panopticon-B',             None                    ),
+    ('OlmoEarth',   r'\shortstack[c]{Oracle\\($M_A$+$M_B$)}',   'OlmoEarth-B',             'OlmoEarth-L'            ),
 ]
 
 
@@ -703,8 +714,8 @@ def _make_tall_tex(df, dataset_col, start_col, new_col, method_rows, arch='BL',
             flat_rows.append((group, method_label, '(L)', col_l))
 
     # group membership for bold: f0, baseline, ours, oracle
-    _f0_groups      = {r'$f_0(M_A)$', r'$f_0$'}
-    _oracle_groups  = {'Oracle', r'Oracle ($M_B$)', r'Oracle ($M_A$+$M_B$)', r'Oracle ($M_A$)'}
+    _f0_groups     = {r'$f_0(M_A)$', r'$f_0$'}
+    _oracle_groups = {g for _, g, _, _ in method_rows if 'Oracle' in g or 'oracle' in g}
 
     # --- bold: per column, find best among non-oracle (optionally also non-f0) rows ---
     # build a 2D list: cell_vals[flat_row_idx][key_idx] = raw numeric value
@@ -755,7 +766,7 @@ def _make_tall_tex(df, dataset_col, start_col, new_col, method_rows, arch='BL',
     ds_spans = {}
     for ds, start, new in keys:
         ds_spans[ds] = ds_spans.get(ds, 0) + 1
-    h1_cells = [_multicolumn(n_id, 'c', r'\shortstack[c]{Dataset\\(metric)}')]
+    h1_cells = [_multicolumn(n_id, 'c|', r'\shortstack[c]{Dataset\\(metric)}')]
     for i, (ds, span) in enumerate(ds_spans.items()):
         align = 'c|' if i < len(ds_spans) - 1 else 'c'
         h1_cells.append(_multicolumn(span, align, _escape(ds)))
@@ -768,7 +779,7 @@ def _make_tall_tex(df, dataset_col, start_col, new_col, method_rows, arch='BL',
             start_runs.append([ds, start, 0])
         start_runs[-1][2] += 1
 
-    h2_cells = [_multicolumn(n_id, 'c', r'Start ($M_A$)')]
+    h2_cells = [_multicolumn(n_id, 'c|', r'Start ($M_A$)')]
     for i, (ds, start, span) in enumerate(start_runs):
         is_last_in_ds   = (i == len(start_runs) - 1) or (start_runs[i + 1][0] != ds)
         is_last_overall = (i == len(start_runs) - 1)
@@ -812,6 +823,8 @@ def _make_tall_tex(df, dataset_col, start_col, new_col, method_rows, arch='BL',
             val = _escape(raw)
             if bold_mask[i][ki]:
                 val = _bold(val)
+            if group in _oracle_groups and val != '--':
+                val = _gray(val)
             cells.append(val)
         id_cells = [group_rendered[i], method_rendered[i]]
         if show_size:

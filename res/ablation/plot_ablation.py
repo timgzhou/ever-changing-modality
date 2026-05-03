@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
-METRICS = ["valchecked_transfer", "valchecked_peek", "valchecked_add"]
+METRICS = ["best_transfer", "best_peeking", "best_addition"]
 METRIC_LABELS = ["Transfer", "Peek", "Addition"]
 
 def get_group(df, label):
@@ -72,7 +72,12 @@ def plot_direction(axes, groups, title_prefix):
             ax.set_ylim(min(valid_y) - max(valid_e) - 2, max(valid_y) + max(valid_e) + 2)
 
 
+MOD_DISPLAY = {"s2": "S2", "s1": "S1", "rgb": "RGB", "vre": "VRE"}
+
 def plot_fusion_time(df_fusion, directions):
+    import seaborn as sns
+    palette = sns.color_palette("Set2", n_colors=len(METRICS))
+
     available = []
     for start, new in directions:
         sub = df_fusion[(df_fusion["starting_modality"] == start) & (df_fusion["new_modality"] == new)].copy()
@@ -87,32 +92,42 @@ def plot_fusion_time(df_fusion, directions):
         return
 
     n_rows = len(available)
-    fig, axes = plt.subplots(n_rows, 3, figsize=(10, 3.5 * n_rows), squeeze=False)
-    fig.suptitle("BEN-v2 Ablation: Fusion Time (mAP)", fontsize=12, fontweight="bold")
+    fig, axes = plt.subplots(n_rows, 1, figsize=(5.5, 3.8 * n_rows), squeeze=False)
 
     for row_idx, (start, new, sub) in enumerate(available):
+        ax = axes[row_idx][0]
         grouped = sub.groupby("tz_fusion_time")[METRICS]
         means = grouped.mean()
         stds  = grouped.std().fillna(0)
         x = means.index.values
 
-        for ax, col, metric_label in zip(axes[row_idx], METRICS, METRIC_LABELS):
+        start_d = MOD_DISPLAY.get(start, start.upper())
+        new_d   = MOD_DISPLAY.get(new,   new.upper())
+
+        for col, metric_label, color in zip(METRICS, METRIC_LABELS, palette):
             y    = means[col].values
             yerr = stds[col].values
-            ax.errorbar(x, y, yerr=yerr, fmt="o-", capsize=4, linewidth=1.5,
-                        markersize=5, color="steelblue", ecolor="gray", elinewidth=1.2)
-            for xi, (yi, ei) in zip(x, zip(y, yerr)):
-                if not np.isnan(yi):
-                    ax.text(xi, yi + ei + 0.15, f"{yi:.1f}", ha="center", va="bottom", fontsize=7.5)
-            ax.set_title(f"{start}→{start}+{new} — {metric_label}", fontsize=10)
-            ax.set_xlabel("tz_fusion_time", fontsize=9)
-            ax.set_ylabel("mAP" if col == METRICS[0] else "", fontsize=9)
-            ax.set_xticks(x)
-            ax.tick_params(labelsize=8)
-            valid = y[~np.isnan(y)]
-            valid_e = yerr[~np.isnan(y)]
-            if len(valid):
-                ax.set_ylim(min(valid) - max(valid_e) - 2, max(valid) + max(valid_e) + 2)
+            ax.errorbar(x, y, yerr=yerr, fmt="o-", capsize=4, linewidth=1.8,
+                        markersize=6, color=color, ecolor=color, elinewidth=1.2,
+                        label=metric_label)
+
+        f0 = pd.to_numeric(sub["teacher_test_metric"], errors="coerce").mean()
+        if not np.isnan(f0):
+            ax.axhline(f0, color="gray", linewidth=1.4, linestyle="--")
+            ax.text(x[0], f0 - 0.8, f"DINOv3 SFT ({start_d} $f_0$): {f0:.1f}",
+                    va="top", ha="left", fontsize=8, color="gray")
+
+        ax.axhline(49.2, color="gray", linewidth=1.4, linestyle="--")
+        ax.text(x[0], 49.2 - 0.8, f"DINOv3 SFT ({new_d} label oracle): 49.2",
+                va="top", ha="left", fontsize=8, color="gray")
+
+        ax.set_title(f"reBEN  ||  Start: {start_d}, New: {new_d}", fontsize=10)
+        ax.set_xlabel("Fusion Layer", fontsize=9)
+        ax.set_ylabel("mAP", fontsize=9)
+        ax.set_xticks(x)
+        ax.tick_params(labelsize=8)
+        ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.7)
+        ax.legend(fontsize=8, framealpha=0.8)
 
     plt.tight_layout()
     out = "res/ablation/ablation_benv2_fusion_time.png"
@@ -128,7 +143,7 @@ df_no_ce       = pd.read_csv("res/ablation/benv2_no_ce.csv")
 df_protect_lrm = pd.read_csv("res/ablation/benv2_protect_lrm.csv")
 df_fusion_time = pd.read_csv("res/ablation/benv2_fusion_time.csv")
 
-directions = [("s2", "s1"), ("s1", "s2")]
+directions = [("s2", "s1")]
 
 # --- Ablation bar plot ---
 available = []

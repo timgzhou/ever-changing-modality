@@ -1,79 +1,47 @@
-Hyperparameter Sweep Infrastructure
-=====================================
+Final BEN-v2 SHOT Sweep
+=======================
 
-Directory layout
-----------------
-sweep/
-  create_sweep.py              # Register a new sweep with W&B (run once)
-  sweep_shot.py                # Runner: SHOT (shot_ete.py), all datasets
-  sweep_sft.py                 # Runner: stage-0 SFT (train_sft.py)
-  sweep_baseline_distill.py    # Runner: baseline distillation
-  run_sweep.sh                 # SBATCH script — 4 agents on 4 H100s
-  sweep_registry.txt           # Log of created sweep IDs
-  sweep_yaml/
-    base.yaml                  # Shared HPs: lr, weight_decay
-    sweep_shot.yaml            # SHOT-specific HPs (mae enabled, all lambdas)
-    sweep_pldc.yaml            # SHOT variant: no MAE, lambdas for prefusion/latent/distill/ce only
-    sweep_sft.yaml             # SFT-specific HPs
-    sweep_baseline_distill.yaml # Distill-specific HPs
+4 configs × 2 directions (s2→s1, s1→s2) = 8 sweeps × 32 runs = 256 jobs total.
 
+Configs
+-------
+  delulu        protect_lrm=F, use_mask_token=F, lsf=0.5, prefusion+latent+distill+ce
+  mask-token    protect_lrm=F, use_mask_token=T, lsf=0.5, latent+distill+ce  (no prefusion)
+  no-batch-mix  protect_lrm=F, use_mask_token=F, lsf=1.0, lf=0, prefusion+latent+distill  (no ce)
+  no-prefusion  protect_lrm=F, use_mask_token=F, lsf=0.5, latent+distill+ce
 
-All commands run from the repo root.
+Continuous HPs swept (shared across all configs)
+-------------------------------------------------
+  lr, weight_decay         log-uniform [1e-5, 1e-3]
+  modality_dropout         uniform [0.1, 0.5]
+  labeled_frequency        uniform [0.1, 0.5]  (fixed=0 for no-batch-mix)
+  lambda_latent            uniform [0, 0.5]
+  lambda_prefusion         uniform [0, 1]
+  lambda_distill           uniform [0, 1]
+  mae_mask_ratio           uniform [0.1, 0.8]
 
-Step 1: Create the sweep (run once)
--------------------------------------
-# EuroSAT SHOT (uses hardcoded checkpoint map):
-python sweep/create_sweep.py --script shot --starting rgb --newmod nir
+Step 1: Register the 8 sweeps (run once)
+-----------------------------------------
+  python sweep/create_sweep_final.py           # registers + prints sbatch loops
+  python sweep/create_sweep_final.py --dry-run # inspect without registering
 
-# Any other dataset (provide checkpoint explicitly):
-python sweep/create_sweep.py --script shot \
-    --dataset benv2 \
-    --starting s2 --newmod s1 \
-    --stage0_checkpoint checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+Step 2: Submit jobs
+--------------------
+  The script prints a ready-to-run sbatch loop per sweep, e.g.:
+    for i in $(seq 1 32); do sbatch sweep/run_sweep.sh 'entity/project/sweep_id'; done
 
-# PLDC sweep (no MAE, sweeps prefusion/latent/distill/ce lambdas + weight_decay):
-python sweep/create_sweep.py --script pldc \
-    --dataset benv2 \
-    --starting s2 --newmod s1 \
-    --stage0_checkpoint checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260417_062121.pt
+  Smoke-test a single trial locally (no SLURM):
+    wandb agent entity/project/sweep_id --count 1
 
-# Stage-0 SFT:
-python sweep/create_sweep.py --script sft --dataset dfc2020 --modalities s2_rgb
+Output
+------
+  res/delulu-sweep/sweep_results_benv2_final.csv  (same schema as sweep_results_benv2.csv)
 
-# Baseline distillation:
-python sweep/create_sweep.py --script baseline_distill \
-    --dataset dfc2020 \
-    --teacher_checkpoint checkpoints/dfc2020_s2_rgb_s0.pt \
-    --modality s1
-
-Prints the full sweep ID (entity/project/sweep_id).
-Optionally paste it into sweep_registry.txt as a personal log.
-
-
-Step 2: Submit to the cluster
-------------------------------
-sbatch sweep/run_sweep.sh tgz/delulu-sweep-dfc2020-s2_rgb-s1/<sweep_id>
-
-
-To smoke-test locally (single trial, no SLURM):
-  wandb agent tgz/delulu-sweep-dfc2020-s2_rgb-s1/<sweep_id> --count 1
-
-
-Swept hyperparameters (sweep_shot.yaml)
-----------------------------------------
-  lr, weight_decay, mae_mask_ratio, modality_dropout,
-  labeled_frequency, labeled_start_fraction, use_mae, use_latent
-
-Swept hyperparameters (sweep_pldc.yaml)
-----------------------------------------
-  lr, weight_decay, mae_mask_ratio, modality_dropout,
-  labeled_frequency, labeled_start_fraction,
-  lambda_latent [0,1], lambda_prefusion [0,1], lambda_distill [0,1]
-  (lambda_mae fixed=0, lambda_ce fixed=1, use_mae=false)
-
-
-Adding a new swept hyperparameter
-----------------------------------
-1. Add it to the relevant sweep_yaml/sweep_*.yaml under `parameters:`
-2. Add a matching --argparse argument in the runner script
-3. Re-create the sweep (W&B sweeps are immutable once created)
+Files
+-----
+  create_sweep_final.py         register sweeps
+  sweep_shot.py                 W&B agent runner (one trial per job)
+  run_sweep.sh                  SBATCH wrapper (l40s, 8 CPUs, 64 GB, 3h)
+  sweep_yaml/base.yaml          shared lr + weight_decay ranges
+  sweep_yaml/sweep_benv2_final.yaml  continuous HP space + command template
+  sweep_registry.txt            log of registered sweep IDs

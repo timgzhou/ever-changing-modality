@@ -1433,6 +1433,44 @@ BENV2_BAND_INDICES  = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12]   # drop B10 (index
 PASTIS_BAND_INDICES = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]          # drop B1 (0), B9 (9), B10 (10)
 
 
+def hallucinate_intermediate_features(
+    source_intermediate: dict,
+    source_modalities: tuple,
+    target_modalities: tuple,
+    evan: "EVAN",
+    use_mask_token: bool = False,
+) -> dict:
+    """Hallucinate intermediate features for target_modalities from source_modalities.
+
+    Projects each source sequence to each target via evan's intermediate projectors and averages.
+    If use_mask_token=True, uses evan._hallucinate_with_mask_token instead of projectors.
+    """
+    if use_mask_token:
+        B = next(iter(source_intermediate.values())).shape[0]
+        device = next(iter(source_intermediate.values())).device
+        return {mod: evan._hallucinate_with_mask_token(mod, B, device) for mod in target_modalities}
+    hallucinated = {}
+    for tar_mod in target_modalities:
+        projected_seqs = [
+            evan._project_sequence(
+                F.layer_norm(source_intermediate[src_mod], [source_intermediate[src_mod].shape[-1]]),
+                f"{src_mod}_to_{tar_mod}", tar_mod,
+            )
+            for src_mod in source_modalities if src_mod != tar_mod
+        ]
+        hallucinated[tar_mod] = torch.stack(projected_seqs).mean(dim=0)
+    return hallucinated
+
+
+def merge_intermediate_features(
+    real_features: dict, hallucinated_features: dict,
+    real_modalities: tuple, hallucinated_modalities: tuple,
+) -> dict:
+    """Merge real and hallucinated intermediate feature dicts into one."""
+    return {**{m: real_features[m] for m in real_modalities},
+            **{m: hallucinated_features[m] for m in hallucinated_modalities}}
+
+
 class EvanPredictor(nn.Module):
     """
     Base class shared by EVANClassifier and EvanSegmenter.
@@ -1510,6 +1548,38 @@ class EvanPredictor(nn.Module):
                         param.requires_grad = True
                 else:
                     raise RuntimeError(f"'{modality}' not in modality_heads")
+
+    def _soft_vote(self, fused_output: dict, modalities) -> torch.Tensor:
+        """Average logits across per-modality heads. Returns [B,C] or [B,C,H,W]."""
+        is_segmenter = hasattr(self, 'decoder_strategy')
+        logits_list = []
+        for mod in sorted(modalities):
+            if is_segmenter:
+                logits_list.append(self._apply_decoder(self.modality_decoders[mod], fused_output[mod]['x_norm_patchtokens']))
+            else:
+                logits_list.append(self.modality_classifiers[mod](fused_output[mod]['x_norm_clstoken']))
+        return torch.stack(logits_list).mean(dim=0)
+
+    def predict_from_real_modalities(
+        self,
+        intermediate: dict,
+        real_modalities: tuple,
+        all_modalities: tuple,
+        use_mask_token: bool = False,
+    ) -> torch.Tensor:
+        """Hallucinate missing mods, fuse, and return soft-voted logits.
+
+        Returns [B,C] for classifiers or [B,C,H,W] for segmenters.
+        """
+        hallucinated_mods = tuple(m for m in all_modalities if m not in real_modalities)
+        hal = hallucinate_intermediate_features(
+            intermediate, real_modalities, hallucinated_mods, self.evan, use_mask_token=use_mask_token
+        )
+        fusion_input = merge_intermediate_features(intermediate, hal, real_modalities, hallucinated_mods)
+        fused = self.evan.forward_fusion_from_modality_features(
+            fusion_input, hallucinated_modalities=set(hallucinated_mods)
+        )
+        return self._soft_vote(fused, all_modalities)
 
     def save_checkpoint(self, path: str):
         torch.save({'model_state_dict': self.state_dict(), 'config': self.get_config()}, path)
@@ -1679,7 +1749,7 @@ class EVANClassifier(EvanPredictor):
         assert self.strategy == 'mean'
         self.modality_heads = nn.ModuleDict()
         for mod in self.evan.supported_modalities:
-            self.modality_heads[mod] = copy.deepcopy(self.head)
+            self.instantiate_modality_head(mod)
         self.head = None
         self.strategy = 'ensemble'
         print("!! Evan Classifier has switched strategy from mean to ensemble")

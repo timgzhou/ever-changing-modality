@@ -4,7 +4,7 @@ from evan_main import EVANClassifier
 from geobench_data_utils import get_benv2_loaders
 from shot import evaluate_multimodal
 
-CHECKPOINT = 'checkpoints/delulunet_benv2_0420_1051.pt'
+CHECKPOINT = 'checkpoints/delulunet_benv2_0501_0433.pt'
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 model = EVANClassifier.from_checkpoint(CHECKPOINT, DEVICE)
@@ -30,3 +30,5 @@ metrics = evaluate_multimodal(
     with_labels=True, desc="Test eval",
 )
 print(metrics)
+
+# python -u sanity_check_delulu.py

@@ -59,8 +59,12 @@ def main():
     parser.add_argument('--lambda_latent', type=float, default=1.0)
     parser.add_argument('--lambda_prefusion', type=float, default=1.0)
     parser.add_argument('--lambda_distill', type=float, default=1.0)
-    parser.add_argument('--asym_lr', type=float, default=5.0)
-    parser.add_argument('--dyn_teacher', type=lambda x: x.lower() == 'true', default=False)
+    parser.add_argument('--asym_lr', type=float, default=1.0)
+    parser.add_argument('--protect_lrm', type=lambda x: x.lower() == 'true', default=False)
+    parser.add_argument('--use_mask_token', type=lambda x: x.lower() == 'true', default=False)
+    parser.add_argument('--latent_masked_only', type=lambda x: x.lower() == 'true', default=False)
+    parser.add_argument('--use_prefusion', type=lambda x: x.lower() == 'true', default=True)
+    parser.add_argument('--no_latent', type=lambda x: x.lower() == 'true', default=False)
     args = parser.parse_args()
 
     # Initialize wandb - sweep will override config
@@ -68,33 +72,37 @@ def main():
     config = wandb.config
 
     # Get swept hyperparameters from args (passed by wandb sweep via command line)
-    mae_mask_ratio = args.mae_mask_ratio
     modality_dropout = args.modality_dropout
     labeled_frequency = args.labeled_frequency
     labeled_start_fraction = args.labeled_start_fraction
     lr = args.lr
     weight_decay = args.weight_decay
     asym_lr = args.asym_lr
-    dyn_teacher = args.dyn_teacher
+    protect_lrm = args.protect_lrm
+    use_mask_token = args.use_mask_token
+    latent_masked_only = args.latent_masked_only
+    use_prefusion = args.use_prefusion
+    no_latent = args.no_latent
     loss_weights = {
-        'mae': 0.0, 'latent': args.lambda_latent,
+        'latent': args.lambda_latent,
         'prefusion': args.lambda_prefusion, 'distill': args.lambda_distill,
         'ce': 1.0,
     }
 
-    # Fixed losses: prefusion + distill + latent always; +ce when using labeled data; no mae
-    active_losses = ['prefusion', 'distill', 'latent']
+    # use_mask_token replaces projectors with a learned token, so there is nothing for prefusion to supervise.
+    active_losses = ['distill'] if no_latent else ['distill', 'latent']
+    if not use_mask_token and use_prefusion:
+        active_losses.append('prefusion')
     if labeled_frequency > 0:
         active_losses.append('ce')
 
     print(f"\n=== Sweep Configuration ===")
-    print(f"  mae_mask_ratio: {mae_mask_ratio}")
     print(f"  modality_dropout: {modality_dropout}")
     print(f"  labeled_frequency: {labeled_frequency}")
     print(f"  labeled_start_fraction: {labeled_start_fraction}")
     print(f"  lr: {lr}, asym_lr: {asym_lr}")
     print(f"  weight_decay: {weight_decay}")
-    print(f"  dyn_teacher: {dyn_teacher}")
+    print(f"  protect_lrm: {protect_lrm}, use_mask_token: {use_mask_token}, latent_masked_only: {latent_masked_only}")
     print(f"  active_losses: {active_losses}")
 
     # Create a namespace object to pass to train_shot (mimicking argparse args)
@@ -104,8 +112,8 @@ def main():
     train_args = Args()
     train_args.lr = lr
     train_args.epochs = args.epochs
-    train_args.mae_mask_ratio = mae_mask_ratio
     train_args.modality_dropout = modality_dropout
+    train_args.token_mask_ratio = args.mae_mask_ratio
 
     # Load stage 0 checkpoint
     print(f"\n=== Loading Stage 0 checkpoint from: {args.stage0_checkpoint} ===")
@@ -139,7 +147,9 @@ def main():
         'stage0_checkpoint': args.stage0_checkpoint,
     }, allow_val_change=True)
 
-    wandb.run.name = f"{starting_modality}+={newmod}_lr{lr:.0e}_alr{asym_lr}_lf{labeled_frequency:.2f}_dt{dyn_teacher}"
+    wandb.run.name = (f"{starting_modality}+={newmod}_lr{lr:.0e}_alr{asym_lr}"
+                      f"_lf{labeled_frequency:.2f}_lsf{labeled_start_fraction}"
+                      f"_plrm{protect_lrm}_mt{use_mask_token}_lmo{latent_masked_only}")
 
     # Create datasets
     print("\n=== Creating datasets ===")
@@ -156,14 +166,11 @@ def main():
     num_newmod_channels = (bands_spec.stop - bands_spec.start) if isinstance(bands_spec, slice) else len(bands_spec)
     if newmod not in evan.patch_embedders:
         print(f"  Creating {newmod} modality components...")
+        evan.intermediate_projector_type = "cross"
+        if not hasattr(evan, 'projector_queries'):
+            evan.projector_queries = torch.nn.ParameterDict()
         evan.create_modality_components(newmod, num_newmod_channels)
         model = model.to(device)
-
-    # Determine mae_modalities
-    if args.mae_modalities == "all":
-        mae_modalities = [starting_modality, newmod]
-    else:
-        mae_modalities = [newmod]
 
     # ========================================== TRAIN SHOT ===========================================
     print(f"\n=== Training with SHOT ===")
@@ -172,7 +179,8 @@ def main():
         train_loader=train2_loader,
         device=device,
         args=train_args,
-        mae_modalities=mae_modalities,
+        starting_modality=starting_modality,
+        new_modality=newmod,
         latent_reconstruct_modalities=[starting_modality],
         modality_bands_dict=modality_bands_dict,
         test_loader=test_loader,
@@ -190,7 +198,10 @@ def main():
         num_classes=task_config.num_classes,
         ignore_index=getattr(task_config, 'ignore_index', -100),
         asym_lr_multiplier=asym_lr,
-        dyn_teacher=dyn_teacher,
+        dyn_teacher=False,
+        protect_lrm=protect_lrm,
+        use_mask_token=use_mask_token,
+        latent_masked_only=latent_masked_only,
     )
 
     # Log teacher baselines to wandb
@@ -205,28 +216,6 @@ def main():
             wandb.run.summary[f'{ckpt_name}_test_peeking'] = ckpt_data['test_accs']['peeking']
             wandb.run.summary[f'{ckpt_name}_test_addition'] = ckpt_data['test_accs']['addition']
             wandb.run.summary[f'{ckpt_name}_test_addition_ens'] = ckpt_data['test_accs'].get('addition_ens', 0)
-
-    # ========================================= CHECKPOINT =====================================
-    timestamp_shot = datetime.now().strftime('%m%d_%H%M')
-    checkpoint_shotete = os.path.join(args.checkpoint_dir, f'sweep_{wandb.run.id}_{timestamp_shot}.pt')
-
-    checkpoint_data = {
-        'model_state_dict': model.state_dict(),
-        'config': model.get_config(),
-        'sweep_config': {
-            'mae_mask_ratio': mae_mask_ratio,
-            'modality_dropout': modality_dropout,
-            'labeled_frequency': labeled_frequency,
-            'labeled_start_fraction': labeled_start_fraction,
-            'lr': lr,
-            'weight_decay': weight_decay,
-            'asym_lr': asym_lr,
-            'dyn_teacher': dyn_teacher,
-            'active_losses': active_losses,
-        }
-    }
-    torch.save(checkpoint_data, checkpoint_shotete)
-    print(f"Checkpoint saved to: {checkpoint_shotete}")
 
     # ========================================= CSV LOGGING =====================================
     # Extract val metrics and test accuracies from best checkpoints
@@ -246,18 +235,18 @@ def main():
     filename = args.results_csv
     file_exists = os.path.isfile(filename)
     fieldnames = [
-        "wandb_run_id", "dataset", "starting_modality", "new_modality",
+        "wandb_run_id", "wandb_project", "dataset", "starting_modality", "new_modality",
         "teacher_test_metric",
         "lr", "asym_lr", "weight_decay", "epochs",
-        "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
-        "dyn_teacher",
+        "modality_dropout", "labeled_frequency", "labeled_start_fraction",
+        "protect_lrm", "use_mask_token", "latent_masked_only",
         "lambda_latent", "lambda_prefusion", "lambda_distill",
         "trainable_params", "active_losses",
         "val_transfer", "test_transfer",
         "val_peeking", "test_peeking",
         "val_addition", "test_addition",
         "val_ens_addition", "test_ens_addition",
-        "stage0_checkpoint", "shote2e_checkpoint"
+        "stage0_checkpoint",
     ]
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
@@ -266,6 +255,7 @@ def main():
         active_losses_str = "+".join(active_losses)
         writer.writerow([
             wandb.run.id,
+            wandb.run.project,
             args.dataset,
             starting_modality,
             newmod,
@@ -274,11 +264,12 @@ def main():
             asym_lr,
             weight_decay,
             args.epochs,
-            mae_mask_ratio,
             modality_dropout,
             labeled_frequency,
             labeled_start_fraction,
-            dyn_teacher,
+            protect_lrm,
+            use_mask_token,
+            latent_masked_only,
             loss_weights['latent'],
             loss_weights['prefusion'],
             loss_weights['distill'],
@@ -293,7 +284,6 @@ def main():
             f"{val_ens_addition:.2f}" if val_ens_addition is not None else "",
             f"{test_ens_addition:.2f}" if test_ens_addition is not None else "",
             args.stage0_checkpoint,
-            checkpoint_shotete,
         ])
 
     print(f"\nResults appended to {filename}")

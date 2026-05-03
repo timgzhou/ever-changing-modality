@@ -1,0 +1,7 @@
+"""
+bash sh/ablation/benv2_active_losses_sweep.sh s1 s2
+bash sh/ablation/benv2_fusion_time_sweep.sh  s1 s2
+bash sh/ablation/benv2_mask_token_sweep.sh  s1 s2
+bash sh/ablation/benv2_no_ce_sweep.sh  s1 s2
+bash sh/ablation/benv2_protect_lrm_sweep.sh  s1 s2
+"""

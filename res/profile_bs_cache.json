@@ -1,0 +1,10 @@
+{
+  "dino-s1": 8192,
+  "dino-s2": 8192,
+  "DeluluNet-s1": 4096,
+  "DeluluNet-s2": 4096,
+  "DeluluNet-s1+s2": 4096,
+  "Panopticon-s1": 4096,
+  "Panopticon-s2": 512,
+  "Panopticon-s1+s2": 512
+}

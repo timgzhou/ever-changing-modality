@@ -1256,57 +1256,6 @@ class SequenceProjector(nn.Module):
         return x
 
 
-def hallucinate_intermediate_features(
-    source_intermediate: dict,
-    source_modalities: tuple,
-    target_modalities: tuple,
-    evan,
-    use_mask_token: bool = False,
-) -> dict:
-    """
-    Hallucinate intermediate features for target modalities from source modalities.
-
-    Uses full sequence projection (CLS + storage + patches) via transformer-based projectors,
-    or (when use_mask_token=True) a broadcast learned mask token without cross-attention.
-
-    Args:
-        source_intermediate: Dict of source modality features {mod: [B, seq_len, embed_dim]}
-        source_modalities: Tuple of source modality names
-        target_modalities: Tuple of target modality names to hallucinate
-        evan: EVAN model (projectors accessed via evan.intermediate_projectors and evan._project_sequence)
-        use_mask_token: If True, bypass projectors and use evan._hallucinate_with_mask_token instead.
-
-    Returns:
-        Dict of hallucinated features {mod: [B, seq_len, embed_dim]}
-    """
-    if use_mask_token:
-        B = next(iter(source_intermediate.values())).shape[0]
-        device = next(iter(source_intermediate.values())).device
-        return {mod: evan._hallucinate_with_mask_token(mod, B, device) for mod in target_modalities}
-
-    hallucinated = {}
-    for tar_mod in target_modalities:
-        projected_seqs = []
-        for src_mod in source_modalities:
-            if src_mod == tar_mod:
-                continue
-            proj_key = f"{src_mod}_to_{tar_mod}"
-            src_seq = source_intermediate[src_mod]  # [B, seq_len, embed_dim]
-            src_seq_norm = F.layer_norm(src_seq, [src_seq.shape[-1]])
-            projected_seqs.append(evan._project_sequence(src_seq_norm, proj_key, tar_mod))
-        # Mean of all projections
-        hallucinated[tar_mod] = torch.stack(projected_seqs).mean(dim=0)
-    return hallucinated
-
-
-def merge_intermediate_features(real_features, hallucinated_features, real_modalities, hallucinated_modalities):
-    """Merge real and hallucinated intermediate features into a single dict."""
-    return {
-        **{m: real_features[m] for m in real_modalities},
-        **{m: hallucinated_features[m] for m in hallucinated_modalities}
-    }
-
-
 class FullSequenceMAEDecoder(nn.Module):
     """
     MAE decoder that takes the full sequence including mask token positions.

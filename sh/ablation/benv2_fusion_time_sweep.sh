@@ -1,7 +1,7 @@
 #!/bin/bash
 # BEN-v2 S2+=S1: ablate tz_fusion_time (when fusion/cross-modal attention begins).
 # Uses rank=1 hyperparams from sweep_best.json for each of transfer, peeking, addition.
-# Fusion times: 0 1 2 3 6 9  (checkpoint was trained with 3)
+# Fusion times: 0..12 (checkpoint was trained with 3)
 # Usage: bash sh/ablation/benv2_fusion_time_sweep.sh s2 s1
 
 DATASET="benv2"
@@ -29,9 +29,7 @@ if [ ! -f "$TEACHER" ]; then
     exit 1
 fi
 
-FUSION_TIMES=(0 1 2 3 6 9 12)
-
-for FT in "${FUSION_TIMES[@]}"; do
+for FT in $(seq 0 12); do
     for SELECT_BY in transfer peeking addition; do
         echo "[submit] ${DATASET} | ${MODEL} | ${STARTING_MOD} -> ${NEW_MOD} | ${SELECT_BY} | tz_fusion_time=${FT}"
         sbatch sh/ablation/benv2_fusion_time_job.sh \
@@ -39,4 +37,4 @@ for FT in "${FUSION_TIMES[@]}"; do
     done
 done
 
-# bash sh/ablation/benv2_fusion_time_sweep.sh s1 s2
+# bash sh/ablation/benv2_fusion_time_sweep.sh s2 s1

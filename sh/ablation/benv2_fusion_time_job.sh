@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --time=12:00:00
 #SBATCH --account=aip-gpleiss
-#SBATCH --output=logs/shot_ete_ablate_fusion_time/%j.out
+#SBATCH --output=logs/ablate/fusion_time/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com
 #SBATCH --mail-type=ALL
 #SBATCH --gres=gpu:l40s:1
@@ -19,7 +19,7 @@ FUSION_TIME="$7"
 source sh/env.sh
 export TQDM_DISABLE=1
 
-SWEEP_JSON="res/delulu-sweep/artifacts/sweep_best.json"
+SWEEP_JSON="artifacts/sweep_best.json"
 RESULTS_CSV="res/ablation/benv2_fusion_time.csv"
 
 mkdir -p res/ablation logs/shot_ete_ablate_fusion_time
@@ -49,7 +49,7 @@ if [ -z "$ENTRY" ] || [ "$ENTRY" = "null" ]; then
     exit 1
 fi
 
-ARGS=$(echo "$ENTRY" | jq -r '.args | to_entries | map("--\(.key) \(.value)") | join(" ")')
+ARGS=$(echo "$ENTRY" | jq -r '.args | del(.dyn_teacher, .lambda_mae) | to_entries | map("--\(.key) \(.value)") | join(" ")')
 
 LR=$(echo "$ENTRY"  | jq -r '.args.lr')
 WD=$(echo "$ENTRY"  | jq -r '.args.weight_decay')
@@ -75,7 +75,7 @@ python -u shot_ete.py \
     --tz_fusion_time "$FUSION_TIME" \
     --active_losses latent prefusion distill ce \
     --results_csv "$RESULTS_CSV" \
-    --epochs 120 \
+    --epochs 60 \
     --eval_every_n_epochs 4 \
     --batch_size 32 \
     --num_workers 4

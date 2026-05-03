@@ -6,7 +6,7 @@ For each modality (A, B), compares:
   corr(real_B, real_A)  -- cross-modal baseline               [should be lower]
   corr(real_A, real_A)  -- sanity                             [should be ~1.0]
 
-Visualizes samples where hallucination is best: raw S2 (PCA→RGB), S1 (2ch composite),
+Visualizes samples where hallucination is best: raw S2 (B04/B03/B02 true-color), S1 (2ch composite),
 and 8×8 patch token grids (PCA→RGB) for real and hallucinated modalities.
 """
 
@@ -17,6 +17,8 @@ import sys
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+matplotlib.rcParams['font.family'] = 'serif'
+import matplotlib.gridspec as gridspec
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -24,7 +26,13 @@ from sklearn.decomposition import PCA
 
 sys.path.insert(0, os.path.dirname(__file__))
 from evan_main import EVANClassifier
-from geobench_data_utils import get_benv2_loaders, create_multimodal_batch_geobench
+from geobench_data_utils import get_benv2_loaders, create_multimodal_batch_geobench, BENV2_S2_BANDS
+
+# BEN-v2 S2 band indices for RGB and NIR (within the s2 slice)
+_S2_BANDS = list(BENV2_S2_BANDS)
+_S2_R = _S2_BANDS.index('B04')
+_S2_G = _S2_BANDS.index('B03')
+_S2_B = _S2_BANDS.index('B02')
 
 
 def patch_pearson(a, b):
@@ -34,42 +42,35 @@ def patch_pearson(a, b):
     return (a * b).sum(-1) / (a.norm(dim=-1) * b.norm(dim=-1) + 1e-8)
 
 
-def percentile_stretch(arr, lo=2, hi=98):
-    """Stretch [C,H,W] raw values to [0,1] per channel using percentile clipping."""
-    out = np.empty_like(arr, dtype=np.float32)
-    for c in range(arr.shape[0]):
-        p_lo, p_hi = np.percentile(arr[c], lo), np.percentile(arr[c], hi)
-        out[c] = np.clip((arr[c] - p_lo) / (p_hi - p_lo + 1e-8), 0, 1)
-    return out
+def _stretch(arr_hwc):
+    """Joint percentile stretch across all channels. arr_hwc: np.float32 [H,W,C] → uint8."""
+    lo = np.percentile(arr_hwc, 2)
+    hi = np.percentile(arr_hwc, 98)
+    if hi > lo:
+        out = np.clip((arr_hwc - lo) / (hi - lo), 0, 1)
+    else:
+        out = np.zeros_like(arr_hwc)
+    return (out * 255).astype(np.uint8)
 
 
 def s2_to_rgb(img_chw, s2_slice):
-    """Visualize S2 via PCA of all bands → RGB, with percentile stretch."""
-    s2 = img_chw[s2_slice].float().cpu().numpy()  # [C, H, W]
-    C, H, W = s2.shape
-    pixels = s2.reshape(C, -1).T                  # [H*W, C]
-    pca = PCA(n_components=3).fit(pixels)
-    rgb = pca.transform(pixels).reshape(H, W, 3)  # [H, W, 3]
-    # percentile stretch each output channel
-    out = np.empty_like(rgb)
-    for c in range(3):
-        p_lo, p_hi = np.percentile(rgb[:, :, c], 2), np.percentile(rgb[:, :, c], 98)
-        out[:, :, c] = np.clip((rgb[:, :, c] - p_lo) / (p_hi - p_lo + 1e-8), 0, 1)
-    return out
+    """Visualize S2 as true-color RGB (B04/B03/B02) with joint percentile stretch."""
+    s2 = img_chw[s2_slice].cpu().numpy().astype(np.float32)
+    rgb = np.stack([s2[_S2_R], s2[_S2_G], s2[_S2_B]], axis=-1)  # [H, W, 3]
+    return _stretch(rgb)
 
 
 def s1_to_rgb(img_chw, s1_slice):
-    """Visualize S1 (VV, VH) as 2-channel composite from raw values."""
-    s1 = img_chw[s1_slice].float().cpu().numpy()   # [2, H, W]
-    s1_norm = percentile_stretch(s1)               # [2, H, W]
-    avg = (s1_norm[0:1] + s1_norm[1:2]) / 2
-    rgb = np.concatenate([s1_norm[0:1], s1_norm[1:2], avg], axis=0)
-    return rgb.transpose(1, 2, 0)
+    """Visualize S1 (VV, VH) as grayscale average with joint percentile stretch."""
+    s1 = img_chw[s1_slice].cpu().numpy().astype(np.float32)
+    avg = (s1[0] + s1[1]) / 2  # [H, W]
+    avg_hwc = np.stack([avg, avg, avg], axis=-1)  # [H, W, 3] grayscale
+    return _stretch(avg_hwc)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', default='checkpoints/delulunet_benv2_0420_1051.pt')
+    parser.add_argument('--checkpoint', default='checkpoints/delulunet_benv2_0501_0433.pt')
     parser.add_argument('--n_batches', type=int, default=20)
     parser.add_argument('--n_vis', type=int, default=6)
     parser.add_argument('--batch_size', type=int, default=32)
@@ -90,22 +91,29 @@ def main():
     print(f"Projector type: {evan.intermediate_projector_type}")
 
     # ── Load data ────────────────────────────────────────────────────────────
-    from geobench_data_utils import IdentityNormalizer
     _, _, _, _, test_loader, task_config = get_benv2_loaders(
         batch_size=args.batch_size,
         num_workers=4,
         starting_modality=mod_a,
         new_modality=mod_b,
     )
-    _, _, _, _, test_loader_raw, _ = get_benv2_loaders(
-        batch_size=args.batch_size,
-        num_workers=4,
-        starting_modality=mod_a,
-        new_modality=mod_b,
-        data_normalizer=IdentityNormalizer,
-    )
     modality_slices = task_config.modality_bands_dict
-
+    """
+    # ── Evaluate checkpoint on test split (both modalities) ─────────────────
+    print('\n=== Evaluating checkpoint on test split (multimodal) ===')
+    all_eval_outputs = []
+    all_eval_labels = []
+    with torch.no_grad():
+        for batch in test_loader:
+            labels = batch['label'].float().to(args.device)
+            modal_input = create_multimodal_batch_geobench(batch, modality_slices, (mod_a, mod_b))
+            modal_input = {k: v.to(args.device) for k, v in modal_input.items()}
+            logits = model(modal_input)
+            all_eval_outputs.append(logits.cpu())
+            all_eval_labels.append(labels.cpu())
+    test_map = _compute_map(torch.cat(all_eval_outputs), torch.cat(all_eval_labels))
+    print(f'  Test mAP (both modalities): {test_map:.2f}%')
+    """
     # ── Accumulate tokens and correlations ──────────────────────────────────
     all_corr_hal_a = []   # corr(hal_A, real_A)
     all_corr_xmod_a = []  # corr(real_B, real_A)
@@ -113,16 +121,22 @@ def main():
     all_corr_xmod_b = []  # corr(real_A, real_B)
     all_corr_aa = []      # sanity
     all_corr_bb = []      # sanity
+    # extra pairs for 4×4 matrix
+    all_corr_haha = []    # corr(hal_A, hal_A)
+    all_corr_hbhb = []    # corr(hal_B, hal_B)
+    all_corr_hahb = []    # corr(hal_A, hal_B)
+    all_corr_ha_rb = []   # corr(hal_A, real_B)
+    all_corr_hb_ra = []   # corr(hal_B, real_A)
 
     # For visualization: keep raw images and patch tokens for high-corr samples
     vis_candidates = []  # (mean_corr_a, img_raw, patches_a, hal_patches_a, patches_b, hal_patches_b, corr_map_a, corr_map_b)
 
     with torch.no_grad():
-        for i, (batch, batch_raw) in enumerate(zip(test_loader, test_loader_raw)):
+        for i, batch in enumerate(test_loader):
             if i >= args.n_batches:
                 break
 
-            img_raw = batch_raw['image']  # [B, C_total, H, W] — raw reflectance for viz
+            img_raw = batch['image']  # [B, C_total, H, W] — z-score normalized, percentile-stretched for viz
             x = create_multimodal_batch_geobench(batch, modality_slices, (mod_a, mod_b))
             x_a = x[mod_a].to(args.device)
             x_b = x[mod_b].to(args.device)
@@ -158,9 +172,20 @@ def main():
             all_corr_xmod_b.append(corr_xmod_b.cpu())
             all_corr_aa.append(corr_aa.cpu())
             all_corr_bb.append(corr_bb.cpu())
+            all_corr_haha.append(patch_pearson(ha, ha).cpu())
+            all_corr_hbhb.append(patch_pearson(hb, hb).cpu())
+            all_corr_hahb.append(patch_pearson(ha, hb).cpu())
+            all_corr_ha_rb.append(patch_pearson(ha, pb).cpu())
+            all_corr_hb_ra.append(patch_pearson(hb, pa).cpu())
 
             B = pa.shape[0]
+            s2_sl = modality_slices['s2']
             for s in range(B):
+                # Skip flat/uniform tiles (cloud, ocean) — filter on RGB bands specifically
+                s2 = img_raw[s, s2_sl]
+                rgb_std = s2[[_S2_R, _S2_G, _S2_B]].std().item()
+                if rgb_std < 0.5:
+                    continue
                 mean_a = corr_hal_a[s].mean().item()
                 vis_candidates.append((
                     mean_a,
@@ -184,17 +209,122 @@ def main():
     stats(all_corr_aa,     f'corr(real_{mod_a}, real_{mod_a}) [sanity≈1]')
     stats(all_corr_bb,     f'corr(real_{mod_b}, real_{mod_b}) [sanity≈1]')
 
-    def pca_patch_rgb(real_patches, hal_patches):
-        """Fit PCA on real [N,D], normalize range from real, apply same to hal. Returns (real_rgb, hal_rgb) as [N,3] in [0,1]."""
-        p_real = real_patches.float().numpy()
-        p_hal  = hal_patches.float().numpy()
-        pca = PCA(n_components=3).fit(p_real)
-        proj_real = pca.transform(p_real)
-        proj_hal  = pca.transform(p_hal)
-        lo, hi = proj_real.min(0), proj_real.max(0)
-        real_rgb = np.clip((proj_real - lo) / (hi - lo + 1e-8), 0, 1)
-        hal_rgb  = np.clip((proj_hal  - lo) / (hi - lo + 1e-8), 0, 1)
-        return real_rgb, hal_rgb
+    def _ms(tensors):
+        t = torch.cat(tensors).flatten()
+        return t.mean().item(), t.std().item()
+
+    def _cell(tensors):
+        m, s = _ms(tensors)
+        return f'${m:.3f}\\pm{s:.3f}$'
+
+    ma, mb = mod_a.upper(), mod_b.upper()
+
+    # rows/cols order: real_A, real_B, hal_A, hal_B
+    # symmetric pairs reuse the same accumulator (Pearson is symmetric)
+    c = {
+        ('rA','rA'): _cell(all_corr_aa),
+        ('rA','rB'): _cell(all_corr_xmod_b),   # corr(real_A, real_B)
+        ('rA','hA'): _cell(all_corr_hal_a),     # corr(hal_A, real_A)
+        ('rA','hB'): _cell(all_corr_hb_ra),     # corr(hal_B, real_A)
+        ('rB','rB'): _cell(all_corr_bb),
+        ('rB','hA'): _cell(all_corr_ha_rb),     # corr(hal_A, real_B)
+        ('rB','hB'): _cell(all_corr_hal_b),     # corr(hal_B, real_B)
+        ('hA','hA'): _cell(all_corr_haha),
+        ('hA','hB'): _cell(all_corr_hahb),
+        ('hB','hB'): _cell(all_corr_hbhb),
+    }
+    # fill symmetric lower triangle
+    for (r, c_), v in list(c.items()):
+        c[(c_, r)] = v
+
+    keys  = ['rA', 'rB', 'hA', 'hB']
+    names = [f'real {ma}', f'real {mb}', f'hall {ma}', f'hall {mb}']
+
+    def trow(i):
+        cells = ' & '.join(c[(keys[i], keys[j])] for j in range(4))
+        return f'  {names[i]} & {cells} \\\\'
+
+    print(f"""
+\\begin{{table}}[h]
+\\centering
+\\caption{{Patch-level Pearson correlation matrix (mean$\\pm$std) for real and hallucinated {ma}/{mb} tokens.}}
+\\label{{tab:hallucination_corr}}
+\\begin{{tabular}}{{lcccc}}
+\\toprule
+ & real {ma} & real {mb} & hall {ma} & hall {mb} \\\\
+\\midrule
+{trow(0)}
+{trow(1)}
+{trow(2)}
+{trow(3)}
+\\bottomrule
+\\end{{tabular}}
+\\end{{table}}""")
+
+    # ── Correlation heatmap ──────────────────────────────────────────────────
+    accumulators = {
+        ('rA','rA'): all_corr_aa,
+        ('rA','rB'): all_corr_xmod_b,
+        ('rA','hA'): all_corr_hal_a,
+        ('rA','hB'): all_corr_hb_ra,
+        ('rB','rB'): all_corr_bb,
+        ('rB','hA'): all_corr_ha_rb,
+        ('rB','hB'): all_corr_hal_b,
+        ('hA','hA'): all_corr_haha,
+        ('hA','hB'): all_corr_hahb,
+        ('hB','hB'): all_corr_hbhb,
+    }
+    for (r, c_), v in list(accumulators.items()):
+        accumulators[(c_, r)] = v
+
+    keys  = ['rA', 'rB', 'hA', 'hB']
+    labels = [f'real {ma}', f'real {mb}', f'hall {ma}', f'hall {mb}']
+    n = len(keys)
+    mean_mat = np.zeros((n, n))
+    std_mat  = np.zeros((n, n))
+    for i, ki in enumerate(keys):
+        for j, kj in enumerate(keys):
+            m, s = _ms(accumulators[(ki, kj)])
+            mean_mat[i, j] = m
+            std_mat[i, j]  = s
+
+    # Mask upper triangle (above diagonal) to show only lower triangle + diagonal
+    mask = np.triu(np.ones((n, n), dtype=bool), k=1)
+    display_mat = np.where(mask, np.nan, mean_mat)
+    # diagonal shown as flat gray, not on the correlation colorscale
+    for i in range(n):
+        display_mat[i, i] = np.nan  # will be painted gray via Rectangle below
+
+    fig, ax = plt.subplots(figsize=(5, 3.4))
+    import seaborn as sns
+    cmap = sns.diverging_palette(240, 10, as_cmap=True)  # vlag equivalent
+    cmap.set_bad('white')
+    im = ax.imshow(display_mat, cmap=cmap, vmin=-1, vmax=1, aspect=0.8)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    ax.set_xticks(range(n)); ax.set_xticklabels(labels, fontsize=12, rotation=0, ha='center')
+    ax.set_yticks(range(n)); ax.set_yticklabels(labels, fontsize=12)
+    ax.text(0.98, 0.98, "Patch-level\nPearson\nCorrelation", fontsize=13,
+            ha='right', va='top', transform=ax.transAxes, color='black')
+    for i in range(n):
+        ax.add_patch(plt.Rectangle((i - 0.5, i - 0.5), 1, 1,
+                         fill=True, facecolor='lightgray', edgecolor='none', zorder=2))
+        ax.text(i, i, '1.0', ha='center', va='center', fontsize=11, zorder=3, color='dimgray')
+        for j in range(n):
+            if j >= i:
+                continue
+            ax.text(j, i, f'{mean_mat[i,j]:.3f}\n±{std_mat[i,j]:.3f}',
+                    ha='center', va='center', fontsize=11, zorder=3,
+                    color='white' if abs(mean_mat[i,j]) > 0.5 else 'black')
+    plt.tight_layout()
+    heatmap_path = 'res/hallucination_correlation/corr_matrix.pdf'
+    plt.savefig(heatmap_path, bbox_inches='tight')
+    plt.close()
+    print(f'Saved {heatmap_path}')
+
+    def make_pca_rgb(pca, lo, hi, tokens):
+        """Project tokens into a pre-fit PCA and normalize to [0,1] with fixed range."""
+        proj = pca.transform(tokens.float().numpy())
+        return np.clip((proj - lo) / (hi - lo + 1e-8), 0, 1)
 
     # ── Visualize top-n_vis samples ──────────────────────────────────────────
     vis_candidates.sort(key=lambda x: x[0], reverse=True)
@@ -206,57 +336,94 @@ def main():
     n_patches = top[0][2].shape[0]
     grid_size = int(n_patches ** 0.5)  # 8 for BEN-v2
 
+    # Layout (2 rows × 4 cols):
+    #   cols 0-1: S2 / S1 raw images, each spanning both rows (full height)
+    #   col 2: real_A tokens (row 0), real_B tokens (row 1)
+    #   col 3: hal_A tokens (row 0), hal_B tokens (row 1)
+    #   token cols are narrow so two stacked token grids match the height of the input images.
+    _TOK = 0.45    # token col width relative to image col; two stacked squares → ~same height as one image
+    _col_ratios = [1, 1, _TOK, _TOK]
+
     for idx, (mean_corr_a, img_raw, pa, ha, pb, hb, corr_a_map, corr_b_map) in enumerate(top):
-        fig, axes = plt.subplots(2, 5, figsize=(20, 8))
-        fig.suptitle(
-            f'Sample {idx}  corr(hal_{mod_a}, real_{mod_a})={mean_corr_a:.3f}',
-            fontsize=12
-        )
+        fig = plt.figure(figsize=(10, 5))
 
-        real_rgb_a, hal_rgb_a = pca_patch_rgb(pa, ha)
-        real_rgb_b, hal_rgb_b = pca_patch_rgb(pb, hb)
+        # PCA fit on both real token sets jointly; hallucinated tokens projected into same space.
+        real_both = np.concatenate([pa.float().numpy(), pb.float().numpy()], axis=0)
+        pca = PCA(n_components=3).fit(real_both)
+        proj_real = pca.transform(real_both)
+        lo, hi = proj_real.min(0), proj_real.max(0)
 
-        for row, (real_rgb, hal_rgb, corr_map, label) in enumerate([
-            (real_rgb_a, hal_rgb_a, corr_a_map, mod_a),
-            (real_rgb_b, hal_rgb_b, corr_b_map, mod_b),
-        ]):
-            ax_s2 = axes[row, 0]
-            ax_s1 = axes[row, 1]
-            ax_real = axes[row, 2]
-            ax_hal  = axes[row, 3]
-            ax_corr = axes[row, 4]
+        rgb_pa = make_pca_rgb(pca, lo, hi, pa).reshape(grid_size, grid_size, 3)
+        rgb_ha = make_pca_rgb(pca, lo, hi, ha).reshape(grid_size, grid_size, 3)
+        rgb_pb = make_pca_rgb(pca, lo, hi, pb).reshape(grid_size, grid_size, 3)
+        rgb_hb = make_pca_rgb(pca, lo, hi, hb).reshape(grid_size, grid_size, 3)
 
-            if row == 0:
-                ax_s2.imshow(s2_to_rgb(img_raw, s2_slice))
-                ax_s2.set_title('S2 (RGB)')
-                ax_s2.axis('off')
-                ax_s1.imshow(s1_to_rgb(img_raw, s1_slice))
-                ax_s1.set_title('S1 (VV/VH)')
-                ax_s1.axis('off')
-            else:
-                ax_s2.axis('off')
-                ax_s1.axis('off')
+        # Pixel-based layout (fig is 10×5 in at 150 dpi = 1500×750 px).
+        # Left images: 224×224 px. Token panels: 100×100 px, gap 24 px between rows.
+        # All panels share the same top and bottom edge.
+        FW, FH = 1500, 750   # figure size in pixels at 150 dpi
+        px = lambda v: v / FW  # horizontal fraction
+        py = lambda v: v / FH  # vertical fraction
 
-            real_rgb = real_rgb.reshape(grid_size, grid_size, 3)
-            hal_rgb  = hal_rgb.reshape(grid_size, grid_size, 3)
-            corr_grid = corr_map.numpy().reshape(grid_size, grid_size)
+        img_px = 224
+        tok_px = 100
+        gap_col = 20    # horizontal gap between panels
+        gap_mid = 50    # wider gap between real col and hall col (for arrows)
+        gap_row = 24    # vertical gap between the two token rows
 
-            ax_real.imshow(real_rgb, interpolation='nearest')
-            ax_real.set_title(f'real {label} tokens')
-            ax_real.axis('off')
+        # Bottom edge: vertically centre the 224px block in the figure
+        img_bottom = (FH - img_px) / 2          # 263 px from bottom
+        tok_bottom_lo = img_bottom               # lower token row aligns with image bottom
+        tok_bottom_hi = img_bottom + tok_px + gap_row  # upper token row
 
-            ax_hal.imshow(hal_rgb, interpolation='nearest')
-            ax_hal.set_title(f'hal {label} (from {"B" if row==0 else "A"})')
-            ax_hal.axis('off')
+        x0 = 20
+        x1 = x0 + img_px + gap_col
+        x2 = x1 + img_px + gap_col   # real col
+        x3 = x2 + tok_px + gap_mid   # hall col (wider gap)
 
-            im = ax_corr.imshow(corr_grid, cmap='RdBu_r', vmin=-1, vmax=1, interpolation='nearest')
-            ax_corr.set_title(f'corr(hal, real) {label}')
-            ax_corr.axis('off')
-            plt.colorbar(im, ax=ax_corr, fraction=0.046, pad=0.04)
+        ax_s2 = fig.add_axes([px(x0), py(img_bottom), px(img_px), py(img_px)])
+        ax_s1 = fig.add_axes([px(x1), py(img_bottom), px(img_px), py(img_px)])
+        ax_pa = fig.add_axes([px(x2), py(tok_bottom_hi), px(tok_px), py(tok_px)])
+        ax_ha = fig.add_axes([px(x3), py(tok_bottom_hi), px(tok_px), py(tok_px)])
+        ax_pb = fig.add_axes([px(x2), py(tok_bottom_lo), px(tok_px), py(tok_px)])
+        ax_hb = fig.add_axes([px(x3), py(tok_bottom_lo), px(tok_px), py(tok_px)])
 
-        plt.tight_layout()
-        out_path = f'res/hallucination_correlation/sample_{idx:03d}.png'
-        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        # Arrow: bottom-right of real s2 (ax_pa) → upper-left of hall s1 (ax_hb)
+        # Arrow: upper-right of real s1 (ax_pb) → lower-left of hall s2 (ax_ha)
+        arrow_kw = dict(arrowstyle='->', color='dimgray', lw=1.2,
+                        mutation_scale=10)
+        fig.add_artist(matplotlib.patches.FancyArrowPatch(
+            (px(x2 + tok_px), py(tok_bottom_hi)),
+            (px(x3),          py(tok_bottom_lo + tok_px)),
+            transform=fig.transFigure, **arrow_kw))
+        fig.add_artist(matplotlib.patches.FancyArrowPatch(
+            (px(x2 + tok_px), py(tok_bottom_lo + tok_px)),
+            (px(x3),          py(tok_bottom_hi)),
+            transform=fig.transFigure, **arrow_kw))
+
+        for ax in (ax_s2, ax_s1, ax_pa, ax_ha, ax_pb, ax_hb):
+            ax.axis('off')
+
+        ax_s2.imshow(s2_to_rgb(img_raw, s2_slice))
+        ax_s2.text(0.5, -0.02, 'S2 (RGB)', fontsize=11, ha='center', va='top', transform=ax_s2.transAxes)
+
+        ax_s1.imshow(s1_to_rgb(img_raw, s1_slice))
+        ax_s1.text(0.5, -0.02, 'S1 (VV+VH)', fontsize=11, ha='center', va='top', transform=ax_s1.transAxes)
+
+        ax_pa.imshow(rgb_pa, interpolation='nearest')
+        ax_pa.text(0.5, -0.04, f'real {mod_a}', fontsize=11, ha='center', va='top', transform=ax_pa.transAxes)
+
+        ax_ha.imshow(rgb_ha, interpolation='nearest')
+        ax_ha.text(0.5, -0.04, f'hall {mod_a}', fontsize=11, ha='center', va='top', transform=ax_ha.transAxes)
+
+        ax_pb.imshow(rgb_pb, interpolation='nearest')
+        ax_pb.text(0.5, -0.04, f'real {mod_b}', fontsize=11, ha='center', va='top', transform=ax_pb.transAxes)
+
+        ax_hb.imshow(rgb_hb, interpolation='nearest')
+        ax_hb.text(0.5, -0.04, f'hall {mod_b}', fontsize=11, ha='center', va='top', transform=ax_hb.transAxes)
+
+        out_path = f'res/hallucination_correlation/sample_{idx:03d}.pdf'
+        plt.savefig(out_path, bbox_inches='tight')
         plt.close()
         print(f'Saved {out_path}')
 
@@ -265,3 +432,8 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+# python -u analyze_hallucination_correlation.py --checkpoint checkpoints/sweep_lr7ygzoh_0501_1505.pt
+# python -u analyze_hallucination_correlation.py --checkpoint checkpoints/delulunet_benv2_0501_0635.pt
+# python -u analyze_hallucination_correlation.py --checkpoint checkpoints/delulunet_benv2_0501_1943.pt

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --time=12:00:00
 #SBATCH --account=aip-gpleiss
-#SBATCH --output=logs/shot_ete_ablate_ce/%j.out
+#SBATCH --output=logs/ablate/ce/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com
 #SBATCH --mail-type=ALL
 #SBATCH --gres=gpu:l40s:1
@@ -18,7 +18,7 @@ SELECT_BY="${6:-ens_addition}"
 source sh/env.sh
 export TQDM_DISABLE=1
 
-SWEEP_JSON="res/delulu-sweep/artifacts/sweep_best.json"
+SWEEP_JSON="artifacts/sweep_best.json"
 RESULTS_CSV="res/ablation/benv2_no_ce.csv"
 
 mkdir -p res/ablation
@@ -51,7 +51,7 @@ for IDX in $(seq 0 $((N_CONFIGS - 1))); do
     ENTRY=$(jq -c "[.[] | select(.selected_by==\"${SELECT_BY}\")] | .[$IDX]" "$SWEEP_JSON")
     RANK=$(echo "$ENTRY" | jq -r '.rank')
 
-    ARGS=$(echo "$ENTRY" | jq -r '.args | to_entries | map("--\(.key) \(.value)") | join(" ")')
+    ARGS=$(echo "$ENTRY" | jq -r '.args | del(.dyn_teacher, .lambda_mae) | to_entries | map("--\(.key) \(.value)") | join(" ")')
 
     LR=$(echo "$ENTRY"  | jq -r '.args.lr')
     WD=$(echo "$ENTRY"  | jq -r '.args.weight_decay')
@@ -79,7 +79,7 @@ for IDX in $(seq 0 $((N_CONFIGS - 1))); do
         --active_losses latent prefusion distill \
         --labeled_frequency 0 \
         --results_csv "$RESULTS_CSV" \
-        --epochs 120 \
+        --epochs 60 \
         --eval_every_n_epochs 4 \
         --batch_size 32 \
         --num_workers 4

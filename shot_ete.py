@@ -28,7 +28,7 @@ def main():
                         help='Path to stage 0 checkpoint (required)')
     parser.add_argument('--new_mod_group', type=str, required=True,
                         help='New modality to add (eurosat: vre/nir/swir/rgb; benv2/pastis/dfc2020: s1/s2)')
-    parser.add_argument('--token_mask_ratio', type=float, default=0.75,
+    parser.add_argument('--token_mask_ratio', '--mae_mask_ratio', type=float, default=0.75,
                         help='Ratio of tokens masked per modality during training (default: 0.75)')
     parser.add_argument('--modality_dropout', type=float, default=0.3,
                         help='Probability of fully masking a modality')
@@ -49,6 +49,8 @@ def main():
     parser.add_argument('--protect_lrm', action='store_true',
                         help='Detach LRM modality features in prefusion loss so its encoder is not updated '
                              'to be easier to predict.')
+    parser.add_argument('--latent_masked_only', action='store_true',
+                        help='Only compute latent loss on masked patch positions (not unmasked ones).')
     parser.add_argument('--dyn_teacher', action='store_true',
                         help='Dynamic teacher distillation: starting_modality head trains against '
                              'student peeking (soft-vote), newmod heads train against frozen unimodal teacher')
@@ -77,7 +79,12 @@ def main():
     parser.add_argument('--wandb_project', type=str, default='delulu-apr21')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--checkpoint_name', type=str, default=None)
+    parser.add_argument('--save_checkpoint', action='store_true',
+                        help='Save final model checkpoint to --checkpoint_dir')
     args = parser.parse_args()
+
+    if args.dyn_teacher:
+        parser.error("--dyn_teacher is disabled; remove it from your sweep config or job script.")
 
     # Validate new_mod_group against dataset
     valid_new_mods = VALID_NEW_MODS[args.dataset]
@@ -93,8 +100,7 @@ def main():
         model = EvanSegmenter.from_checkpoint(args.stage0_checkpoint, device)
     else:
         model = EVANClassifier.from_checkpoint(args.stage0_checkpoint, device)
-    evan_config = config['evan_config']
-    starting_modality = evan_config['starting_modality']
+    starting_modality = config['evan_config']['starting_modality']
     print(f"Stage 0 config:")
     for k, v in config.items():
         print(f"  {k}: {v}")
@@ -167,6 +173,7 @@ def main():
         dyn_teacher=args.dyn_teacher,
         use_mask_token=args.use_mask_token,
         protect_lrm=args.protect_lrm,
+        latent_masked_only=args.latent_masked_only,
         task_type=task_config.task_type,
         label_key=task_config.label_key,
         num_classes=task_config.num_classes,
@@ -188,26 +195,14 @@ def main():
         wandb.log({f"teacher_baseline/{k.replace('(','').replace(')','').replace(' ','_')}": v
                    for k, v in teacher_baselines.items()})
 
-    # Metrics already computed during training at best val epoch — use those directly
-    best = best_checkpoint_summary.get('best_ens_addition', best_checkpoint_summary.get('best_addition', {}))
-    metrics = {
-        'transfer': best.get('test_transfer', 0.0),
-        'peeking':  best.get('test_peeking', 0.0),
-        'addition': best.get('test_addition', 0.0),
-    }
-    addition_ens_metric = best.get('test_addition_ens', None)
 
     # ========================================= CHECKPOINT =====================================
-    timestamp_shot = datetime.now().strftime('%m%d_%H%M')
-    checkpoint_shotete = os.path.join(args.checkpoint_dir, f'delulunet_{args.dataset}_{timestamp_shot}.pt')
-    if args.checkpoint_name:
-        checkpoint_shotete = os.path.join(args.checkpoint_dir, f'{args.checkpoint_name}.pt')
-    checkpoint_data = {
-        'model_state_dict': model.state_dict(),
-        'config': model.get_config(),
-    }
-    # torch.save(checkpoint_data, checkpoint_shotete)
-    # print(f"Delulu checkpoint saved to: {checkpoint_shotete}")
+    checkpoint_shotete = ""
+    if args.save_checkpoint:
+        timestamp_shot = datetime.now().strftime('%m%d_%H%M')
+        checkpoint_shotete = os.path.join(args.checkpoint_dir, f'delulunet_{args.dataset}_{timestamp_shot}.pt')
+        torch.save({'model_state_dict': model.state_dict(), 'config': model.get_config()}, checkpoint_shotete)
+        print(f"Checkpoint saved to: {checkpoint_shotete}")
 
     # Log results to CSV
     filename = args.results_csv
@@ -221,9 +216,8 @@ def main():
         "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
         "trainable_params", "active_losses", "use_mask_token", "protect_lrm", "warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
         "teacher_test_metric",
-        "transfer_metric", "peeking_metric", "addition_metric", "addition_ens_metric",
-        "valchecked_transfer", "valchecked_peek", "valchecked_add", "valchecked_add_ens",
-        "valchecked_val_transfer", "valchecked_val_peek", "valchecked_val_add", "valchecked_val_add_ens",
+        "best_transfer", "best_peeking", "best_addition", "best_ens_addition",
+        "val_at_best_transfer", "val_at_best_peeking", "val_at_best_addition", "val_at_best_ens_addition",
         "stage0_checkpoint", "shote2e_checkpoint"
     ]
 
@@ -259,10 +253,6 @@ def main():
             evan.tz_fusion_time,
             metric_name,
             f"{teacher_test_metric:.2f}" if teacher_test_metric is not None else "",
-            f"{metrics['transfer']:.2f}",
-            f"{metrics['peeking']:.2f}",
-            f"{metrics['addition']:.2f}",
-            f"{addition_ens_metric:.2f}" if addition_ens_metric is not None else "",
             get_valchecked('best_transfer', 'test_transfer'),
             get_valchecked('best_peeking', 'test_peeking'),
             get_valchecked('best_addition', 'test_addition'),
@@ -277,7 +267,6 @@ def main():
 
     print(f"\nResults appended to {filename}")
     wandb.finish()
-    return
 
 
 if __name__ == '__main__':
@@ -290,12 +279,15 @@ if __name__ == '__main__':
 python -u shot_ete.py \
     --dataset benv2 \
     --new_mod_group s1 \
-    --checkpoint_name benv2_s2_to_s1 \
     --stage0_checkpoint checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt \
-    --epochs 4 \
-    --eval_every_n_epochs 1 \
+    --epochs 32 \
+    --eval_every_n_epochs 8 \
     --batch_size 32 \
     --results_csv res/shot_ete_benv2.csv \
     --active_losses latent prefusion distill ce \
-    --labeled_frequency 0.3
+    --labeled_frequency 0.3 \
+    --latent_masked_only \
+    --save_checkpoint \
+    --lambda_latent 0.1 \
+    --labeled_start_fraction 0
 """
