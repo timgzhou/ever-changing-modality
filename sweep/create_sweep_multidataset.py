@@ -28,6 +28,7 @@ CONFIGS = [
             'latent_masked_only': 'True',
             'labeled_start_fraction': '0.5',
         },
+        'active_losses': ['latent', 'prefusion', 'distill', 'ce'],
     },
     {
         'name': 'mask-token',
@@ -36,8 +37,8 @@ CONFIGS = [
             'use_mask_token': 'True',
             'latent_masked_only': 'True',
             'labeled_start_fraction': '0.5',
-            'use_prefusion': 'False',
         },
+        'active_losses': ['latent', 'distill', 'ce'],
     },
     {
         # lsf=1.0 + lf=0: labeled batches never appear → ce never active
@@ -49,6 +50,7 @@ CONFIGS = [
             'labeled_start_fraction': '1.0',
             'labeled_frequency': '0',
         },
+        'active_losses': ['latent', 'prefusion', 'distill'],
     },
     {
         'name': 'no-prefusion',
@@ -57,8 +59,8 @@ CONFIGS = [
             'use_mask_token': 'False',
             'latent_masked_only': 'True',
             'labeled_start_fraction': '0.5',
-            'use_prefusion': 'False',
         },
+        'active_losses': ['latent', 'distill', 'ce'],
     },
     {
         'name': 'no-latent',
@@ -67,8 +69,8 @@ CONFIGS = [
             'use_mask_token': 'False',
             'latent_masked_only': 'True',
             'labeled_start_fraction': '0.5',
-            'no_latent': 'True',
         },
+        'active_losses': ['distill', 'prefusion', 'ce'],
     },
 ]
 
@@ -93,6 +95,23 @@ DATASETS = {
                 'slug': 's1s2',
                 'stage0': 'checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt',
                 'new_mod': 's2',
+            },
+        ],
+        'n_jobs': 40,
+    },
+    'benv2': {
+        'yaml': 'sweep_benv2_final.yaml',
+        'dataset_arg': 'benv2',
+        'directions': [
+            {
+                'slug': 's1s2',
+                'stage0': 'checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt',
+                'new_mod': 's2',
+            },
+            {
+                'slug': 's2s1',
+                'stage0': 'checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt',
+                'new_mod': 's1',
             },
         ],
         'n_jobs': 40,
@@ -123,6 +142,8 @@ def _build_sweep(cfg: dict, direction: dict, dataset_arg: str, base_config: dict
     ]
     for k, v in cfg['fixed'].items():
         extra_args.extend([f'--{k}', v])
+    for loss in cfg['active_losses']:
+        extra_args.extend(['--active_losses', loss])
 
     config['command'] = config.get('command', []) + extra_args
 

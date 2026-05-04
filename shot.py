@@ -1,4 +1,4 @@
-"""Training utilities for EVAN."""
+"""Training utilities for DeluluNet."""
 
 import copy
 import time
@@ -72,7 +72,7 @@ def create_latent_decoders(hidden_dim, latent_reconstruct_modalities, device, nu
             embed_dim=hidden_dim,
             num_heads=num_heads,
             ffn_factor=ffn_factor,
-            num_layers=2, # TODO: change this to 1
+            num_layers=1,
         ).to(device)
         print(f"  Initialized Latent Projector (Transformer) for {mod}")
     return projectors
@@ -325,11 +325,9 @@ def evaluate_multimodal(
                 total += peeking_sv.shape[0]
             peek_preds = peeking_sv.argmax(1)
             if segmentation:
-                # exclude pixels where peeking predicts the ignored class
-                valid = peek_preds != ignore_index
-                transfer_agree += (transfer_sv.argmax(1) == peek_preds)[valid].sum().item()
-                addition_agree += (addition_sv.argmax(1) == peek_preds)[valid].sum().item()
-                total_pixels += valid.sum().item()
+                transfer_agree += (transfer_sv.argmax(1) == peek_preds).sum().item()
+                addition_agree += (addition_sv.argmax(1) == peek_preds).sum().item()
+                total_pixels += peek_preds.numel()
             elif multilabel:
                 peek_sig = torch.sigmoid(peeking_sv)
                 transfer_agree_soft += F.cosine_similarity(torch.sigmoid(transfer_sv), peek_sig).sum().item()

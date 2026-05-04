@@ -18,7 +18,8 @@ VALID_NEW_MODS = {
     'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
 }
 
-def main():
+
+def _parse_args():
     parser = argparse.ArgumentParser(description='End to end training for SHOT model.')
     # IMPORTANT
     parser.add_argument('--dataset', type=str, required=True,
@@ -55,7 +56,7 @@ def main():
                         help='Dynamic teacher distillation: starting_modality head trains against '
                              'student peeking (soft-vote), newmod heads train against frozen unimodal teacher')
     parser.add_argument('--warmup_epochs', type=int, default=3,
-                        help='Linear LR warmup epochs before cosine decay (default: 1)')
+                        help='Linear LR warmup epochs before cosine decay (default: 3)')
 
     parser.add_argument('--results_csv', type=str, required=True,
                         help='Path to results CSV file')
@@ -91,6 +92,13 @@ def main():
     if args.new_mod_group not in valid_new_mods:
         parser.error(f"--new_mod_group {args.new_mod_group!r} is not valid for --dataset {args.dataset}. "
                      f"Valid choices: {valid_new_mods}")
+
+    return args
+
+
+def main(args=None):
+    if args is None:
+        args = _parse_args()
 
     print(f"\n=== Loading Stage 0 checkpoint from: {args.stage0_checkpoint} ===")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -145,7 +153,7 @@ def main():
         model = model.to(device)
 
     # ========================================== TRAIN Delulu ===========================================
-    trainable_total, _, best_checkpoint_summary, teacher_baselines = train_shot(
+    trainable_total, best_checkpoints, best_checkpoint_summary, teacher_baselines = train_shot(
         model=model,
         train_loader=train2_loader,
         device=device,
@@ -180,89 +188,97 @@ def main():
         ignore_index=getattr(task_config, 'ignore_index', -100),
     )
 
-    if task_config.task_type == 'segmentation':
-        metric_name = "mIoU"
-    elif task_config.multilabel:
-        metric_name = "mAP"
-    else:
-        metric_name = "Acc"
-
     # Log teacher baselines
     if teacher_baselines:
-        print(f"\n=== Teacher Baselines ({metric_name}, starting modality only) ===")
-        for set_name, acc in teacher_baselines.items():
-            print(f"  {set_name}: {acc:.2f}%")
         wandb.log({f"teacher_baseline/{k.replace('(','').replace(')','').replace(' ','_')}": v
                    for k, v in teacher_baselines.items()})
 
+    teacher_test_metric = teacher_baselines.get("test", None)
+    if teacher_test_metric is not None:
+        wandb.run.summary['teacher_test_metric'] = teacher_test_metric
+
+    # Log best checkpoint test accuracies to wandb summary
+    for ckpt_name, ckpt_data in best_checkpoints.items():
+        if ckpt_data['test_accs'] is not None:
+            wandb.run.summary[f'{ckpt_name}_test_transfer'] = ckpt_data['test_accs']['transfer']
+            wandb.run.summary[f'{ckpt_name}_test_peeking'] = ckpt_data['test_accs']['peeking']
+            wandb.run.summary[f'{ckpt_name}_test_addition'] = ckpt_data['test_accs']['addition']
+            wandb.run.summary[f'{ckpt_name}_test_addition_ens'] = ckpt_data['test_accs'].get('addition_ens', 0)
 
     # ========================================= CHECKPOINT =====================================
-    checkpoint_shotete = ""
     if args.save_checkpoint:
         timestamp_shot = datetime.now().strftime('%m%d_%H%M')
-        checkpoint_shotete = os.path.join(args.checkpoint_dir, f'delulunet_{args.dataset}_{timestamp_shot}.pt')
-        torch.save({'model_state_dict': model.state_dict(), 'config': model.get_config()}, checkpoint_shotete)
-        print(f"Checkpoint saved to: {checkpoint_shotete}")
+        ckpt_path = os.path.join(args.checkpoint_dir, f'delulunet_{args.dataset}_{timestamp_shot}.pt')
+        torch.save({'model_state_dict': model.state_dict(), 'config': model.get_config()}, ckpt_path)
+        print(f"Checkpoint saved to: {ckpt_path}")
 
-    # Log results to CSV
+    # ========================================= CSV LOGGING =====================================
+    def get_ckpt_data(ckpt_name, test_key):
+        ckpt = best_checkpoints.get(ckpt_name, {})
+        val_metric = ckpt.get('metric')
+        test_accs = ckpt.get('test_accs')
+        test_acc = test_accs.get(test_key) if test_accs else None
+        return val_metric, test_acc
+
+    val_transfer, test_transfer = get_ckpt_data('best_transfer', 'transfer')
+    val_peeking, test_peeking   = get_ckpt_data('best_peeking',  'peeking')
+    val_addition, test_addition = get_ckpt_data('best_addition', 'addition')
+    val_ens_addition, test_ens_addition = get_ckpt_data('best_ens_addition', 'ens')
+
     filename = args.results_csv
     if d := os.path.dirname(filename):
         os.makedirs(d, exist_ok=True)
     file_exists = os.path.isfile(filename)
-    embed_dim = evan.embed_dim
-    model_arch = {384: 'evan_small', 768: 'evan_base', 1024: 'evan_large'}.get(embed_dim, f'evan_d{embed_dim}')
     fieldnames = [
-        "dataset", "model_arch", "starting_modality", "new_modality", "lr", "weight_decay", "epochs",
-        "mask_ratio", "modality_dropout", "labeled_frequency", "labeled_start_fraction",
-        "trainable_params", "active_losses", "use_mask_token", "protect_lrm", "warmup_epochs", "intermediate_projector_type", "tz_fusion_time", "metric_name",
+        "wandb_run_id", "wandb_project", "dataset", "starting_modality", "new_modality",
         "teacher_test_metric",
-        "best_transfer", "best_peeking", "best_addition", "best_ens_addition",
-        "val_at_best_transfer", "val_at_best_peeking", "val_at_best_addition", "val_at_best_ens_addition",
-        "stage0_checkpoint", "shote2e_checkpoint"
+        "lr", "asym_lr", "weight_decay", "epochs",
+        "modality_dropout", "labeled_frequency", "labeled_start_fraction",
+        "protect_lrm", "use_mask_token", "latent_masked_only",
+        "lambda_latent", "lambda_prefusion", "lambda_distill",
+        "trainable_params", "active_losses",
+        "val_transfer", "test_transfer",
+        "val_peeking", "test_peeking",
+        "val_addition", "test_addition",
+        "val_ens_addition", "test_ens_addition",
+        "stage0_checkpoint",
     ]
-
-    def get_valchecked(ckpt_name, metric_key):
-        if ckpt_name in best_checkpoint_summary:
-            return f"{best_checkpoint_summary[ckpt_name][metric_key]:.2f}"
-        return ""
-
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
         if not file_exists:
             writer.writerow(fieldnames)
         active_losses_str = "+".join(args.active_losses) if args.active_losses else "all"
-        teacher_test_metric = teacher_baselines.get("test", None)
         writer.writerow([
+            wandb.run.id,
+            wandb.run.project,
             args.dataset,
-            model_arch,
             starting_modality,
             newmod,
+            f"{teacher_test_metric:.2f}" if teacher_test_metric is not None else "",
             args.lr,
+            args.asym_lr,
             args.weight_decay,
             args.epochs,
-            args.token_mask_ratio,
             args.modality_dropout,
             args.labeled_frequency,
             args.labeled_start_fraction,
+            args.protect_lrm,
+            args.use_mask_token,
+            args.latent_masked_only,
+            args.lambda_latent,
+            args.lambda_prefusion,
+            args.lambda_distill,
             trainable_total,
             active_losses_str,
-            args.use_mask_token,
-            args.protect_lrm,
-            args.warmup_epochs,
-            evan.intermediate_projector_type,
-            evan.tz_fusion_time,
-            metric_name,
-            f"{teacher_test_metric:.2f}" if teacher_test_metric is not None else "",
-            get_valchecked('best_transfer', 'test_transfer'),
-            get_valchecked('best_peeking', 'test_peeking'),
-            get_valchecked('best_addition', 'test_addition'),
-            get_valchecked('best_ens_addition', 'test_addition_ens'),
-            get_valchecked('best_transfer', 'val_metric'),
-            get_valchecked('best_peeking', 'val_metric'),
-            get_valchecked('best_addition', 'val_metric'),
-            get_valchecked('best_ens_addition', 'val_metric'),
+            f"{val_transfer:.2f}" if val_transfer is not None else "",
+            f"{test_transfer:.2f}" if test_transfer is not None else "",
+            f"{val_peeking:.2f}" if val_peeking is not None else "",
+            f"{test_peeking:.2f}" if test_peeking is not None else "",
+            f"{val_addition:.2f}" if val_addition is not None else "",
+            f"{test_addition:.2f}" if test_addition is not None else "",
+            f"{val_ens_addition:.2f}" if val_ens_addition is not None else "",
+            f"{test_ens_addition:.2f}" if test_ens_addition is not None else "",
             args.stage0_checkpoint,
-            checkpoint_shotete,
         ])
 
     print(f"\nResults appended to {filename}")

@@ -1,4 +1,4 @@
-"""BEN-v2 sweep analysis — 5-config comparison and val-vs-test scatter.
+"""Sweep analysis — 5-config comparison and val-vs-test scatter.
 
 Run from repo root:
     python -u res/delulu-sweep/sweep_analysis_benv2.py
@@ -15,18 +15,27 @@ import matplotlib.pyplot as plt
 CONFIGURING THE PLOTS
 """
 
+DATASET  = "benv2"   # "benv2" or "dfc2020"
 STARTMOD = "s1"
 NEWMOD   = "s2"
 K        = 1   # fraction of top runs to keep per config (by val score); 1.0 = all runs
-TRIM     = 0    # number of top+bottom points to trim per config (by test metric); 0 = no trim
+TRIM     = 0   # number of top+bottom points to trim per config (by test metric); 0 = no trim
 
-df = pd.read_csv('res/delulu-sweep/sweep_results_benv2_final.csv')
+DATASET_CFG = {
+    "benv2":   {"csv": "res/delulu-sweep/sweep_results_benv2_final.csv",   "metric_label": "mAP"},
+    "dfc2020": {"csv": "res/delulu-sweep/sweep_results_dfc2020_final.csv", "metric_label": "mIoU"},
+}
+
+cfg          = DATASET_CFG[DATASET]
+METRIC_LABEL = cfg["metric_label"]
+
+df = pd.read_csv(cfg["csv"])
 print(f"Rows: {len(df)}")
 
 for col in ['protect_lrm', 'use_mask_token', 'latent_masked_only']:
     df[col] = df[col].astype(str).str.strip().str.lower().map({'true': True, 'false': False})
 
-out_dir = 'res/delulu-sweep/artifacts'
+out_dir = f'res/delulu-sweep/artifacts'
 os.makedirs(out_dir, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -77,11 +86,11 @@ def trim(vals, t=TRIM):
     return np.sort(vals)[t:-t]
 
 # ---------------------------------------------------------------------------
-# Plot 1 — scatter with mean diamond  (sweep_benv2_5configs.png)
+# Plot 1 — scatter with mean diamond  (sweep_{DATASET}_5configs.png)
 # ---------------------------------------------------------------------------
 
 fig1, axes1 = plt.subplots(1, 3, figsize=(11, 4.2), sharey=False)
-fig1.suptitle(f"BEN-v2 Sweep Config Comparison ({STARTMOD}→{NEWMOD})", fontsize=12, fontweight="bold")
+fig1.suptitle(f"{DATASET} Sweep Config Comparison ({STARTMOD}→{NEWMOD})", fontsize=12, fontweight="bold")
 
 for ax, metric, mlabel in zip(axes1, METRICS, METRIC_LABELS):
     for ci, cfg in enumerate(CONFIG_ORDER):
@@ -99,13 +108,13 @@ for ax, metric, mlabel in zip(axes1, METRICS, METRIC_LABELS):
     ax.set_xticks(np.arange(len(CONFIG_ORDER)))
     ax.set_xticklabels(CONFIG_DISPLAY, fontsize=9)
     ax.set_title(mlabel, fontsize=11)
-    ax.set_ylabel("mAP", fontsize=9)
+    ax.set_ylabel(METRIC_LABEL, fontsize=9)
     ax.tick_params(axis="y", labelsize=8)
     ax.margins(x=0.08)
     ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
 
 fig1.tight_layout()
-out1 = f'{out_dir}/sweep_benv2_5configs.png'
+out1 = f'{out_dir}/sweep_{DATASET}_5configs.png'
 fig1.savefig(out1, dpi=150, bbox_inches="tight")
 print(f'Saved to {out1}')
 
@@ -151,18 +160,18 @@ lines.append(r"\caption{\textbf{Delulu Components Ablation on reBEN for Masking 
 lines.append(r"\end{table}")
 
 tex = "\n".join(lines)
-tex_path = f'{out_dir}/sweep_benv2_5configs_table.tex'
+tex_path = f'{out_dir}/sweep_{DATASET}_5configs_table.tex'
 with open(tex_path, 'w') as f:
     f.write(tex)
 print(f'Saved to {tex_path}')
 print(tex)
 
 # ---------------------------------------------------------------------------
-# Plot 1b — boxplot with mean ± std  (sweep_benv2_5configs_box.png)
+# Plot 1b — boxplot with mean ± std  (sweep_{DATASET}_5configs_box.png)
 # ---------------------------------------------------------------------------
 
 fig1b, axes1b = plt.subplots(1, 3, figsize=(11, 4.2), sharey=False)
-fig1b.suptitle(f"BEN-v2 Sweep Config Comparison ({STARTMOD}→{NEWMOD})", fontsize=12, fontweight="bold")
+fig1b.suptitle(f"{DATASET} Sweep Config Comparison ({STARTMOD}→{NEWMOD})", fontsize=12, fontweight="bold")
 
 for ax, metric, mlabel in zip(axes1b, METRICS, METRIC_LABELS):
     group_data = [trim(topk(sub[sub["_cfg"] == cfg])[metric].dropna().values)
@@ -183,7 +192,7 @@ for ax, metric, mlabel in zip(axes1b, METRICS, METRIC_LABELS):
     ax.set_xticks(np.arange(len(CONFIG_ORDER)))
     ax.set_xticklabels(CONFIG_DISPLAY, fontsize=9)
     ax.set_title(mlabel, fontsize=11)
-    ax.set_ylabel("mAP", fontsize=9)
+    ax.set_ylabel(METRIC_LABEL, fontsize=9)
     ax.tick_params(axis="y", labelsize=8)
     ax.margins(x=0.08)
     ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
@@ -197,24 +206,24 @@ for ax, metric, mlabel in zip(axes1b, METRICS, METRIC_LABELS):
         ax.text(ci, ypos, f"{mean:.1f}±{std:.1f}",
                 ha="center", va="bottom", fontsize=7.5, fontweight="bold")
 
-out1b = f'{out_dir}/sweep_benv2_5configs_box.png'
+out1b = f'{out_dir}/sweep_{DATASET}_5configs_box.png'
 fig1b.savefig(out1b, dpi=150, bbox_inches="tight")
 print(f'Saved to {out1b}')
 
 # ---------------------------------------------------------------------------
-# Plot 2 — val vs test scatter  (sweep_benv2_val_vs_test.png)
+# Plot 2 — val vs test scatter  (sweep_{DATASET}_val_vs_test.png)
 # ---------------------------------------------------------------------------
 
 VAL_TEST_PAIRS = [
     ("val_transfer", "test_transfer", "Transfer", "Val score (peek×agree/100)"),
-    ("val_peeking",  "test_peeking",  "Peek",     "Val mAP"),
+    ("val_peeking",  "test_peeking",  "Peek",     f"Val {METRIC_LABEL}"),
     ("val_addition", "test_addition", "Addition", "Val score (peek×agree/100)"),
 ]
 
 df5 = topk(sub[sub["_cfg"] == "delulu"]).copy()
 
 fig2, axes2 = plt.subplots(1, 3, figsize=(13, 4.2))
-fig2.suptitle(f"BEN-v2 Final Sweep — Val vs Test mAP ({STARTMOD}→{NEWMOD}, delulu config)", fontsize=12, fontweight="bold")
+fig2.suptitle(f"{DATASET} Final Sweep — Val vs Test {METRIC_LABEL} ({STARTMOD}→{NEWMOD}, delulu config)", fontsize=12, fontweight="bold")
 
 for ax, (val_col, test_col, mlabel, val_xlabel) in zip(axes2, VAL_TEST_PAIRS):
     for col in [val_col, test_col]:
@@ -231,13 +240,13 @@ for ax, (val_col, test_col, mlabel, val_xlabel) in zip(axes2, VAL_TEST_PAIRS):
     r = df5[val_col].corr(df5[test_col])
     ax.set_title(f"{mlabel}  (r = {r:.3f})", fontsize=10)
     ax.set_xlabel(val_xlabel, fontsize=9)
-    ax.set_ylabel("Test mAP", fontsize=9)
+    ax.set_ylabel(f"Test {METRIC_LABEL}", fontsize=9)
     ax.tick_params(labelsize=8)
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.45)
 
 fig2.tight_layout()
 
-out2 = f'{out_dir}/sweep_benv2_val_vs_test.png'
+out2 = f'{out_dir}/sweep_{DATASET}_val_vs_test.png'
 fig2.savefig(out2, dpi=150, bbox_inches="tight")
 print(f'Saved to {out2}')
 

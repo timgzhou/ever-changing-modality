@@ -1,81 +1,20 @@
-# Sweep Registry
-# Format: project_name sweep_id stage0_checkpoint new_mod_group
-#
-# Create a sweep:
-#   python create_sweep.py --starting nir --newmod rgb
-#
-# Run all sweeps:
-#   python run_all_sweeps.py
-
-# 64 epoch sweeps 2026-02-02
-# delulu-sweep-rgb-nir tgz/delulu-sweep-rgb-nir/5fqnj1g0 checkpoints/rgb_randinit_fft.pt nir
-# delulu-sweep-rgb-vre tgz/delulu-sweep-rgb-vre/vi90inq5 checkpoints/rgb_randinit_fft.pt vre
-# delulu-sweep-rgb-swir tgz/delulu-sweep-rgb-swir/32j28k91 checkpoints/rgb_randinit_fft.pt swir
-# delulu-sweep-nir-rgb tgz/delulu-sweep-nir-rgb/f92jduqh checkpoints/nir_randinit_fft.pt rgb
-# delulu-sweep-nir-vre tgz/delulu-sweep-nir-vre/t9qn6rrj checkpoints/nir_randinit_fft.pt vre
-# delulu-sweep-nir-swir tgz/delulu-sweep-nir-swir/214ewfzn checkpoints/nir_randinit_fft.pt swir
-# delulu-sweep-vre-rgb tgz/delulu-sweep-vre-rgb/kntvkz8s checkpoints/vre_randinit_fft.pt rgb
-# delulu-sweep-vre-nir tgz/delulu-sweep-vre-nir/uroe2lk5 checkpoints/vre_randinit_fft.pt nir
-# delulu-sweep-vre-swir tgz/delulu-sweep-vre-swir/4ysduts5 checkpoints/vre_randinit_fft.pt swir
-# delulu-sweep-swir-rgb tgz/delulu-sweep-swir-rgb/hqwgzhoo checkpoints/swir_randinit_fft.pt rgb
-# delulu-sweep-swir-nir tgz/delulu-sweep-swir-nir/u0auclpb checkpoints/swir_randinit_fft.pt nir
-# delulu-sweep-swir-vre tgz/delulu-sweep-swir-vre/nwajw88k checkpoints/swir_randinit_fft.pt vre
-
-# 128 epochs sweeps (2026-02-03)
-# delulu-sweep-rgb-nir tgz/delulu-sweep-rgb-nir/kgydzqnf checkpoints/rgb_randinit_fft.pt nir
-# delulu-sweep-rgb-vre tgz/delulu-sweep-rgb-vre/vk2kgivy checkpoints/rgb_randinit_fft.pt vre
-# delulu-sweep-rgb-swir tgz/delulu-sweep-rgb-swir/nca758ss checkpoints/rgb_randinit_fft.pt swir
-# delulu-sweep-nir-rgb tgz/delulu-sweep-nir-rgb/x1g529xa checkpoints/nir_randinit_fft.pt rgb
-# delulu-sweep-nir-vre tgz/delulu-sweep-nir-vre/y6jlakey checkpoints/nir_randinit_fft.pt vre
-# delulu-sweep-nir-swir tgz/delulu-sweep-nir-swir/o1iwgekb checkpoints/nir_randinit_fft.pt swir
-# delulu-sweep-vre-rgb tgz/delulu-sweep-vre-rgb/s1hj0nk8 checkpoints/vre_randinit_fft.pt rgb
-# delulu-sweep-vre-nir tgz/delulu-sweep-vre-nir/u7rbwutt checkpoints/vre_randinit_fft.pt nir
-# delulu-sweep-vre-swir tgz/delulu-sweep-vre-swir/oc76iit6 checkpoints/vre_randinit_fft.pt swir
-# delulu-sweep-swir-rgb tgz/delulu-sweep-swir-rgb/sgt0lvkw checkpoints/swir_randinit_fft.pt rgb
-# delulu-sweep-swir-nir tgz/delulu-sweep-swir-nir/u3m4lo1j checkpoints/swir_randinit_fft.pt nir
-# delulu-sweep-swir-vre tgz/delulu-sweep-swir-vre/wfic33ui checkpoints/swir_randinit_fft.pt vre
-
-# delulu-sweep-rgb-nir-dino tgz/delulu-sweep-rgb-nir-dino/tyqvzw2k checkpoints/rgb_dinoinit_fft.pt nir
-# delulu-sweep-rgb-swir-dino tgz/delulu-sweep-rgb-swir-dino/zaipsisl checkpoints/rgb_dinoinit_fft.pt swir
-# delulu-sweep-rgb-vre-dino tgz/delulu-sweep-rgb-vre-dino/zl8y8r9z checkpoints/rgb_dinoinit_fft.pt vre
-
-delulu-sweep-rgb-nir-dino tgz/delulu-sweep-rgb-nir-dino/cmby1hdv checkpoints/rgb_dinoinit_fft.pt nir
-delulu-sweep-rgb-vre-dino tgz/delulu-sweep-rgb-vre-dino/8fnjoyvi checkpoints/rgb_dinoinit_fft.pt vre
-delulu-sweep-rgb-swir-dino tgz/delulu-sweep-rgb-swir-dino/rxefgcbs checkpoints/rgb_dinoinit_fft.pt swirdelulu-benv2-final-delulu-s2s1 tgz/delulu-benv2-final-delulu-s2s1/rovddxaj checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
-delulu-benv2-final-mask-token-s2s1 tgz/delulu-benv2-final-mask-token-s2s1/g4ivtep3 checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
-delulu-benv2-final-no-batch-mixing-s2s1 tgz/delulu-benv2-final-no-batch-mixing-s2s1/f27w3q0n checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
-delulu-benv2-final-no-prefusion-s2s1 tgz/delulu-benv2-final-no-prefusion-s2s1/qj08vchb checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
-delulu-benv2-final-delulu-s1s2 tgz/delulu-benv2-final-delulu-s1s2/3kw3jiin checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
-delulu-benv2-final-mask-token-s1s2 tgz/delulu-benv2-final-mask-token-s1s2/3lj69qew checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
-delulu-benv2-final-no-batch-mixing-s1s2 tgz/delulu-benv2-final-no-batch-mixing-s1s2/9dqqqxmw checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
-delulu-benv2-final-no-prefusion-s1s2 tgz/delulu-benv2-final-no-prefusion-s1s2/b9zkxvrz checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
-delulu-benv2-final-delulu-s2s1 tgz/delulu-benv2-final-delulu-s2s1/n2uhpbn2 checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
-delulu-benv2-final-mask-token-s2s1 tgz/delulu-benv2-final-mask-token-s2s1/m19xh2l0 checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
-delulu-benv2-final-no-batch-mixing-s2s1 tgz/delulu-benv2-final-no-batch-mixing-s2s1/b7fcse1f checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
-delulu-benv2-final-no-prefusion-s2s1 tgz/delulu-benv2-final-no-prefusion-s2s1/c2dcgf4j checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
-delulu-benv2-final-no-latent-s2s1 tgz/delulu-benv2-final-no-latent-s2s1/vtx0b1ka checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
-delulu-benv2-final-delulu-s1s2 tgz/delulu-benv2-final-delulu-s1s2/7gqpk7uw checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
-delulu-benv2-final-mask-token-s1s2 tgz/delulu-benv2-final-mask-token-s1s2/mtglaoit checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
-delulu-benv2-final-no-batch-mixing-s1s2 tgz/delulu-benv2-final-no-batch-mixing-s1s2/1u758655 checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
-delulu-benv2-final-no-prefusion-s1s2 tgz/delulu-benv2-final-no-prefusion-s1s2/ai4vhw1f checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
-delulu-benv2-final-no-latent-s1s2 tgz/delulu-benv2-final-no-latent-s1s2/ge2thu66 checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
-delulu-eurosat-final-delulu-nirrgb tgz/delulu-eurosat-final-delulu-nirrgb/0eba9frp checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
-delulu-eurosat-final-mask-token-nirrgb tgz/delulu-eurosat-final-mask-token-nirrgb/5b4rim1i checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
-delulu-eurosat-final-no-batch-mixing-nirrgb tgz/delulu-eurosat-final-no-batch-mixing-nirrgb/u14tippg checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
-delulu-eurosat-final-no-prefusion-nirrgb tgz/delulu-eurosat-final-no-prefusion-nirrgb/3upo8y2x checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
-delulu-eurosat-final-no-latent-nirrgb tgz/delulu-eurosat-final-no-latent-nirrgb/g74l1ued checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
-delulu-dfc2020-final-delulu-s1s2 tgz/delulu-dfc2020-final-delulu-s1s2/wxnbc2ov checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt s2
-delulu-dfc2020-final-mask-token-s1s2 tgz/delulu-dfc2020-final-mask-token-s1s2/vn0ox69q checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt s2
-delulu-dfc2020-final-no-batch-mixing-s1s2 tgz/delulu-dfc2020-final-no-batch-mixing-s1s2/6arelkl1 checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt s2
-delulu-dfc2020-final-no-prefusion-s1s2 tgz/delulu-dfc2020-final-no-prefusion-s1s2/dz186g00 checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt s2
-delulu-dfc2020-final-no-latent-s1s2 tgz/delulu-dfc2020-final-no-latent-s1s2/knepo835 checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt s2
-delulu-eurosat-final-delulu-nirrgb tgz/delulu-eurosat-final-delulu-nirrgb/stm79a8d checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
-delulu-eurosat-final-mask-token-nirrgb tgz/delulu-eurosat-final-mask-token-nirrgb/6juj2xej checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
-delulu-eurosat-final-no-batch-mixing-nirrgb tgz/delulu-eurosat-final-no-batch-mixing-nirrgb/421xwdt7 checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
-delulu-eurosat-final-no-prefusion-nirrgb tgz/delulu-eurosat-final-no-prefusion-nirrgb/ruw24tjx checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
-delulu-eurosat-final-no-latent-nirrgb tgz/delulu-eurosat-final-no-latent-nirrgb/m16sqdah checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
-delulu-dfc2020-final-delulu-s1s2 tgz/delulu-dfc2020-final-delulu-s1s2/qx9qufir checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt s2
-delulu-dfc2020-final-mask-token-s1s2 tgz/delulu-dfc2020-final-mask-token-s1s2/vec68efm checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt s2
-delulu-dfc2020-final-no-batch-mixing-s1s2 tgz/delulu-dfc2020-final-no-batch-mixing-s1s2/2j6fs811 checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt s2
-delulu-dfc2020-final-no-prefusion-s1s2 tgz/delulu-dfc2020-final-no-prefusion-s1s2/myffb23b checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt s2
-delulu-dfc2020-final-no-latent-s1s2 tgz/delulu-dfc2020-final-no-latent-s1s2/6my8dl1h checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260418_080704.pt s2
+delulu-eurosat-final-delulu-nirrgb tgz/delulu-eurosat-final-delulu-nirrgb/5klxo450 checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
+delulu-eurosat-final-mask-token-nirrgb tgz/delulu-eurosat-final-mask-token-nirrgb/q6ybn7b3 checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
+delulu-eurosat-final-no-batch-mixing-nirrgb tgz/delulu-eurosat-final-no-batch-mixing-nirrgb/vem6q8x7 checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
+delulu-eurosat-final-no-prefusion-nirrgb tgz/delulu-eurosat-final-no-prefusion-nirrgb/0h595xb5 checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
+delulu-eurosat-final-no-latent-nirrgb tgz/delulu-eurosat-final-no-latent-nirrgb/qeet2ufb checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
+delulu-eurosat-final-delulu-nirrgb tgz/delulu-eurosat-final-delulu-nirrgb/z1lul7wu checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
+delulu-eurosat-final-mask-token-nirrgb tgz/delulu-eurosat-final-mask-token-nirrgb/hah5qs06 checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
+delulu-eurosat-final-no-batch-mixing-nirrgb tgz/delulu-eurosat-final-no-batch-mixing-nirrgb/bo0m9jls checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
+delulu-eurosat-final-no-prefusion-nirrgb tgz/delulu-eurosat-final-no-prefusion-nirrgb/vtmzsmba checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
+delulu-eurosat-final-no-latent-nirrgb tgz/delulu-eurosat-final-no-latent-nirrgb/0g0uzoms checkpoints/sft_evan_base_eurosat_nir_fft_lr0.001_20260422_043429.pt rgb
+delulu-benv2-final-delulu-s1s2 tgz/delulu-benv2-final-delulu-s1s2/xnwgwmg9 checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
+delulu-benv2-final-mask-token-s1s2 tgz/delulu-benv2-final-mask-token-s1s2/tcehl8qf checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
+delulu-benv2-final-no-batch-mixing-s1s2 tgz/delulu-benv2-final-no-batch-mixing-s1s2/w28env3f checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
+delulu-benv2-final-no-prefusion-s1s2 tgz/delulu-benv2-final-no-prefusion-s1s2/g0cspthm checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
+delulu-benv2-final-no-latent-s1s2 tgz/delulu-benv2-final-no-latent-s1s2/00gb3aq7 checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
+delulu-benv2-final-delulu-s2s1 tgz/delulu-benv2-final-delulu-s2s1/ltcrh0k8 checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
+delulu-benv2-final-mask-token-s2s1 tgz/delulu-benv2-final-mask-token-s2s1/w8lhb5qp checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
+delulu-benv2-final-no-batch-mixing-s2s1 tgz/delulu-benv2-final-no-batch-mixing-s2s1/ip2ont8b checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
+delulu-benv2-final-no-prefusion-s2s1 tgz/delulu-benv2-final-no-prefusion-s2s1/srag1nsd checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
+delulu-benv2-final-no-latent-s2s1 tgz/delulu-benv2-final-no-latent-s2s1/wxyefxmh checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
