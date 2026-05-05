@@ -16,9 +16,9 @@ CONFIGURING THE PLOTS
 """
 
 DATASET  = "benv2"   # "benv2" or "dfc2020"
-STARTMOD = "s1"
-NEWMOD   = "s2"
-K        = 0.2   # fraction of top runs to keep per config (by val score); 1.0 = all runs
+STARTMOD = "s2"
+NEWMOD   = "s1"
+K        = 1   # fraction of top runs to keep per config (by val score); 1.0 = all runs
 TRIM     = 0   # number of top+bottom points to trim per config (by test metric); 0 = no trim
 
 DATASET_CFG = {
@@ -249,66 +249,5 @@ fig2.tight_layout()
 out2 = f'{out_dir}/sweep_{DATASET}_val_vs_test.png'
 fig2.savefig(out2, dpi=150, bbox_inches="tight")
 print(f'Saved to {out2}')
-
-# ---------------------------------------------------------------------------
-# Best hyperparams — write artifacts/sweep_best.json
-# Select best delulu run per eval type by val score; output shot_ete.py args.
-# ---------------------------------------------------------------------------
-
-import json
-
-HPARAM_COLS = [
-    "lr", "asym_lr", "weight_decay", "epochs",
-    "modality_dropout", "labeled_frequency", "labeled_start_fraction",
-    "protect_lrm", "use_mask_token", "latent_masked_only",
-    "lambda_latent", "lambda_prefusion", "lambda_distill",
-    "active_losses", "stage0_checkpoint",
-]
-
-VAL_FOR_EVAL = {
-    "transfer": "val_transfer",
-    "peeking":  "val_peeking",
-    "addition": "val_addition",
-}
-
-delulu_sub = sub[sub["_cfg"] == "delulu"].copy()
-
-def row_to_hparams(row):
-    out = {}
-    for col in HPARAM_COLS:
-        val = row[col]
-        if pd.isna(val):
-            out[col] = None
-        elif isinstance(val, (bool, np.bool_)):
-            out[col] = bool(val)
-        elif isinstance(val, float):
-            out[col] = float(f"{val:.2g}")
-        elif isinstance(val, (int, np.integer)):
-            out[col] = int(val)
-        else:
-            out[col] = str(val)
-    return out
-
-best = {}
-for eval_type, val_col in VAL_FOR_EVAL.items():
-    test_col = val_col.replace("val_", "test_")
-    top2 = delulu_sub.nlargest(2, val_col)
-    entries = []
-    for rank, (_, row) in enumerate(top2.iterrows(), start=1):
-        entries.append({
-            "rank":        rank,
-            "val_score":   float(row[val_col]),
-            "test_score":  float(row[test_col]),
-            "val_col":     val_col,
-            "wandb_run_id": str(row["wandb_run_id"]),
-            "hparams":     row_to_hparams(row),
-        })
-        print(f"Best {eval_type} #{rank}: run {row['wandb_run_id']}  val={row[val_col]:.2f}  test={row[test_col]:.2f}")
-    best[eval_type] = entries
-
-best_json_path = f'{out_dir}/sweep_best.json'
-with open(best_json_path, 'w') as f:
-    json.dump(best, f, indent=2)
-print(f'Saved to {best_json_path}')
 
 # python res/delulu-sweep/sweep_analysis_benv2.py

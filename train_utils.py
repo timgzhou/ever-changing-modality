@@ -468,10 +468,11 @@ class Trainer:
                     student_pseudo_modalities=student_pseudo_modalities,
                 )
                 print(f"  Val2 teacher-agreement: {agreement:.2f}%")
-                if best_checkpoint_path is not None and agreement > best_agreement:
-                    print(f"    New val record: {agreement:.2f} > {best_agreement:.2f} — saving checkpoint")
+                if agreement > best_agreement:
                     best_agreement = agreement
-                    self.model.save_checkpoint(best_checkpoint_path)
+                    if best_checkpoint_path is not None:
+                        print(f"    New val record: {agreement:.2f} > {best_agreement:.2f} — saving checkpoint")
+                        self.model.save_checkpoint(best_checkpoint_path)
                 if self.use_wandb and self.wandb_prefix:
                     wandb.log({
                         f'{self.wandb_prefix}/val2_teacher_agreement': agreement,

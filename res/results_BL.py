@@ -117,8 +117,8 @@ def _load_delulu(dataset, arch, val_col, test_col):
     df[val_col]  = pd.to_numeric(df[val_col],  errors='coerce')
     result = {}
     for (start, new), grp in df.groupby(['starting_modality', 'new_modality']):
-        top1 = grp.nlargest(1, val_col)[test_col]
-        result[(start, new)] = (top1.mean(), top1.std())
+        top3 = grp.nlargest(3, val_col)[test_col]
+        result[(start, new)] = (top3.mean(), top3.std())
     return result
 
 

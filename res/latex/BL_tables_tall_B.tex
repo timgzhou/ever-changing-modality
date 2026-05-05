@@ -8,9 +8,9 @@
   \midrule
   $f_0(M_A)$ & $f_0$ & 63.4 & 63.4 & 49.2 & 61.3 & 41.9 & 41.9 & 43.3 & 45.1 & 98.6 \\
   \midrule
-  \multirow{2}{*}{Baselines} & KD & 49.0$\pm$1.3 & 57.5$\pm$0.8 & 48.8$\pm$0.4 & 49.0$\pm$1.8 & \textbf{43.8$\pm$1.1} & 42.6$\pm$1.2 & 43.6$\pm$1.7 & \textbf{44.4$\pm$1.2} & 87.5$\pm$0.6 \\
+  \multirow{2}{*}{Baselines} & KD & \textbf{49.0$\pm$1.3} & 57.5$\pm$0.8 & 48.8$\pm$0.4 & 49.0$\pm$1.8 & \textbf{43.8$\pm$1.1} & 42.6$\pm$1.2 & \textbf{43.6$\pm$1.7} & \textbf{44.4$\pm$1.2} & 87.5$\pm$0.6 \\
    & TTM & 48.7$\pm$1.3 & 57.0$\pm$0.7 & 48.6$\pm$1.5 & 49.0$\pm$2.1 & 43.3$\pm$1.4 & 45.6$\pm$3.8 & 43.1$\pm$2.6 & 44.1$\pm$1.0 & 88.3$\pm$1.9 \\
-  Ours & Delulu & \textbf{49.8} & \textbf{61.1} & \textbf{52.8} & \textbf{51.0} & 41.5 & \textbf{50.0} & \textbf{45.5} & 43.3 & \textbf{96.9} \\
+  Ours & Delulu & 47.6$\pm$3.6 & \textbf{61.6$\pm$0.6} & \textbf{52.3$\pm$1.0} & \textbf{50.2$\pm$1.2} & 42.8$\pm$1.2 & \textbf{48.9$\pm$1.1} & 41.7$\pm$3.8 & 43.2$\pm$0.9 & \textbf{96.9$\pm$0.0} \\
   \midrule
   \multirow{3}{*}{\shortstack[c]{Oracle\\($M_B$)}} & DINOv3 & \textcolor{gray}{49.2} & \textcolor{gray}{57.6} & \textcolor{gray}{61.3} & \textcolor{gray}{49.2} & \textcolor{gray}{43.3} & \textcolor{gray}{39.9} & \textcolor{gray}{45.1} & \textcolor{gray}{43.3} & \textcolor{gray}{90.7} \\
    & Panopticon & \textcolor{gray}{55.1} & \textcolor{gray}{61.4} & \textcolor{gray}{62.1} & \textcolor{gray}{55.1} & \textcolor{gray}{48.1} & \textcolor{gray}{48.5} & \textcolor{gray}{50.5} & \textcolor{gray}{48.1} & \textcolor{gray}{97.8} \\
@@ -30,7 +30,7 @@
   \midrule
   $f_0(M_A)$ & $f_0$ & 63.4 & 63.4 & 49.2 & 61.3 & 41.9 & 41.9 & 43.3 & 45.1 & 98.6 \\
   Baselines & MixMatch & 52.1$\pm$6.4 & 52.1$\pm$6.4 & 47.7$\pm$2.2 & 59.5$\pm$2.3 & 39.1$\pm$3.4 & 39.1$\pm$3.4 & 35.4$\pm$2.8 & 40.1$\pm$3.7 & \textbf{99.0$\pm$0.1} \\
-  Ours & Delulu & \textbf{65.2} & \textbf{67.3} & \textbf{51.2} & \textbf{63.7} & \textbf{47.0} & \textbf{47.7} & \textbf{45.3} & \textbf{45.6} & 98.8 \\
+  Ours & Delulu & \textbf{66.2$\pm$1.0} & \textbf{66.7$\pm$0.9} & \textbf{51.1$\pm$0.3} & \textbf{63.5$\pm$0.2} & \textbf{43.9$\pm$2.7} & \textbf{47.5$\pm$2.8} & \textbf{45.1$\pm$0.3} & \textbf{46.2$\pm$1.0} & 98.8$\pm$0.1 \\
   \midrule
   \multirow{2}{*}{\shortstack[c]{Oracle\\($M_A$)}} & Panopticon & \textcolor{gray}{60.0} & \textcolor{gray}{60.0} & \textcolor{gray}{55.1} & \textcolor{gray}{62.1} & \textcolor{gray}{45.5} & \textcolor{gray}{45.5} & \textcolor{gray}{48.1} & \textcolor{gray}{50.5} & \textcolor{gray}{98.4} \\
    & OlmoEarth & \textcolor{gray}{59.7} & \textcolor{gray}{59.7} & \textcolor{gray}{54.1} & \textcolor{gray}{65.1} & \textcolor{gray}{49.7} & \textcolor{gray}{49.7} & \textcolor{gray}{47.4} & \textcolor{gray}{52.1} & \textcolor{gray}{97.7} \\
@@ -49,7 +49,7 @@
   \midrule
   $f_0(M_A)$ & $f_0$ & 63.4 & 63.4 & 49.2 & 61.3 & 41.9 & 41.9 & 43.3 & 45.1 & 98.6 \\
   Baselines & MKE & 62.2$\pm$0.6 & 61.9$\pm$0.1 & 49.3$\pm$0.5 & 60.6$\pm$0.5 & 47.6$\pm$1.5 & 50.7$\pm$1.1 & 44.3$\pm$1.7 & 39.4$\pm$0.9 & 97.5$\pm$0.9 \\
-  Ours & Delulu & \textbf{64.3} & \textbf{64.4} & \textbf{55.3} & \textbf{63.2} & \textbf{51.3} & \textbf{50.9} & \textbf{47.8} & \textbf{51.7} & \textbf{98.8} \\
+  Ours & Delulu & \textbf{64.3$\pm$0.4} & \textbf{64.8$\pm$0.4} & \textbf{54.7$\pm$0.9} & \textbf{63.5$\pm$0.5} & \textbf{48.8$\pm$2.4} & \textbf{50.8$\pm$0.2} & \textbf{46.4$\pm$1.6} & \textbf{48.2$\pm$3.0} & \textbf{98.8$\pm$0.0} \\
   \midrule
   \multirow{3}{*}{\shortstack[c]{Oracle\\($M_A$+$M_B$)}} & DINOv3 & \textcolor{gray}{63.5} & \textcolor{gray}{63.7} & \textcolor{gray}{61.5} & \textcolor{gray}{61.5} & \textcolor{gray}{45.0} & \textcolor{gray}{49.5} & \textcolor{gray}{39.4} & \textcolor{gray}{39.4} & \textcolor{gray}{98.6} \\
    & Panopticon & \textcolor{gray}{63.4} & \textcolor{gray}{62.5} & \textcolor{gray}{63.4} & \textcolor{gray}{63.4} & \textcolor{gray}{52.3} & \textcolor{gray}{50.8} & \textcolor{gray}{52.3} & \textcolor{gray}{52.3} & \textcolor{gray}{98.7} \\

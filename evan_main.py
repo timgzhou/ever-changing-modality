@@ -1086,18 +1086,19 @@ class EVAN(nn.Module):
         q_patch = queries[:, 1:, :].expand(B, n_patches, -1).clone()  # [B, n_patches, D]
         return torch.cat([q_cls, q_patch], dim=1)                      # [B, 1+n_patches, D]
 
-    def _project_sequence(self, src_seq_norm: Tensor, key: str, tgt_mod: str, src_patch_mask=None) -> Tensor:
+    def _project_sequence(self, src_seq: Tensor, key: str, tgt_mod: str, src_patch_mask=None) -> Tensor:
         """Call the intermediate projector for (src→tgt), dispatching by projector type."""
+        # src_seq = F.layer_norm(src_seq, [src_seq.shape[-1]])
         projector = self.intermediate_projectors[key]
         if self.intermediate_projector_type == "cross":
             return projector(
-                src_seq_norm,
+                src_seq,
                 queries=self.projector_queries[tgt_mod],
                 rope_embed=self.rope_embed,
                 src_patch_mask=src_patch_mask,
             )
         else:
-            return projector(src_seq_norm)
+            return projector(src_seq)
 
     def forward_features_with_pseudo_modality(
         self,
@@ -1126,9 +1127,8 @@ class EVAN(nn.Module):
             projected_seqs = []
             for avail_mod in available_modalities:
                 avail_seq = embedded[avail_mod]
-                avail_seq_norm = F.layer_norm(avail_seq, [avail_seq.shape[-1]])
                 key = f"{avail_mod}_to_{mod}"
-                projected_seqs.append(self._project_sequence(avail_seq_norm, key, mod))
+                projected_seqs.append(self._project_sequence(avail_seq, key, mod))
             embedded[mod] = torch.stack(projected_seqs).mean(dim=0)
 
         # Step 3: Forward through fusion (modality encoding added here)
@@ -1452,10 +1452,7 @@ def hallucinate_intermediate_features(
     hallucinated = {}
     for tar_mod in target_modalities:
         projected_seqs = [
-            evan._project_sequence(
-                F.layer_norm(source_intermediate[src_mod], [source_intermediate[src_mod].shape[-1]]),
-                f"{src_mod}_to_{tar_mod}", tar_mod,
-            )
+            evan._project_sequence(source_intermediate[src_mod], f"{src_mod}_to_{tar_mod}", tar_mod)
             for src_mod in source_modalities if src_mod != tar_mod
         ]
         hallucinated[tar_mod] = torch.stack(projected_seqs).mean(dim=0)
@@ -1549,16 +1546,13 @@ class EvanPredictor(nn.Module):
                 else:
                     raise RuntimeError(f"'{modality}' not in modality_heads")
 
+    def get_modality_logits(self, fused: dict, mod: str) -> torch.Tensor:
+        """Return logits for a single modality from fused features. Implemented by subclasses."""
+        raise NotImplementedError
+
     def _soft_vote(self, fused_output: dict, modalities) -> torch.Tensor:
         """Average logits across per-modality heads. Returns [B,C] or [B,C,H,W]."""
-        is_segmenter = hasattr(self, 'decoder_strategy')
-        logits_list = []
-        for mod in sorted(modalities):
-            if is_segmenter:
-                logits_list.append(self._apply_decoder(self.modality_decoders[mod], fused_output[mod]['x_norm_patchtokens']))
-            else:
-                logits_list.append(self.modality_classifiers[mod](fused_output[mod]['x_norm_clstoken']))
-        return torch.stack(logits_list).mean(dim=0)
+        return torch.stack([self.get_modality_logits(fused_output, mod) for mod in sorted(modalities)]).mean(dim=0)
 
     def predict_from_real_modalities(
         self,
@@ -1672,6 +1666,9 @@ class EVANClassifier(EvanPredictor):
     # Keep old name as alias so external callers (shot.py) continue to work
     def instantiate_modality_classifier(self, modality_key: str):
         return self.instantiate_modality_head(modality_key)
+
+    def get_modality_logits(self, fused: dict, mod: str) -> torch.Tensor:
+        return self.modality_heads[mod](fused[mod]['x_norm_clstoken'])
 
     def classify_from_features(self, features_dict):
         """
@@ -1945,6 +1942,9 @@ class EvanSegmenter(EvanPredictor):
     # Keep old name as alias so external callers (shot.py) continue to work
     def instantiate_modality_decoder(self, modality_key: str):
         return self.instantiate_modality_head(modality_key)
+
+    def get_modality_logits(self, fused: dict, mod: str) -> torch.Tensor:
+        return self._apply_decoder(self.modality_heads[mod], fused[mod]['x_norm_patchtokens'])
 
     def segment_from_features(self, features_dict: dict) -> torch.Tensor:
         """

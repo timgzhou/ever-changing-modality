@@ -296,14 +296,27 @@ python -u shot_ete.py \
     --dataset benv2 \
     --new_mod_group s1 \
     --stage0_checkpoint checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt \
-    --epochs 32 \
-    --eval_every_n_epochs 8 \
+    --epochs 16 \
+    --eval_every_n_epochs 2 \
     --batch_size 32 \
     --results_csv res/shot_ete_benv2.csv \
     --active_losses latent prefusion distill ce \
     --labeled_frequency 0.3 \
     --latent_masked_only \
-    --save_checkpoint \
+    --lambda_latent 0.1 \
+    --labeled_start_fraction 0
+    
+python -u shot_ete.py \
+    --dataset benv2 \
+    --new_mod_group s2 \
+    --stage0_checkpoint checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt \
+    --epochs 32 \
+    --eval_every_n_epochs 2 \
+    --batch_size 32 \
+    --results_csv res/shot_ete_benv2.csv \
+    --active_losses latent prefusion distill ce \
+    --labeled_frequency 0.3 \
+    --latent_masked_only \
     --lambda_latent 0.1 \
     --labeled_start_fraction 0
 """

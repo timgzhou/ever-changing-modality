@@ -146,12 +146,10 @@ def main():
             seq_b = embedded[mod_b]
 
             # Hallucinate A from B
-            seq_b_norm = F.layer_norm(seq_b, [seq_b.shape[-1]])
-            hal_a = evan._project_sequence(seq_b_norm, f'{mod_b}_to_{mod_a}', mod_a)  # [B, 1+N, D]
+            hal_a = evan._project_sequence(seq_b, f'{mod_b}_to_{mod_a}', mod_a)  # [B, 1+N, D]
 
             # Hallucinate B from A
-            seq_a_norm = F.layer_norm(seq_a, [seq_a.shape[-1]])
-            hal_b = evan._project_sequence(seq_a_norm, f'{mod_a}_to_{mod_b}', mod_b)  # [B, 1+N, D]
+            hal_b = evan._project_sequence(seq_a, f'{mod_a}_to_{mod_b}', mod_b)  # [B, 1+N, D]
 
             # Patch tokens (skip CLS + storage for real; skip CLS for hallucinated cross)
             pa  = seq_a[:, 1 + n_storage:, :].float()   # [B, N, D]
