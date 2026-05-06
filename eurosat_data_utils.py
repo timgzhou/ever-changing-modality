@@ -70,7 +70,7 @@ MODALITY_BANDS = {
     'swir': SWIR_BAND_NAMES,
     'aw': AW_BAND_NAMES,
     's2_norgb': ('B01', 'B02', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B10', 'B11', 'B12'),
-    's2_rgb':  RGB_BAND_NAMES,
+    's2_rgb':  RGB_BAND_NAMES, # aliases for code compatibility
     's2_vre':  VRE_BAND_NAMES,
     's2_nir':  NIR_BAND_NAMES,
     's2_swir': SWIR_BAND_NAMES,
@@ -79,16 +79,8 @@ MODALITY_BANDS = {
 
 def get_modality_bands_dict(*modality_keys):
     """
-    Get a dictionary of modality keys to their band tuples.
-
-    Args:
-        *modality_keys: Variable number of modality keys (e.g., 'rgb', 'vre', 'nir', 'swir')
-
-    Returns:
-        Dict mapping modality keys to tuples of band names
-
     Example:
-        >>> get_modality_bands_dict('rgb', 'vre')
+        get_modality_bands_dict('rgb', 'vre')
         {'rgb': ('B04', 'B03', 'B02'), 'vre': ('B05', 'B06', 'B07')}
     """
     return {key: tuple(MODALITY_BANDS[key]) for key in modality_keys}
@@ -120,12 +112,12 @@ BAND_WAVELENGTHS = {
     'B05': 704,    # VRE 1
     'B06': 740,    # VRE 2
     'B07': 782,    # VRE 3
-    'B08': 827,    # NIR
+    'B08': 842,    # NIR
     'B8A': 864,    # NIR (narrow)
     'B09': 945,    # Water Vapour
-    'B10': 1613,   # SWIR 1
-    'B11': 2203,   # SWIR 2
-    'B12': None,   # SWIR 3 (not in Panopticon's standard list, use 2400 as approximation)
+    'B10': 1375,   # SWIR 1
+    'B11': 1610,   # SWIR 2
+    'B12': 2190,
 }
 
 # Per-band min/max statistics for normalization
@@ -191,10 +183,7 @@ def get_band_wavelengths(band_names):
     for band in band_names:
         wl = BAND_WAVELENGTHS.get(band)
         if wl is None:
-            if band == 'B12':
-                wl = 2400  # Approximation for SWIR 3
-            else:
-                raise ValueError(f"Unknown band: {band}")
+            raise ValueError(f"Unknown band: {band}")
         wavelengths.append(wl)
     return wavelengths
 

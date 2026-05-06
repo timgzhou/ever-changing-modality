@@ -88,6 +88,8 @@ def _fmt_meanstd(val, decimals=1):
     return f'{mean:.{decimals}f}±{std:.{decimals}f}'
 
 
+DELULU_CSV = 'res/delulu/hptuned_may5.csv'  # overridden by --apr21 flag
+
 # ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
@@ -109,15 +111,54 @@ def _load_distillation(dataset, arch):
 
 
 def _load_delulu(dataset, arch, val_col, test_col):
-    df = _read_csv('res/delulu/hptuned_apr21.csv')
+    # old col name → new col name (may5 format)
+    COL_MAP = {
+        'valchecked_transfer':     'test_transfer',
+        'valchecked_peek':         'test_peeking',
+        'valchecked_add':          'test_addition',
+        'valchecked_add_ens':      'test_ens_addition',
+        'valchecked_val_transfer': 'val_transfer',
+        'valchecked_val_peek':     'val_peeking',
+        'valchecked_val_add':      'val_addition',
+        'valchecked_val_add_ens':  'val_ens_addition',
+    }
+    SELECT_MAP = {
+        'val_transfer':     'transfer',
+        'val_peeking':      'peeking',
+        'val_addition':     'addition',
+        'val_ens_addition': 'addition',
+    }
+    norm_val  = COL_MAP.get(val_col,  val_col)
+    norm_test = COL_MAP.get(test_col, test_col)
+
+    df = _read_csv(DELULU_CSV)
     if df is None:
         return {}
-    df = df[(df['dataset'] == dataset) & (df['model_arch'] == arch)]
-    df[test_col] = pd.to_numeric(df[test_col], errors='coerce')
-    df[val_col]  = pd.to_numeric(df[val_col],  errors='coerce')
+
+    df = df[df['dataset'] == dataset]
+
+    # apr21 has model_arch; may5 does not (all evan_base)
+    if 'model_arch' in df.columns:
+        df = df[df['model_arch'] == arch]
+
+    # apr21 uses old col names; remap if needed
+    if val_col in df.columns:
+        df = df.rename(columns={val_col: norm_val, test_col: norm_test})
+
+    if norm_val not in df.columns or norm_test not in df.columns:
+        return {}
+
+    # may5: filter by select_by when present
+    if 'select_by' in df.columns and df['select_by'].notna().any():
+        sel = SELECT_MAP.get(norm_val)
+        if sel is not None:
+            df = df[df['select_by'] == sel]
+
+    df[norm_test] = pd.to_numeric(df[norm_test], errors='coerce')
+    df[norm_val]  = pd.to_numeric(df[norm_val],  errors='coerce')
     result = {}
     for (start, new), grp in df.groupby(['starting_modality', 'new_modality']):
-        top3 = grp.nlargest(3, val_col)[test_col]
+        top3 = grp.nlargest(3, norm_val)[norm_test]
         result[(start, new)] = (top3.mean(), top3.std())
     return result
 
@@ -866,7 +907,13 @@ def main():
                         help='Wide layout: transfers as columns, methods as rows (default is tall)')
     parser.add_argument('--arch', choices=['B', 'L', 'BL'], default='B',
                         help='Which architecture columns to include (B, L, or BL)')
+    parser.add_argument('--apr21', action='store_true',
+                        help='Use hptuned_apr21.csv instead of hptuned_may5.csv')
     args = parser.parse_args()
+
+    global DELULU_CSV
+    if args.apr21:
+        DELULU_CSV = 'res/delulu/hptuned_apr21.csv'
 
     # ---- collect dataframes ----
     transfer_frames, peek_frames, addition_frames = [], [], []

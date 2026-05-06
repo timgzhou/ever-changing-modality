@@ -29,11 +29,11 @@ for LR in 1e-3 3e-4; do
 
         # Skip if this exact combo already exists in the CSV
         # Columns: 1=model_type, 3=student_modality, 7=learning_rate, 10=temperature, 13=kl_type
-        if [ -f "$RESULTS_CSV" ] && awk -F, -v m="$MODEL" -v s="$NEW_MOD" -v lr="$LR" -v temp="$TEMP" -v kl="$KL_TYPE" \
-            'NR>1 && $1==m && $3==s && $7==lr && $10==temp && $13==kl {found=1; exit} END {exit !found}' "$RESULTS_CSV"; then
-            echo "  [skip] already in CSV"
-            continue
-        fi
+        # if [ -f "$RESULTS_CSV" ] && awk -F, -v m="$MODEL" -v s="$NEW_MOD" -v lr="$LR" -v temp="$TEMP" -v kl="$KL_TYPE" \
+        #     'NR>1 && $1==m && $3==s && $7==lr && $10==temp && $13==kl {found=1; exit} END {exit !found}' "$RESULTS_CSV"; then
+        #     echo "  [skip] already in CSV"
+        #     continue
+        # fi
 
         python -u baseline/baseline_distillation.py \
             --dataset "$DATASET" \

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=8:00:00
+#SBATCH --time=3:00:00
 #SBATCH --account=aip-gpleiss
 #SBATCH --output=logs/shot_ete/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com
@@ -38,6 +38,7 @@ LS=$(echo "$ENTRY"           | jq -r '.labeled_start_fraction')
 LL=$(echo "$ENTRY"           | jq -r '.lambda_latent')
 LP=$(echo "$ENTRY"           | jq -r '.lambda_prefusion')
 LD=$(echo "$ENTRY"           | jq -r '.lambda_distill')
+MR=$(echo "$ENTRY"           | jq -r '.mae_mask_ratio')
 LATENT_MASKED_ONLY=$(echo "$ENTRY" | jq -r '.latent_masked_only')
 PROTECT_LRM=$(echo "$ENTRY"  | jq -r '.protect_lrm')
 USE_MASK_TOKEN=$(echo "$ENTRY" | jq -r '.use_mask_token')
@@ -65,10 +66,12 @@ python -u shot_ete.py \
     --lambda_latent "$LL" \
     --lambda_prefusion "$LP" \
     --lambda_distill "$LD" \
+    --token_mask_ratio "$MR" \
     $LATENT_MASKED_ONLY_FLAG \
     $PROTECT_LRM_FLAG \
     $USE_MASK_TOKEN_FLAG \
     --active_losses latent prefusion distill ce \
+    --select_by "$SELECT_BY" \
     --results_csv "$RESULTS_CSV" \
     --batch_size 32 \
     --num_workers 4

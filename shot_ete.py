@@ -52,6 +52,10 @@ def _parse_args():
                              'to be easier to predict.')
     parser.add_argument('--latent_masked_only', action='store_true',
                         help='Only compute latent loss on masked patch positions (not unmasked ones).')
+    parser.add_argument('--unprotect_starting_mod', action='store_true',
+                        help='Do not protect new modalities from full dropout on unlabeled data even when '
+                             'batch mixing is active. By default (False), new modalities are protected '
+                             'from full dropout when effective_labeled_freq > 0.')
     parser.add_argument('--dyn_teacher', action='store_true',
                         help='Dynamic teacher distillation: starting_modality head trains against '
                              'student peeking (soft-vote), newmod heads train against frozen unimodal teacher')
@@ -60,6 +64,9 @@ def _parse_args():
 
     parser.add_argument('--results_csv', type=str, required=True,
                         help='Path to results CSV file')
+    parser.add_argument('--select_by', type=str, default=None,
+                        help='HP selection criterion used to pick this config (transfer/peeking/addition). '
+                             'Informational only — logged to CSV if provided.')
     parser.add_argument('--intermediate_projector_num_layers', type=int, default=2,
                         help='Number of layers in intermediate projector (default: 2)')
 
@@ -182,6 +189,7 @@ def main(args=None):
         use_mask_token=args.use_mask_token,
         protect_lrm=args.protect_lrm,
         latent_masked_only=args.latent_masked_only,
+        unprotect_starting_mod=args.unprotect_starting_mod,
         task_type=task_config.task_type,
         label_key=task_config.label_key,
         num_classes=task_config.num_classes,
@@ -234,9 +242,9 @@ def main(args=None):
         "teacher_test_metric",
         "lr", "asym_lr", "weight_decay", "epochs",
         "modality_dropout", "labeled_frequency", "labeled_start_fraction",
-        "protect_lrm", "use_mask_token", "latent_masked_only",
-        "lambda_latent", "lambda_prefusion", "lambda_distill",
-        "trainable_params", "active_losses",
+        "protect_lrm", "use_mask_token", "latent_masked_only", "unprotect_starting_mod",
+        "lambda_latent", "lambda_prefusion", "lambda_distill", "mae_mask_ratio",
+        "trainable_params", "active_losses", "select_by",
         "val_transfer", "test_transfer",
         "val_peeking", "test_peeking",
         "val_addition", "test_addition",
@@ -265,11 +273,14 @@ def main(args=None):
             args.protect_lrm,
             args.use_mask_token,
             args.latent_masked_only,
+            args.unprotect_starting_mod,
             args.lambda_latent,
             args.lambda_prefusion,
             args.lambda_distill,
+            args.token_mask_ratio,
             trainable_total,
             active_losses_str,
+            args.select_by or "",
             f"{val_transfer:.2f}" if val_transfer is not None else "",
             f"{test_transfer:.2f}" if test_transfer is not None else "",
             f"{val_peeking:.2f}" if val_peeking is not None else "",
@@ -310,13 +321,21 @@ python -u shot_ete.py \
     --dataset benv2 \
     --new_mod_group s2 \
     --stage0_checkpoint checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt \
+    --lr 0.0004 \
+    --weight_decay 0.0025 \
+    --labeled_frequency 0.015 \
     --epochs 32 \
     --eval_every_n_epochs 2 \
     --batch_size 32 \
     --results_csv res/shot_ete_benv2.csv \
     --active_losses latent prefusion distill ce \
-    --labeled_frequency 0.3 \
+    --modality_dropout 0.3 \
+    --labeled_frequency 0.17 \
     --latent_masked_only \
-    --lambda_latent 0.1 \
-    --labeled_start_fraction 0
+    --labeled_start_fraction 0 \
+    --lambda_latent 0.1267 \
+    --lambda_prefusion 0.37 \
+    --lambda_distill 0.73 \
+    --mae_mask_ratio 0.413 \
+    --unprotect_starting_mod
 """

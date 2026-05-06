@@ -3,7 +3,7 @@
 # Usage: bash sh/shot_ete_sweep.sh
 
 TEACHERS_JSON="artifacts/sft_teachers.json"
-RESULTS_CSV="res/delulu/hptuned_may5.csv"
+RESULTS_CSV="res/delulu/hptuned_may5_sl.csv"
 
 # Hardcoded pairs: "dataset start_mod new_mod"
 PAIRS=(

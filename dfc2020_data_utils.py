@@ -184,10 +184,10 @@ def get_dfc2020_loaders(
         's1':      slice(13, 15),
         's2_rgb':   [3, 2, 1],                          # B4, B3, B2
         's2_norgb': [0, 4, 5, 6, 7, 8, 9, 10, 11, 12], # B1, B5-B12 (10 bands)
-        's2_vre':   slice(4, 7),                        # B5, B6, B7
-        's2_nir':   slice(7, 9),                        # B8, B8A
-        's2_swir':  slice(10, 13),                      # B10, B11, B12
-        's2_aw':    [0, 9],                             # B1, B9
+        # 's2_vre':   slice(4, 7),                        # B5, B6, B7
+        # 's2_nir':   slice(7, 9),                        # B8, B8A
+        # 's2_swir':  slice(10, 13),                      # B10, B11, B12
+        # 's2_aw':    [0, 9],                             # B1, B9
     }
     
     assert starting_modality in modality_bands_dict, \

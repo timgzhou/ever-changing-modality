@@ -426,6 +426,7 @@ def _unlabeled_batch_step(
     use_mask_token: bool = False,
     protect_lrm: bool = False,
     latent_masked_only: bool = False,
+    unprotect_starting_mod: bool = False,
 ):
     """Process one unlabeled (multimodal) batch. Returns (total_loss, loss_dict)."""
     evan = model.evan
@@ -445,7 +446,7 @@ def _unlabeled_batch_step(
     modality_masks, masked_mod_features, modality_dropped, prefusion_loss = mask_input(
         evan, batch_size, num_patches,
         token_mask_ratio, all_modalities, prefusion_features, modality_dropout, device,
-        protected_modalities=newmod_list if effective_labeled_freq > 0 else None,
+        protected_modalities=newmod_list if (effective_labeled_freq > 0 and not unprotect_starting_mod) else None,
         active_losses=active_losses,
         latent_reconstruct_modalities=latent_reconstruct_modalities,
         use_mask_token=use_mask_token,
@@ -699,6 +700,7 @@ def train_shot(
     use_mask_token: bool = False,
     protect_lrm: bool = False,
     latent_masked_only: bool = False,
+    unprotect_starting_mod: bool = False,
     agree_ref: str = 'teacher',              # 'teacher' (default) or 'peeking'
 ):
     """
@@ -923,6 +925,7 @@ def train_shot(
                     use_mask_token=use_mask_token,
                     protect_lrm=protect_lrm,
                     latent_masked_only=latent_masked_only,
+                    unprotect_starting_mod=unprotect_starting_mod,
                 )
                 unlabeled_count += 1
 

@@ -22,7 +22,7 @@ K        = 0.2   # fraction of top runs to keep per config (by val score); 1.0 =
 TRIM     = 0   # number of top+bottom points to trim per config (by test metric); 0 = no trim
 
 DATASET_CFG = {
-    "benv2":   {"csv": "res/delulu-sweep/sweep_results_benv2_final.csv",   "metric_label": "mAP"},
+    "benv2":   {"csv": "res/delulu-sweep/sweep_results_benv2_final_backfilled.csv",   "metric_label": "mAP"},
     "dfc2020": {"csv": "res/delulu-sweep/sweep_results_dfc2020_final.csv", "metric_label": "mIoU"},
 }
 
@@ -261,7 +261,7 @@ HPARAM_COLS = [
     "lr", "asym_lr", "weight_decay", "epochs",
     "modality_dropout", "labeled_frequency", "labeled_start_fraction",
     "protect_lrm", "use_mask_token", "latent_masked_only",
-    "lambda_latent", "lambda_prefusion", "lambda_distill",
+    "lambda_latent", "lambda_prefusion", "lambda_distill", "mae_mask_ratio",
     "active_losses", "stage0_checkpoint",
 ]
 
@@ -282,7 +282,7 @@ def row_to_hparams(row):
         elif isinstance(val, (bool, np.bool_)):
             out[col] = bool(val)
         elif isinstance(val, float):
-            out[col] = float(f"{val:.2g}")
+            out[col] = float(val)
         elif isinstance(val, (int, np.integer)):
             out[col] = int(val)
         else:
