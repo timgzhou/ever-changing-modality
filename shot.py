@@ -75,7 +75,7 @@ def mask_input(evan, batch_size, num_patches, token_mask_ratio, all_modalities, 
 
     drop_candidates = [
         mod for mod in all_modalities
-        if np.random.rand() < modality_dropout
+        if np.random.rand() < (modality_dropout[mod] if isinstance(modality_dropout, dict) else modality_dropout)
         and (protected_modalities is None or mod not in protected_modalities)
     ]
     if len(drop_candidates) == len(all_modalities):
@@ -698,7 +698,7 @@ def train_shot(
     asym_lr_multiplier: float | None = None,  # If set, new components get lr * asym_lr_multiplier
     dyn_teacher: bool = False,
     use_mask_token: bool = False,
-    protect_lrm: bool = False,
+    protect_lrm: float = 0.0,
     latent_masked_only: bool = False,
     unprotect_starting_mod: bool = False,
     agree_ref: str = 'teacher',              # 'teacher' (default) or 'peeking'
@@ -725,6 +725,7 @@ def train_shot(
 
     # Compute epoch at which labeled mixing starts
     batch_mising_start_epoch = int(args.epochs * labeled_start_fraction)
+    protect_lrm_end_epoch = int(args.epochs * protect_lrm)
 
     print("\n" + "="*70)
     print(f"=== END TO END Delulu TRAINING===\n")
@@ -888,6 +889,7 @@ def train_shot(
         latent_decoders.train()
 
         effective_labeled_freq = labeled_frequency if epoch >= batch_mising_start_epoch else 0.0
+        effective_protect_lrm = epoch < protect_lrm_end_epoch
 
         epoch_losses = {'total': 0.0, 'latent': 0.0, 'prefusion': 0.0, 'distill': 0.0, 'ce': 0.0}
         train_count = labeled_count = unlabeled_count = 0
@@ -918,12 +920,16 @@ def train_shot(
                     batch, model, unimodal_teacher, latent_decoders,
                     active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
                     latent_reconstruct_modalities, modality_bands_dict,
-                    args.token_mask_ratio, args.modality_dropout,
+                    args.token_mask_ratio, {
+                        mod: (args.modality_dropout_startmod if mod == starting_modality else args.modality_dropout_newmod)
+                             or args.modality_dropout
+                        for mod in all_modalities
+                    },
                     distillation_temperature,
                     effective_labeled_freq, task_type, device,
                     dyn_teacher=dyn_teacher,
                     use_mask_token=use_mask_token,
-                    protect_lrm=protect_lrm,
+                    protect_lrm=effective_protect_lrm,
                     latent_masked_only=latent_masked_only,
                     unprotect_starting_mod=unprotect_starting_mod,
                 )

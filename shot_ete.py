@@ -33,6 +33,12 @@ def _parse_args():
                         help='Ratio of tokens masked per modality during training (default: 0.75)')
     parser.add_argument('--modality_dropout', type=float, default=0.3,
                         help='Probability of fully masking a modality')
+    parser.add_argument('--modality_dropout_startmod', type=float, default=None,
+                        help='Modality dropout for starting modality. Overrides --modality_dropout '
+                             'for starting mod when set (default: None → use --modality_dropout).')
+    parser.add_argument('--modality_dropout_newmod', type=float, default=None,
+                        help='Modality dropout for new modality. Overrides --modality_dropout '
+                             'for new mod when set (default: None → use --modality_dropout).')
     parser.add_argument('--labeled_frequency', type=float, default=0.3,
                         help='Frequency of labeled monomodal batches from train1 (0-1, default: 0.3)')
     parser.add_argument('--labeled_start_fraction', type=float, default=0.5,
@@ -47,9 +53,10 @@ def _parse_args():
     parser.add_argument('--use_mask_token', action='store_true',
                         help='Ablation: replace intermediate projectors with broadcast learned mask token '
                              '(projector_queries). Incompatible with --active_losses prefusion.')
-    parser.add_argument('--protect_lrm', action='store_true',
-                        help='Detach LRM modality features in prefusion loss so its encoder is not updated '
-                             'to be easier to predict.')
+    parser.add_argument('--protect_lrm', type=float, default=0.0,
+                        help='Fraction of training to protect LRM (startmod) encoder from prefusion loss '
+                             'by detaching its features. 0.0=never protect (default), 1.0=always protect, '
+                             '0.5=protect first half then release.')
     parser.add_argument('--latent_masked_only', action='store_true',
                         help='Only compute latent loss on masked patch positions (not unmasked ones).')
     parser.add_argument('--unprotect_starting_mod', action='store_true',
@@ -241,7 +248,8 @@ def main(args=None):
         "wandb_run_id", "wandb_project", "dataset", "starting_modality", "new_modality",
         "teacher_test_metric",
         "lr", "asym_lr", "weight_decay", "epochs",
-        "modality_dropout", "labeled_frequency", "labeled_start_fraction",
+        "modality_dropout", "modality_dropout_startmod", "modality_dropout_newmod",
+        "labeled_frequency", "labeled_start_fraction",
         "protect_lrm", "use_mask_token", "latent_masked_only", "unprotect_starting_mod",
         "lambda_latent", "lambda_prefusion", "lambda_distill", "mae_mask_ratio",
         "trainable_params", "active_losses", "select_by",
@@ -268,6 +276,8 @@ def main(args=None):
             args.weight_decay,
             args.epochs,
             args.modality_dropout,
+            args.modality_dropout_startmod,
+            args.modality_dropout_newmod,
             args.labeled_frequency,
             args.labeled_start_fraction,
             args.protect_lrm,
@@ -323,7 +333,6 @@ python -u shot_ete.py \
     --stage0_checkpoint checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt \
     --lr 0.0004 \
     --weight_decay 0.0025 \
-    --labeled_frequency 0.015 \
     --epochs 32 \
     --eval_every_n_epochs 2 \
     --batch_size 32 \
