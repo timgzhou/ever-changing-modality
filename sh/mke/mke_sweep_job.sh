@@ -30,13 +30,6 @@ STUDENT_CSV="${STUDENT_CSV// /+}"  # "s2 s1" -> "s2+s1"
 
 for LR in 1e-3 3e-4 1e-4; do
     for WD in 1e-2 1e-5; do
-        if [ -f "$RESULTS_CSV" ] && awk -F',' -v m="$MODEL" -v tm="$TEACHER_MOD" -v sm="$STUDENT_CSV" \
-            -v lr="$LR" -v wd="$WD" \
-            'NR>1 && $1==m && $2==tm && $3==sm && $7==lr && $8==wd {found=1; exit} END {exit !found}' \
-            "$RESULTS_CSV"; then
-            echo "[skip] already exists: model=${MODEL} teacher=${TEACHER_MOD} student=${STUDENT_CSV} lr=${LR} wd=${WD}"
-            continue
-        fi
         echo "--- lr=${LR} wd=${WD} ---"
         python -u baseline/baseline_mke.py \
             --dataset "$DATASET" \

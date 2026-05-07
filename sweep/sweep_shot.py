@@ -54,9 +54,14 @@ def main():
 
     # ── Swept discrete flags — W&B passes these as "True"/"False" strings ────
     _bool = lambda x: x.lower() == 'true'
-    parser.add_argument('--protect_lrm', type=_bool, default=False)
+    parser.add_argument('--protect_lrm', type=float, default=0.0)
     parser.add_argument('--use_mask_token', type=_bool, default=False)
     parser.add_argument('--latent_masked_only', type=_bool, default=False)
+    parser.add_argument('--unprotect_starting_mod', type=_bool, default=False)
+
+    # ── Per-modality dropout overrides ───────────────────────────────────────
+    parser.add_argument('--modality_dropout_startmod', type=float, default=None)
+    parser.add_argument('--modality_dropout_newmod', type=float, default=None)
 
     # ── active_losses — W&B injects repeated flags: --active_losses X --active_losses Y
     parser.add_argument('--active_losses', type=str, action='append', required=True,
@@ -68,6 +73,7 @@ def main():
     args.dyn_teacher = False
     args.checkpoint_name = None
     args.save_checkpoint = False
+    args.select_by = None
 
     shot_ete.main(args)
 

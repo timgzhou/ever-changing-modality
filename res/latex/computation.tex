@@ -4,18 +4,18 @@
 \label{tab:computation}
 \begin{tabular}{cccccc}
 \toprule
-Model & Modality & Params (M) & GMACs & Batch Size & Throughput \\
+Model & Modality & Params (M) & GMACs & Max Batch Size & Throughput \\
 \midrule
-\multirow{2}{*}{DINOv3} & s1 & 85.5 & 6.0 & 8192 & 1822 \\
- & s2 & 87.4 & 6.1 & 8192 & 1770 \\
+\multirow{2}{*}{DINOv3} & s1 (2) & 85.5 & 6.0 & 8192 & 1759 \\
+ & s2 (12) & 87.4 & 6.1 & 8192 & 1719 \\
 \midrule
-\multirow{3}{*}{DeluluNet} & s1 & 113.9 & 11.3 & 4096 & 973 \\
- & s2 & 115.8 & 11.4 & 4096 & 962 \\
- & s1+s2 & 109.1 & 12.2 & 4096 & 898 \\
+\multirow{3}{*}{DeluluNet} & s1 (2) & 113.9 & 11.3 & 4096 & 959 \\
+ & s2 (12) & 115.8 & 11.4 & 4096 & 952 \\
+ & s1+s2 (14) & 109.1 & 12.2 & 4096 & 877 \\
 \midrule
-\multirow{3}{*}{Panopticon} & s1 & 99.0 & 9.0 & 4096 & 1307 \\
- & s2 & 99.0 & 18.0 & 512 & 679 \\
- & s1+s2 & 99.0 & 19.8 & 512 & 621 \\
+\multirow{3}{*}{Panopticon} & s1 (2) & 99.0 & 9.0 & 4096 & 1261 \\
+ & s2 (12) & 99.0 & 18.0 & 512 & 660 \\
+ & s1+s2 (14) & 99.0 & 19.8 & 512 & 607 \\
 \bottomrule
 \end{tabular}
 \end{table}

@@ -16,26 +16,25 @@ TEACHERS_JSON="artifacts/sft_teachers.json"
 # Per-teacher companion modalities (space-separated).
 # Student = teacher + non-empty subset of companions.
 declare -A COMPANIONS
-# COMPANIONS['benv2/s2']='s1'
-# COMPANIONS['benv2/s1']='s2'
-# COMPANIONS['benv2/s2_rgb']='s2_norgb s1'
-# COMPANIONS['dfc2020/s2']='s1'
-# COMPANIONS['dfc2020/s1']='s2'
-# COMPANIONS['dfc2020/s2_rgb']='s2_norgb s1'
-# COMPANIONS['eurosat/rgb']='s2_norgb'
-COMPANIONS['eurosat/rgb']='nir vre swir'
-# COMPANIONS['eurosat/swir']='vre rgb nir'
-COMPANIONS['eurosat/vre']='nir rgb'
-COMPANIONS['eurosat/swir']='nir'
+COMPANIONS['benv2/s2']='s1'
+COMPANIONS['benv2/s1']='s2'
+COMPANIONS['benv2/s2_rgb']='s2_norgb s1'
+COMPANIONS['dfc2020/s2']='s1'
+COMPANIONS['dfc2020/s1']='s2'
+COMPANIONS['dfc2020/s2_rgb']='s2_norgb s1'
+# COMPANIONS['eurosat/rgb']='nir vre swir'
+# COMPANIONS['eurosat/vre']='nir rgb'
+# COMPANIONS['eurosat/swir']='nir'
+COMPANIONS['eurosat/nir']='rgb vre'
 
 declare -A TEACHER_MODS
 TEACHER_MODS['benv2']='s2 s1 s2_rgb'
 TEACHER_MODS['dfc2020']='s2 s1 s2_rgb'
-# TEACHER_MODS['eurosat']='rgb swir vre'
-TEACHER_MODS['eurosat']='rgb'
+# TEACHER_MODS['eurosat']='rgb'
+TEACHER_MODS['eurosat']='nir'
 
 DATASETS=('benv2' 'dfc2020' 'eurosat')
-MODELS=('evan_large')
+MODELS=('evan_base')
 
 mkdir -p logs/mke
 

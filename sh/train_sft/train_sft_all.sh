@@ -14,14 +14,13 @@ declare -A MODALITY_CONFIGS
 # MODALITY_CONFIGS['benv2']='s2_norgb s2_rgb+s1 s2_rgb+s2_norgb s1+s2 s2+s1'
 # MODALITY_CONFIGS['dfc2020']='s2_norgb s2_rgb+s1 s2_rgb+s2_norgb s1+s2 s2+s1'
 
-MODALITY_CONFIGS['eurosat']='rgb+nir rgb+vre rgb+swir'
+MODALITY_CONFIGS['eurosat']='vre+nir'
 MODALITY_CONFIGS['benv2']='s2_norgb s2 s2_rgb+s1 s2_rgb+s2_norgb'
 MODALITY_CONFIGS['dfc2020']='s2_norgb s2_rgb+s1 s2_rgb+s2_norgb'
 
-# DATASETS=('eurosat' 'benv2' 'dfc2020')
-# MODELS=('evan_small' 'evan_large' 'evan_base' )
+
 DATASETS=('eurosat')
-MODELS=('evan_large')
+MODELS=('evan_base')
 TRAIN_MODES=('fft')
 LRS=('0.0005' '0.0001')
 WDS=('0.01' '0.0')

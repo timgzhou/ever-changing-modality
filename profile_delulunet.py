@@ -108,6 +108,15 @@ class AdditionWrapper(nn.Module):
 # Parameter counting helpers (DeluluNet only)
 # --------------------------------------------------------------------------- #
 
+def model_param_bytes(model):
+    seen, total = set(), 0
+    for p in model.parameters():
+        if id(p) not in seen:
+            seen.add(id(p))
+            total += p.numel() * p.element_size()
+    return total
+
+
 def count_params_unique(modules_and_params):
     seen, total = set(), 0
     for item in modules_and_params:
@@ -269,6 +278,29 @@ def _save_bs_cache(cache):
         json.dump(cache, f, indent=2)
 
 
+def measure_peak_memory_per_sample(fn, make_inputs_fn, device, n_warmup=5, param_bytes=0):
+    """Return (peak_mib, nonweight_mib) for a single forward pass (B=1).
+
+    nonweight_mib subtracts param_bytes from the peak to isolate activations
+    and temporary buffers. Both are 0 on CPU.
+    """
+    if device == 'cpu':
+        return 0.0, 0.0
+    inputs = make_inputs_fn(1)
+    with torch.no_grad():
+        for _ in range(n_warmup):
+            fn(*inputs)
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    with torch.no_grad():
+        fn(*inputs)
+    torch.cuda.synchronize()
+    peak_bytes = torch.cuda.max_memory_allocated()
+    peak_mib = peak_bytes / 1024 ** 2
+    nonweight_mib = (peak_bytes - param_bytes) / 1024 ** 2
+    return peak_mib, nonweight_mib
+
+
 def measure_throughput(fn, make_inputs_fn, device, n_steps=20, cache_key=None):
     """
     Ramp B = 1, 2, 4, 8, ... until OOM.  At the largest successful B,
@@ -282,34 +314,62 @@ def measure_throughput(fn, make_inputs_fn, device, n_steps=20, cache_key=None):
     """
     bs_cache = _load_bs_cache()
 
+    def _try_batch(B):
+        """Return True if B fits in memory."""
+        try:
+            inputs = make_inputs_fn(B)
+            with torch.no_grad():
+                fn(*inputs)
+            if device != 'cpu':
+                torch.cuda.synchronize()
+            del inputs
+            gc.collect()
+            if device != 'cpu':
+                torch.cuda.empty_cache()
+            return True
+        except RuntimeError as e:
+            if 'out of memory' in str(e).lower():
+                gc.collect()
+                if device != 'cpu':
+                    torch.cuda.empty_cache()
+                return False
+            raise
+
     if cache_key and cache_key in bs_cache:
-        best_B = bs_cache[cache_key]
-        print(f'  [bs cache] {cache_key}: using cached max_bs={best_B}')
+        # Start from the cached value, then adjust.
+        B = bs_cache[cache_key]
+        print(f'  [bs cache] {cache_key}: starting from cached bs={B}')
+        if _try_batch(B):
+            # Cache hit works — try doubling until OOM.
+            best_B = B
+            while True:
+                B *= 2
+                if _try_batch(B):
+                    best_B = B
+                else:
+                    break
+        else:
+            # Cached value OOMs — halve until one works.
+            best_B = 1
+            while B > 1:
+                B //= 2
+                if _try_batch(B):
+                    best_B = B
+                    break
     else:
         best_B = 1
         B = 1
         while True:
-            try:
-                inputs = make_inputs_fn(B)
-                with torch.no_grad():
-                    fn(*inputs)
-                if device != 'cpu':
-                    torch.cuda.synchronize()
+            if _try_batch(B):
                 best_B = B
-                del inputs
-                gc.collect()
-                if device != 'cpu':
-                    torch.cuda.empty_cache()
                 B *= 2
-            except RuntimeError as e:
-                if 'out of memory' in str(e).lower():
-                    break
-                raise
+            else:
+                break
 
-        if cache_key:
-            bs_cache[cache_key] = best_B
-            _save_bs_cache(bs_cache)
-            print(f'  [bs cache] {cache_key}: saved max_bs={best_B}')
+    if cache_key:
+        bs_cache[cache_key] = best_B
+        _save_bs_cache(bs_cache)
+        print(f'  [bs cache] {cache_key}: saved max_bs={best_B}')
 
     # Benchmark at best_B
     inputs = make_inputs_fn(best_B)
@@ -348,14 +408,15 @@ def _split_model(name):
 
 
 def print_table(rows):
-    """rows: list of dicts with keys: model, params_M, active_M, gmacs, best_B, throughput"""
-    cols     = ['Model', 'Modality', 'Params (M)', 'Active (M)', 'GMACs', 'Batch Size', 'Throughput']
-    col_keys = ['_arch',  '_mod',    'params_M',   'active_M',   'gmacs', 'best_B',     'throughput']
+    """rows: list of dicts with keys: model, params_M, active_M, gmacs, best_B, throughput, mem_MiB, channels"""
+    cols     = ['Model', 'Modality', 'Params (M)', 'Active (M)', 'GMACs', 'Batch Size', 'Throughput', 'Mem/sample (MiB)', 'Non-weight (MiB)']
+    col_keys = ['_arch',  '_mod',    'params_M',   'active_M',   'gmacs', 'best_B',     'throughput', 'mem_MiB',           'nw_MiB']
 
     augmented = []
     for r in rows:
         arch, mod = _split_model(r['model'])
-        augmented.append({**r, '_arch': arch, '_mod': mod})
+        mod_str = f"{mod} ({r['channels']})" if r.get('channels') else mod
+        augmented.append({**r, '_arch': arch, '_mod': mod_str})
 
     widths = [max(len(c), max(len(str(r[k])) for r in augmented)) + 2
               for c, k in zip(cols, col_keys)]
@@ -383,9 +444,9 @@ def write_latex_table(rows, path):
         r'\centering',
         r'\caption{Inference cost on BEN-v2 (img\_size=128, 19-class multilabel).}',
         r'\label{tab:computation}',
-        r'\begin{tabular}{cccccc}',
+        r'\begin{tabular}{ccccccc}',
         r'\toprule',
-        r'Model & Modality & Params (M) & GMACs & Batch Size & Throughput \\',
+        r'Model & Modality & Params (M) & GMACs & Batch Size & Throughput & Peak Mem. (MiB) \\',
         r'\midrule',
     ]
 
@@ -393,20 +454,21 @@ def write_latex_table(rows, path):
     groups = []
     for r in rows:
         arch, mod = _split_model(r['model'])
+        mod_str = f"{mod} ({r['channels']})" if r.get('channels') else mod
         if not groups or groups[-1][0] != arch:
             groups.append((arch, []))
-        groups[-1][1].append((mod, r))
+        groups[-1][1].append((mod_str, r))
 
     for g_idx, (arch, members) in enumerate(groups):
         n = len(members)
-        for i, (mod, r) in enumerate(members):
+        for i, (mod_str, r) in enumerate(members):
             arch_cell = (
                 rf'\multirow{{{n}}}{{*}}{{{arch}}}' if i == 0 else ''
             )
             row_str = ' & '.join([
-                arch_cell, mod,
+                arch_cell, mod_str,
                 r['active_M'], r['gmacs'],
-                str(r['best_B']), r['throughput'],
+                str(r['best_B']), r['throughput'], r['nw_MiB'],
             ]) + r' \\'
             lines.append(row_str)
         if g_idx < len(groups) - 1:
@@ -458,6 +520,8 @@ def profile_evan_sft(label, checkpoint, input_mods, in_chans_map, device):
             for m in input_mods
         )
 
+    pb = model_param_bytes(model)
+    mem_mib, nw_mib = measure_peak_memory_per_sample(fwd, make_inputs, device, param_bytes=pb)
     best_B, thr = measure_throughput(fwd, make_inputs, device, cache_key=label)
 
     del model
@@ -472,6 +536,9 @@ def profile_evan_sft(label, checkpoint, input_mods, in_chans_map, device):
         'gmacs':      f'{gmacs:.1f}',
         'best_B':     best_B,
         'throughput': f'{thr:.0f}',
+        'mem_MiB':    f'{mem_mib:.0f}',
+        'nw_MiB':     f'{nw_mib:.0f}',
+        'channels':   sum(in_chans_map[m] for m in input_mods),
     }
 
 
@@ -510,6 +577,7 @@ def main():
     print(f'  img_size={evan.img_size}, embed_dim={evan.embed_dim}, depth={len(evan.blocks)}')
     print(f'  supported_modalities={evan.supported_modalities}')
     total_delulu = sum(p.numel() for p in model.parameters())
+    delulu_pb = model_param_bytes(model)
 
     x_s2_1 = torch.randn(1, S2_CHANS, IMG_SIZE, IMG_SIZE, device=device)
     x_s1_1 = torch.randn(1, S1_CHANS, IMG_SIZE, IMG_SIZE, device=device)
@@ -518,10 +586,10 @@ def main():
     s1peek_wrap = S1PeekWrapper(model).to(device)
     s1peek_active = count_params_unique(active_s1peek_items(model))
     s1peek_gflops = measure_gflops(s1peek_wrap, (x_s1_1,), device)
+    s1peek_make = lambda B: (torch.randn(B, S1_CHANS, IMG_SIZE, IMG_SIZE, device=device),)
+    s1peek_mem, s1peek_nw = measure_peak_memory_per_sample(s1peek_wrap, s1peek_make, device, param_bytes=delulu_pb)
     s1peek_B, s1peek_thr = measure_throughput(
-        s1peek_wrap,
-        lambda B: (torch.randn(B, S1_CHANS, IMG_SIZE, IMG_SIZE, device=device),),
-        device, cache_key='DeluluNet-s1',
+        s1peek_wrap, s1peek_make, device, cache_key='DeluluNet-s1',
     )
     results.append({
         'model':      'DeluluNet-s1',
@@ -530,16 +598,19 @@ def main():
         'gmacs':      f'{s1peek_gflops:.1f}',
         'best_B':     s1peek_B,
         'throughput': f'{s1peek_thr:.0f}',
+        'mem_MiB':    f'{s1peek_mem:.0f}',
+        'nw_MiB':     f'{s1peek_nw:.0f}',
+        'channels':   S1_CHANS,
     })
 
     # -- DeluluNet-s2: feed s2, hallucinate s1 --
     peek_wrap = PeekWrapper(model).to(device)
     peek_active = count_params_unique(active_peek_items(model))
     peek_gflops = measure_gflops(peek_wrap, (x_s2_1,), device)
+    peek_make = lambda B: (torch.randn(B, S2_CHANS, IMG_SIZE, IMG_SIZE, device=device),)
+    peek_mem, peek_nw = measure_peak_memory_per_sample(peek_wrap, peek_make, device, param_bytes=delulu_pb)
     peek_B, peek_thr = measure_throughput(
-        peek_wrap,
-        lambda B: (torch.randn(B, S2_CHANS, IMG_SIZE, IMG_SIZE, device=device),),
-        device, cache_key='DeluluNet-s2',
+        peek_wrap, peek_make, device, cache_key='DeluluNet-s2',
     )
     results.append({
         'model':      'DeluluNet-s2',
@@ -548,19 +619,22 @@ def main():
         'gmacs':      f'{peek_gflops:.1f}',
         'best_B':     peek_B,
         'throughput': f'{peek_thr:.0f}',
+        'mem_MiB':    f'{peek_mem:.0f}',
+        'nw_MiB':     f'{peek_nw:.0f}',
+        'channels':   S2_CHANS,
     })
 
     # -- DeluluNet-s1+s2: both modalities real --
     add_wrap = AdditionWrapper(model).to(device)
     add_active = count_params_unique(active_addition_items(model))
     add_gflops = measure_gflops(add_wrap, (x_s2_1, x_s1_1), device)
+    add_make = lambda B: (
+        torch.randn(B, S2_CHANS, IMG_SIZE, IMG_SIZE, device=device),
+        torch.randn(B, S1_CHANS, IMG_SIZE, IMG_SIZE, device=device),
+    )
+    add_mem, add_nw = measure_peak_memory_per_sample(add_wrap, add_make, device, param_bytes=delulu_pb)
     add_B, add_thr = measure_throughput(
-        add_wrap,
-        lambda B: (
-            torch.randn(B, S2_CHANS, IMG_SIZE, IMG_SIZE, device=device),
-            torch.randn(B, S1_CHANS, IMG_SIZE, IMG_SIZE, device=device),
-        ),
-        device, cache_key='DeluluNet-s1+s2',
+        add_wrap, add_make, device, cache_key='DeluluNet-s1+s2',
     )
     results.append({
         'model':      'DeluluNet-s1+s2',
@@ -569,6 +643,9 @@ def main():
         'gmacs':      f'{add_gflops:.1f}',
         'best_B':     add_B,
         'throughput': f'{add_thr:.0f}',
+        'mem_MiB':    f'{add_mem:.0f}',
+        'nw_MiB':     f'{add_nw:.0f}',
+        'channels':   S2_CHANS + S1_CHANS,
     })
 
     del model, peek_wrap, s1peek_wrap, add_wrap
@@ -594,13 +671,12 @@ def main():
         def fwd(x):
             return head(wrap(x).last_hidden_state)
 
+        pb = model_param_bytes(wrap) + model_param_bytes(head)
         x1 = torch.randn(1, in_chans, IMG_SIZE, IMG_SIZE, device=device)
         gmacs = measure_gflops(fwd, (x1,), device)
-        best_B, thr = measure_throughput(
-            fwd,
-            lambda B: (torch.randn(B, in_chans, IMG_SIZE, IMG_SIZE, device=device),),
-            device, cache_key=label,
-        )
+        fm_make = lambda B: (torch.randn(B, in_chans, IMG_SIZE, IMG_SIZE, device=device),)
+        mem_mib, nw_mib = measure_peak_memory_per_sample(fwd, fm_make, device, param_bytes=pb)
+        best_B, thr = measure_throughput(fwd, fm_make, device, cache_key=label)
 
         del wrap, head
         gc.collect()
@@ -614,6 +690,9 @@ def main():
             'gmacs':      f'{gmacs:.1f}',
             'best_B':     best_B,
             'throughput': f'{thr:.0f}',
+            'mem_MiB':    f'{mem_mib:.0f}',
+            'nw_MiB':     f'{nw_mib:.0f}',
+            'channels':   in_chans,
         }
 
     print('\n=== Panopticon ViT-B/14: s1 ===')
@@ -638,10 +717,11 @@ def main():
     write_latex_table(results, 'res/latex/computation.tex')
 
     print('Notes:')
-    print('  Active (M)   = params actually executed in this mode (DeluluNet only)')
-    print('  GMACs        = multiply-accumulate ops per image (B=1)')
-    print('  Batch Size   = largest batch size without OOM')
-    print('  Throughput   = images/sec at Batch Size')
+    print('  Active (M)        = params actually executed in this mode (DeluluNet only)')
+    print('  GMACs             = multiply-accumulate ops per image (B=1)')
+    print('  Throughput        = images/sec at Batch Size')
+    print('  Mem/sample (MiB)  = peak GPU memory for a single forward pass (B=1, torch.cuda.max_memory_allocated)')
+    print('  Non-weight (MiB)  = Mem/sample minus parameter storage (activations + temporary buffers)')
     print('  Panopticon s1+s2: channels routed by wavelength ID → same token count as s2\n')
 
 

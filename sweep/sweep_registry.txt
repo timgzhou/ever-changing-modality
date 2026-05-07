@@ -58,3 +58,4 @@ delulu-benv2-final-mask-token-s2s1 tgz/delulu-benv2-final-mask-token-s2s1/x46v50
 delulu-benv2-final-no-batch-mixing-s2s1 tgz/delulu-benv2-final-no-batch-mixing-s2s1/7wk2ibvy checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
 delulu-benv2-final-no-prefusion-s2s1 tgz/delulu-benv2-final-no-prefusion-s2s1/kpo8msor checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
 delulu-benv2-final-no-latent-s2s1 tgz/delulu-benv2-final-no-latent-s2s1/dvk5htyw checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
+delulu-benv2-masking-s1s2 tgz/delulu-benv2-masking-s1s2/ml7k80qn checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2

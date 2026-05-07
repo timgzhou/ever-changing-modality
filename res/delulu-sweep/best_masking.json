@@ -1,0 +1,80 @@
+{
+  "transfer": {
+    "val_col": "val_transfer",
+    "val_score": 67.7,
+    "test_score": 51.47,
+    "wandb_run_id": "4wuus4e1",
+    "hparams": {
+      "lr": 0.0004919525946897,
+      "weight_decay": 0.0002987654348049,
+      "epochs": 64,
+      "modality_dropout": 0.3,
+      "modality_dropout_startmod": 0.4943255892768998,
+      "modality_dropout_newmod": 0.3739336769398811,
+      "labeled_frequency": 0.1141659173783924,
+      "labeled_start_fraction": 0.0,
+      "protect_lrm": 0.5,
+      "use_mask_token": false,
+      "latent_masked_only": true,
+      "unprotect_starting_mod": true,
+      "lambda_latent": 0.1003649288975272,
+      "lambda_prefusion": 0.9867093196115908,
+      "lambda_distill": 0.5724958342782179,
+      "mae_mask_ratio": 0.6071421425812242,
+      "active_losses": "latent+prefusion+distill+ce",
+      "stage0_checkpoint": "checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt"
+    }
+  },
+  "peeking": {
+    "val_col": "val_peeking",
+    "val_score": 53.88,
+    "test_score": 50.53,
+    "wandb_run_id": "ufrxvcup",
+    "hparams": {
+      "lr": 0.0004774231555564,
+      "weight_decay": 2.097367228673949e-05,
+      "epochs": 64,
+      "modality_dropout": 0.3,
+      "modality_dropout_startmod": 0.1179198901802484,
+      "modality_dropout_newmod": 0.217880054935906,
+      "labeled_frequency": 0.1528037178698822,
+      "labeled_start_fraction": 0.0,
+      "protect_lrm": 0.0,
+      "use_mask_token": false,
+      "latent_masked_only": true,
+      "unprotect_starting_mod": true,
+      "lambda_latent": 0.2696171530477876,
+      "lambda_prefusion": 0.6047276485413138,
+      "lambda_distill": 0.8583708932965115,
+      "mae_mask_ratio": 0.5995580822364286,
+      "active_losses": "latent+prefusion+distill+ce",
+      "stage0_checkpoint": "checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt"
+    }
+  },
+  "addition": {
+    "val_col": "val_addition",
+    "val_score": 80.3,
+    "test_score": 50.75,
+    "wandb_run_id": "ufrxvcup",
+    "hparams": {
+      "lr": 0.0004774231555564,
+      "weight_decay": 2.097367228673949e-05,
+      "epochs": 64,
+      "modality_dropout": 0.3,
+      "modality_dropout_startmod": 0.1179198901802484,
+      "modality_dropout_newmod": 0.217880054935906,
+      "labeled_frequency": 0.1528037178698822,
+      "labeled_start_fraction": 0.0,
+      "protect_lrm": 0.0,
+      "use_mask_token": false,
+      "latent_masked_only": true,
+      "unprotect_starting_mod": true,
+      "lambda_latent": 0.2696171530477876,
+      "lambda_prefusion": 0.6047276485413138,
+      "lambda_distill": 0.8583708932965115,
+      "mae_mask_ratio": 0.5995580822364286,
+      "active_losses": "latent+prefusion+distill+ce",
+      "stage0_checkpoint": "checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt"
+    }
+  }
+}

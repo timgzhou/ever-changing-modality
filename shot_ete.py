@@ -91,7 +91,7 @@ def _parse_args():
                              'latent_projectors, new-modality patch_embedder/MSLA/CLS/storage/head). '
                              'If None (default), all params share --lr.')
     parser.add_argument('--weight_decay', type=float, default=0.001)
-    parser.add_argument('--wandb_project', type=str, default='delulu-apr21')
+    parser.add_argument('--wandb_project', type=str, default='delulu-may6')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--checkpoint_name', type=str, default=None)
     parser.add_argument('--save_checkpoint', action='store_true',
@@ -347,4 +347,27 @@ python -u shot_ete.py \
     --lambda_distill 0.73 \
     --mae_mask_ratio 0.413 \
     --unprotect_starting_mod
+    
+python -u shot_ete.py \
+    --dataset dfc2020 \
+    --new_mod_group sq \
+    --stage0_checkpoint checkpoints/sft_evan_base_dfc2020_s2_fft_lr0.0005_20260418_080316.pt \
+    --lr 0.0004 \
+    --weight_decay 0.0025 \
+    --epochs 32 \
+    --eval_every_n_epochs 2 \
+    --batch_size 32 \
+    --results_csv res/shot_ete_dfc2020.csv \
+    --active_losses latent prefusion distill ce \
+    --modality_dropout_startmod 0.2 \
+    --modality_dropout_newmod 0.2 \
+    --labeled_frequency 0.2 \
+    --latent_masked_only \
+    --labeled_start_fraction 0 \
+    --lambda_latent 0.1267 \
+    --lambda_prefusion 0.37 \
+    --lambda_distill 0.73 \
+    --mae_mask_ratio 0.413 \
+    --unprotect_starting_mod \
+    --protect_lrm 0.2
 """

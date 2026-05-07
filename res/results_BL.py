@@ -88,7 +88,7 @@ def _fmt_meanstd(val, decimals=1):
     return f'{mean:.{decimals}f}±{std:.{decimals}f}'
 
 
-DELULU_CSV = 'res/delulu/hptuned_may5.csv'  # overridden by --apr21 flag
+DELULU_CSV = 'res/delulu/hptuned_masking_may6.csv'  # overridden by --apr21 / --may5 flags
 
 # ---------------------------------------------------------------------------
 # Data loaders
@@ -98,19 +98,57 @@ def _load_distillation(dataset, arch):
     base = f'res/baselines/distillation/{dataset}/{arch}'
     if not os.path.isdir(base):
         return {}
+    id_cols = list(pd.read_csv(glob.glob(f'{base}/*.csv')[0], nrows=0).columns[6:13]) + ['teacher_checkpoint'] if glob.glob(f'{base}/*.csv') else []
     result = {}
     for fpath in glob.glob(f'{base}/*.csv'):
         df = _read_csv(fpath)
         if df is None or 'teacher_modality' not in df.columns:
             continue
-        df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
+        df['test_metric']          = pd.to_numeric(df['test_metric'],          errors='coerce')
+        df['best_val_agreement']   = pd.to_numeric(df['best_val_agreement'],   errors='coerce')
         for (teacher, student, kl_type), grp in df.groupby(['teacher_modality', 'student_modality', 'kl_type']):
-            topk = grp.nlargest(5, 'test_metric')['test_metric']
-            result[(teacher, student, kl_type)] = (topk.mean(), topk.std())
+            val_rows = grp[grp['best_val_agreement'].notna()]
+            if val_rows.empty:
+                # fallback: no val data available
+                topk = grp.nlargest(5, 'test_metric')['test_metric']
+                result[(teacher, student, kl_type)] = (topk.mean(), topk.std())
+                continue
+            top2 = val_rows.nlargest(2, 'best_val_agreement')
+            # collect test scores from top-2 val rows + their paired NaN-val rows (same id cols)
+            all_test = list(top2['test_metric'])
+            no_val = grp[grp['best_val_agreement'].isna()]
+            for _, row in top2.iterrows():
+                mask = (no_val[id_cols] == row[id_cols].values).all(axis=1)
+                all_test.extend(no_val[mask]['test_metric'].tolist())
+            s = pd.Series(all_test, dtype=float).dropna()
+            result[(teacher, student, kl_type)] = (s.mean(), s.std())
     return result
 
 
-def _load_delulu(dataset, arch, val_col, test_col):
+def _load_distillation_ens(dataset, arch):
+    """Like _load_distillation but uses ensemble_metric_logits as the target metric."""
+    base = f'res/baselines/distillation/{dataset}/{arch}'
+    if not os.path.isdir(base):
+        return {}
+    result = {}
+    for fpath in glob.glob(f'{base}/*.csv'):
+        df = _read_csv(fpath)
+        if df is None or 'teacher_modality' not in df.columns:
+            continue
+        df['ensemble_metric_logits'] = pd.to_numeric(df['ensemble_metric_logits'], errors='coerce')
+        df['best_val_agreement']     = pd.to_numeric(df['best_val_agreement'],     errors='coerce')
+        for (teacher, student, kl_type), grp in df.groupby(['teacher_modality', 'student_modality', 'kl_type']):
+            val_rows = grp[grp['best_val_agreement'].notna()]
+            if val_rows.empty:
+                vals = grp.nlargest(5, 'ensemble_metric_logits')['ensemble_metric_logits'].dropna()
+            else:
+                vals = val_rows.nlargest(2, 'best_val_agreement')['ensemble_metric_logits'].dropna()
+            if len(vals):
+                result[(teacher, student, kl_type)] = (vals.mean(), vals.std())
+    return result
+
+
+def _load_delulu(dataset, arch, val_col, test_col, ignore_select_by=False):
     # old col name → new col name (may5 format)
     COL_MAP = {
         'valchecked_transfer':     'test_transfer',
@@ -148,8 +186,8 @@ def _load_delulu(dataset, arch, val_col, test_col):
     if norm_val not in df.columns or norm_test not in df.columns:
         return {}
 
-    # may5: filter by select_by when present
-    if 'select_by' in df.columns and df['select_by'].notna().any():
+    # may5: filter by select_by when present (skip if ignore_select_by)
+    if not ignore_select_by and 'select_by' in df.columns and df['select_by'].notna().any():
         sel = SELECT_MAP.get(norm_val)
         if sel is not None:
             df = df[df['select_by'] == sel]
@@ -285,15 +323,15 @@ def _filter_arch_cols(df, arch):
 # Table builders
 # ---------------------------------------------------------------------------
 
-def build_transfer_BL(dataset, arch='BL'):
+def build_transfer_BL(dataset, arch='BL', ignore_select_by=False):
     transfers = VALID_TRANSFERS.get(dataset, [])
     if not transfers:
         return None
 
     dist_b = _load_distillation(dataset, 'evan_base')
     dist_l = _load_distillation(dataset, 'evan_large')
-    del_b  = _load_delulu(dataset, 'evan_base',  'valchecked_val_transfer', 'valchecked_transfer')
-    del_l  = _load_delulu(dataset, 'evan_large', 'valchecked_val_transfer', 'valchecked_transfer')
+    del_b  = _load_delulu(dataset, 'evan_base',  'valchecked_val_transfer', 'valchecked_transfer', ignore_select_by=ignore_select_by)
+    del_l  = _load_delulu(dataset, 'evan_large', 'valchecked_val_transfer', 'valchecked_transfer', ignore_select_by=ignore_select_by)
     sft_b  = _load_sft_dino(dataset, 'evan_base')
     sft_l  = _load_sft_dino(dataset, 'evan_large')
     rsfm   = _load_rsfm(dataset)
@@ -323,15 +361,15 @@ def build_transfer_BL(dataset, arch='BL'):
     return _filter_arch_cols(pd.DataFrame(rows), arch)
 
 
-def build_peek_BL(dataset, arch='BL'):
+def build_peek_BL(dataset, arch='BL', ignore_select_by=False):
     transfers = VALID_TRANSFERS.get(dataset, [])
     if not transfers:
         return None
 
     mm_b  = _load_mixmatch_peek(dataset, 'evan_base')
     mm_l  = _load_mixmatch_peek(dataset, 'evan_large')
-    del_b = _load_delulu(dataset, 'evan_base',  'valchecked_val_peek', 'valchecked_peek')
-    del_l = _load_delulu(dataset, 'evan_large', 'valchecked_val_peek', 'valchecked_peek')
+    del_b = _load_delulu(dataset, 'evan_base',  'valchecked_val_peek', 'valchecked_peek', ignore_select_by=ignore_select_by)
+    del_l = _load_delulu(dataset, 'evan_large', 'valchecked_val_peek', 'valchecked_peek', ignore_select_by=ignore_select_by)
     sft_b = _load_sft_dino(dataset, 'evan_base')
     sft_l = _load_sft_dino(dataset, 'evan_large')
     rsfm  = _load_rsfm(dataset)
@@ -357,20 +395,25 @@ def build_peek_BL(dataset, arch='BL'):
     return _filter_arch_cols(pd.DataFrame(rows), arch)
 
 
-def build_addition_BL(dataset, arch='BL'):
+def build_addition_BL(dataset, arch='BL', distillation_ens=False, ignore_select_by=False):
     transfers = VALID_TRANSFERS.get(dataset, [])
     if not transfers:
         return None
 
     mke_b     = _load_mke_addition(dataset, 'evan_base')
     mke_l     = _load_mke_addition(dataset, 'evan_large')
-    del_b     = _load_delulu(dataset, 'evan_base',  'valchecked_val_add_ens', 'valchecked_add_ens')
-    del_l     = _load_delulu(dataset, 'evan_large', 'valchecked_val_add_ens', 'valchecked_add_ens')
+    del_b     = _load_delulu(dataset, 'evan_base',  'val_addition',     'test_addition',     ignore_select_by=ignore_select_by)
+    del_l     = _load_delulu(dataset, 'evan_large', 'val_addition',     'test_addition',     ignore_select_by=ignore_select_by)
+    del_ens_b = _load_delulu(dataset, 'evan_base',  'valchecked_val_add_ens', 'valchecked_add_ens', ignore_select_by=ignore_select_by)
+    del_ens_l = _load_delulu(dataset, 'evan_large', 'valchecked_val_add_ens', 'valchecked_add_ens', ignore_select_by=ignore_select_by)
     sft_b     = _load_sft_dino(dataset, 'evan_base')
     sft_l     = _load_sft_dino(dataset, 'evan_large')
     comb_b    = _load_sft_combined_dino(dataset, 'evan_base')
     comb_l    = _load_sft_combined_dino(dataset, 'evan_large')
     rsfm      = _load_rsfm(dataset)
+    dist_loader = _load_distillation_ens if distillation_ens else _load_distillation
+    dist_b    = dist_loader(dataset, 'evan_base')
+    dist_l    = dist_loader(dataset, 'evan_large')
 
     rows = []
     for (start, new) in transfers:
@@ -388,19 +431,27 @@ def build_addition_BL(dataset, arch='BL'):
             if olmo_l    is None: olmo_l    = rsfm.get(('olmoearth-large', alias))
 
         rows.append({
-            'Dataset':                  DATASET_DISPLAY[dataset],
-            'Start→New':                f'{start_d}→{new_d}',
-            'DINO-SFT-B(M_A)':          _fmt(sft_b.get(start)),
-            'DINO-SFT-L(M_A)':          _fmt(sft_l.get(start)),
-            'MKE-B':                    _fmt_meanstd(mke_b.get((start, new))),
-            'MKE-L':                    _fmt_meanstd(mke_l.get((start, new))),
-            'Delulu-B':                 _fmt_meanstd(del_b.get((start, new))),
-            'Delulu-L':                 _fmt_meanstd(del_l.get((start, new))),
-            'DINO-SFT-B(M_A+M_B ora)':  _fmt(lsft_b),
-            'DINO-SFT-L(M_A+M_B ora)':  _fmt(lsft_l),
-            'Panopticon-B':             _fmt(pan_score),
-            'OlmoEarth-B':              _fmt(olmo_b),
-            'OlmoEarth-L':              _fmt(olmo_l),
+            'Dataset':                   DATASET_DISPLAY[dataset],
+            'Start→New':                 f'{start_d}→{new_d}',
+            'DINO-SFT-B(M_A)':           _fmt(sft_b.get(start)),
+            'DINO-SFT-L(M_A)':           _fmt(sft_l.get(start)),
+            'MKE-B':                     _fmt_meanstd(mke_b.get((start, new))),
+            'MKE-L':                     _fmt_meanstd(mke_l.get((start, new))),
+            **({'KD-ens-B':              _fmt_meanstd(dist_b.get((start, new, 'kd'))),
+                'KD-ens-L':              _fmt_meanstd(dist_l.get((start, new, 'kd'))),
+                'TTM-ens-B':             _fmt_meanstd(dist_b.get((start, new, 'ttm'))),
+                'TTM-ens-L':             _fmt_meanstd(dist_l.get((start, new, 'ttm'))),
+               } if distillation_ens else {}),
+            'Delulu-B':                  _fmt_meanstd(del_b.get((start, new))),
+            'Delulu-L':                  _fmt_meanstd(del_l.get((start, new))),
+            **({'Delulu-ens-B':          _fmt_meanstd(del_ens_b.get((start, new))),
+                'Delulu-ens-L':          _fmt_meanstd(del_ens_l.get((start, new))),
+               } if distillation_ens else {}),
+            'DINO-SFT-B(M_A+M_B ora)':   _fmt(lsft_b),
+            'DINO-SFT-L(M_A+M_B ora)':   _fmt(lsft_l),
+            'Panopticon-B':              _fmt(pan_score),
+            'OlmoEarth-B':               _fmt(olmo_b),
+            'OlmoEarth-L':               _fmt(olmo_l),
         })
     return _filter_arch_cols(pd.DataFrame(rows), arch)
 
@@ -897,6 +948,142 @@ def make_addition_tex_tall(df, arch='BL'):
 
 
 # ---------------------------------------------------------------------------
+# EuroSAT full-direction tables (RGB / VRE / NIR, all 6 directions)
+# ---------------------------------------------------------------------------
+
+VALID_TRANSFERS_EUROSAT = [
+    ('rgb', 'vre'), ('rgb', 'nir'),
+    ('vre', 'rgb'), ('vre', 'nir'),
+    ('nir', 'rgb'), ('nir', 'vre'),
+]
+
+COMBINED_RSFM_ALIASES_EUROSAT = {
+    ('rgb', 'vre'): ['rgb+vre', 'vre+rgb'],
+    ('rgb', 'nir'): ['rgb+nir', 'nir+rgb'],
+    ('vre', 'rgb'): ['vre+rgb', 'rgb+vre'],
+    ('vre', 'nir'): ['vre+nir', 'nir+vre'],
+    ('nir', 'rgb'): ['nir+rgb', 'rgb+nir'],
+    ('nir', 'vre'): ['nir+vre', 'vre+nir'],
+}
+
+
+def build_transfer_eurosat(arch='BL', ignore_select_by=False):
+    dist_b = _load_distillation('eurosat', 'evan_base')
+    del_b  = _load_delulu('eurosat', 'evan_base', 'valchecked_val_transfer', 'valchecked_transfer', ignore_select_by=ignore_select_by)
+    sft_b  = _load_sft_dino('eurosat', 'evan_base')
+    rows = []
+    for (start, new) in VALID_TRANSFERS_EUROSAT:
+        rows.append({
+            'Start(M_A)':             MOD_DISPLAY.get(start, start),
+            'Transfer(M_B)':          MOD_DISPLAY.get(new,   new),
+            'DINO-SFT-B(M_A)':        _fmt(sft_b.get(start)),
+            'KD-B':                   _fmt_meanstd(dist_b.get((start, new, 'kd'))),
+            'TTM-B':                  _fmt_meanstd(dist_b.get((start, new, 'ttm'))),
+            'Delulu-B':               _fmt_meanstd(del_b.get((start, new))),
+            'DINO-SFT-B(M_B oracle)': _fmt(sft_b.get(new)),
+        })
+    return _filter_arch_cols(pd.DataFrame(rows), arch)
+
+
+def build_peek_eurosat(arch='BL', ignore_select_by=False):
+    mm_b  = _load_mixmatch_peek('eurosat', 'evan_base')
+    del_b = _load_delulu('eurosat', 'evan_base', 'valchecked_val_peek', 'valchecked_peek', ignore_select_by=ignore_select_by)
+    sft_b = _load_sft_dino('eurosat', 'evan_base')
+    rows = []
+    for (start, new) in VALID_TRANSFERS_EUROSAT:
+        rows.append({
+            'Start(M_A)': MOD_DISPLAY.get(start, start),
+            'New(M_B)':   MOD_DISPLAY.get(new,   new),
+            'DINO-SFT-B': _fmt(sft_b.get(start)),
+            'MixMatch-B': _fmt_meanstd(mm_b.get(start)),
+            'Delulu-B':   _fmt_meanstd(del_b.get((start, new))),
+        })
+    return _filter_arch_cols(pd.DataFrame(rows), arch)
+
+
+def build_addition_eurosat(arch='BL', distillation_ens=False, ignore_select_by=False):
+    mke_b     = _load_mke_addition('eurosat', 'evan_base')
+    del_b     = _load_delulu('eurosat', 'evan_base', 'val_addition',           'test_addition',         ignore_select_by=ignore_select_by)
+    del_ens_b = _load_delulu('eurosat', 'evan_base', 'valchecked_val_add_ens', 'valchecked_add_ens',    ignore_select_by=ignore_select_by)
+    sft_b     = _load_sft_dino('eurosat', 'evan_base')
+    comb_b    = _load_sft_combined_dino('eurosat', 'evan_base')
+    dist_loader = _load_distillation_ens if distillation_ens else _load_distillation
+    dist_b    = dist_loader('eurosat', 'evan_base')
+    rows = []
+    for (start, new) in VALID_TRANSFERS_EUROSAT:
+        lsft_b = comb_b.get(f'{start}+{new}') or comb_b.get(f'{new}+{start}')
+        rows.append({
+            'Start→New':               f'{MOD_DISPLAY.get(start,start)}→{MOD_DISPLAY.get(new,new)}',
+            'DINO-SFT-B(M_A)':         _fmt(sft_b.get(start)),
+            'MKE-B':                   _fmt_meanstd(mke_b.get((start, new))),
+            **({'KD-ens-B':            _fmt_meanstd(dist_b.get((start, new, 'kd'))),
+                'TTM-ens-B':           _fmt_meanstd(dist_b.get((start, new, 'ttm'))),
+               } if distillation_ens else {}),
+            'Delulu-B':                _fmt_meanstd(del_b.get((start, new))),
+            **({'Delulu-ens-B':        _fmt_meanstd(del_ens_b.get((start, new))),
+               } if distillation_ens else {}),
+            'DINO-SFT-B(M_A+M_B ora)': _fmt(lsft_b),
+        })
+    return _filter_arch_cols(pd.DataFrame(rows), arch)
+
+
+# Tall method-row definitions for eurosat (no L columns since evan_large coverage is sparse)
+_TRANSFER_METHOD_ROWS_ES = [
+    (r'$f_0$',  r'$f_0(M_A)$',                            'DINO-SFT-B(M_A)',        None),
+    ('KD',      'Baselines',                               'KD-B',                   None),
+    ('TTM',     'Baselines',                               'TTM-B',                  None),
+    ('Delulu',  'Ours',                                    'Delulu-B',               None),
+    ('DINOv3',  r'\shortstack[c]{Oracle\\($M_B$)}',        'DINO-SFT-B(M_B oracle)', None),
+]
+
+_PEEK_METHOD_ROWS_ES = [
+    (r'$f_0$',   r'$f_0(M_A)$', 'DINO-SFT-B', None),
+    ('MixMatch', 'Baselines',   'MixMatch-B',  None),
+    ('Delulu',   'Ours',        'Delulu-B',    None),
+]
+
+_ADDITION_METHOD_ROWS_ES = [
+    (r'$f_0$', r'$f_0(M_A)$',                            'DINO-SFT-B(M_A)',         None),
+    ('MKE',    'Baselines',                               'MKE-B',                   None),
+    ('Delulu', 'Ours',                                    'Delulu-B',                None),
+    ('DINOv3', r'\shortstack[c]{Oracle\\($M_A$+$M_B$)}', 'DINO-SFT-B(M_A+M_B ora)', None),
+]
+
+
+def _make_tall_tex_eurosat(df, start_col, new_col, method_rows, arch='B',
+                           bold_excludes_f0=False, new_col_label=r'New ($M_B$)'):
+    """Wrapper around _make_tall_tex that inserts a dummy dataset col so the
+    three-level header shows 'EuroSAT (Acc)' at top instead of repeating start_col."""
+    df = df.copy()
+    df['_ds'] = r'\shortstack[c]{EuroSAT\\(Acc)}'
+    return _make_tall_tex(df, '_ds', start_col, new_col, method_rows,
+                          arch=arch, bold_excludes_f0=bold_excludes_f0,
+                          new_col_label=new_col_label)
+
+
+def make_transfer_tex_tall_eurosat(df, arch='B'):
+    return _make_tall_tex_eurosat(df, 'Start(M_A)', 'Transfer(M_B)',
+                                  _TRANSFER_METHOD_ROWS_ES, arch=arch, bold_excludes_f0=True,
+                                  new_col_label=r'Transfer ($M_B$)')
+
+
+def make_peek_tex_tall_eurosat(df, arch='B'):
+    return _make_tall_tex_eurosat(df, 'Start(M_A)', 'New(M_B)',
+                                  _PEEK_METHOD_ROWS_ES, arch=arch, bold_excludes_f0=False,
+                                  new_col_label=r'New ($M_B$)')
+
+
+def make_addition_tex_tall_eurosat(df, arch='B'):
+    split = df['Start→New'].str.split('→', expand=True)
+    df = df.copy()
+    df['_start'] = split[0]
+    df['_new']   = split[1]
+    return _make_tall_tex_eurosat(df, '_start', '_new',
+                                  _ADDITION_METHOD_ROWS_ES, arch=arch, bold_excludes_f0=False,
+                                  new_col_label=r'New ($M_B$)')
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -908,23 +1095,31 @@ def main():
     parser.add_argument('--arch', choices=['B', 'L', 'BL'], default='B',
                         help='Which architecture columns to include (B, L, or BL)')
     parser.add_argument('--apr21', action='store_true',
-                        help='Use hptuned_apr21.csv instead of hptuned_may5.csv')
+                        help='Use hptuned_apr21.csv')
+    parser.add_argument('--may5', action='store_true',
+                        help='Use hptuned_may5.csv')
+    parser.add_argument('--distillation_ens', action='store_true',
+                        help='Show KD-ens/TTM-ens and Delulu-ens columns in Addition table')
+    parser.add_argument('--ignore_select_by', action='store_true',
+                        help='Pool all configs per (start, new) ignoring select_by filter')
     args = parser.parse_args()
 
     global DELULU_CSV
     if args.apr21:
         DELULU_CSV = 'res/delulu/hptuned_apr21.csv'
+    elif args.may5:
+        DELULU_CSV = 'res/delulu/hptuned_may5.csv'
 
     # ---- collect dataframes ----
     transfer_frames, peek_frames, addition_frames = [], [], []
     for dataset in DATASETS:
-        df = build_transfer_BL(dataset, arch=args.arch)
+        df = build_transfer_BL(dataset, arch=args.arch, ignore_select_by=args.ignore_select_by)
         if df is not None and not df.empty:
             transfer_frames.append(df)
-        df = build_peek_BL(dataset, arch=args.arch)
+        df = build_peek_BL(dataset, arch=args.arch, ignore_select_by=args.ignore_select_by)
         if df is not None and not df.empty:
             peek_frames.append(df)
-        df = build_addition_BL(dataset, arch=args.arch)
+        df = build_addition_BL(dataset, arch=args.arch, distillation_ens=args.distillation_ens, ignore_select_by=args.ignore_select_by)
         if df is not None and not df.empty:
             addition_frames.append(df)
 
@@ -970,8 +1165,35 @@ def main():
         f.write('\n\n\\bigskip\n\n'.join(sections) + '\n')
     print(f'\nwrote {out}')
 
+    # ---- EuroSAT full-direction tables ----
+    es_transfer = build_transfer_eurosat(arch=args.arch, ignore_select_by=args.ignore_select_by)
+    es_peek     = build_peek_eurosat(arch=args.arch, ignore_select_by=args.ignore_select_by)
+    es_addition = build_addition_eurosat(arch=args.arch, distillation_ens=args.distillation_ens, ignore_select_by=args.ignore_select_by)
+
+    print(f'\n{"="*80}\n  EUROSAT TRANSFER\n{"="*80}')
+    print(es_transfer.to_string(index=False))
+    print(f'\n{"="*80}\n  EUROSAT PEEK\n{"="*80}')
+    print(es_peek.to_string(index=False))
+    print(f'\n{"="*80}\n  EUROSAT ADDITION\n{"="*80}')
+    print(es_addition.to_string(index=False))
+
+    es_sections = []
+    for label, df, fn in [
+        ('Transfer', es_transfer, lambda d: make_transfer_tex_tall_eurosat(d, arch=args.arch)),
+        ('Peek',     es_peek,     lambda d: make_peek_tex_tall_eurosat(d,     arch=args.arch)),
+        ('Addition', es_addition, lambda d: make_addition_tex_tall_eurosat(d, arch=args.arch)),
+    ]:
+        if df is not None and not df.empty:
+            es_sections.append(f'% EuroSAT Table: {label}\n' + fn(df))
+
+    es_out = f'{OUT_DIR}/eurosat_tables_tall{arch_suffix}.tex'
+    with open(es_out, 'w') as f:
+        f.write('\n\n\\bigskip\n\n'.join(es_sections) + '\n')
+    print(f'wrote {es_out}')
+
 
 if __name__ == '__main__':
     main()
 
 # python res/results_BL.py
+# python res/results_BL.py --ignore_select_by   --distillation_ens 

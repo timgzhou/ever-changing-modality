@@ -3,7 +3,6 @@
 # Usage: bash sh/shot_ete_sweep.sh
 
 TEACHERS_JSON="artifacts/sft_teachers.json"
-RESULTS_CSV="res/delulu/hptuned_may5_sl.csv"
 
 # Hardcoded pairs: "dataset start_mod new_mod"
 PAIRS=(
@@ -16,6 +15,11 @@ PAIRS=(
     "dfc2020 s1      s2"
     "dfc2020 s2      s1"
     "eurosat rgb     vre"
+    # "eurosat vre     rgb"
+    # "eurosat rgb     nir"
+    # "eurosat nir     rgb"
+    # "eurosat nir     vre"
+    # "eurosat vre     nir"
 )
 
 MODELS=('evan_base')

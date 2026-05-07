@@ -1,6 +1,6 @@
 #!/bin/bash
 # BEN-v2 S2+=S1: ablate tz_fusion_time (when fusion/cross-modal attention begins).
-# Uses rank=1 hyperparams from sweep_best.json for each of transfer, peeking, addition.
+# Uses hyperparams from res/delulu-sweep/best_masking.json for each of transfer, peeking, addition.
 # Fusion times: 0..12 (checkpoint was trained with 3)
 # Usage: bash sh/ablation/benv2_fusion_time_sweep.sh s2 s1
 
@@ -37,4 +37,4 @@ for FT in $(seq 0 12); do
     done
 done
 
-# bash sh/ablation/benv2_fusion_time_sweep.sh s2 s1
+# bash sh/ablation/benv2_fusion_time_sweep.sh s1 s2

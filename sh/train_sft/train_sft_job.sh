@@ -23,7 +23,7 @@ echo "Running: model=${MODEL} dataset=${DATASET} train_mode=${TRAIN_MODE} modali
 for USE_DINO in 1 0; do
     DINO_VAL="True"
     DINO_FLAG="--use_dino_weights"
-    if [ "${USE_DINO}" = "1" ]; then
+    if [ "${USE_DINO}" = "0" ]; then
         DINO_VAL="False"
         DINO_FLAG=""
     fi

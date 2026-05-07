@@ -15,6 +15,8 @@ PAIRS=(
     "dfc2020 s1      s2"
     "dfc2020 s2      s1"
     "eurosat rgb     vre"
+    "eurosat nir     rgb"
+    "eurosat nir     vre"
 )
 
 MODELS=('evan_base')

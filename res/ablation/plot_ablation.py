@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 METRICS = ["best_transfer", "best_peeking", "best_addition"]
+FUSION_METRICS = ["test_transfer", "test_peeking", "test_addition"]
 METRIC_LABELS = ["Transfer", "Peek", "Addition"]
 
 def get_group(df, label):
@@ -76,12 +77,12 @@ MOD_DISPLAY = {"s2": "S2", "s1": "S1", "rgb": "RGB", "vre": "VRE"}
 
 def plot_fusion_time(df_fusion, directions):
     import seaborn as sns
-    palette = sns.color_palette("Set2", n_colors=len(METRICS))
+    palette = sns.color_palette("Set2", n_colors=len(FUSION_METRICS))
 
     available = []
     for start, new in directions:
         sub = df_fusion[(df_fusion["starting_modality"] == start) & (df_fusion["new_modality"] == new)].copy()
-        for col in METRICS:
+        for col in FUSION_METRICS:
             sub[col] = pd.to_numeric(sub[col], errors="coerce")
         sub["tz_fusion_time"] = pd.to_numeric(sub["tz_fusion_time"], errors="coerce")
         sub = sub.dropna(subset=["tz_fusion_time"])
@@ -96,7 +97,7 @@ def plot_fusion_time(df_fusion, directions):
 
     for row_idx, (start, new, sub) in enumerate(available):
         ax = axes[row_idx][0]
-        grouped = sub.groupby("tz_fusion_time")[METRICS]
+        grouped = sub.groupby("tz_fusion_time")[FUSION_METRICS]
         means = grouped.mean()
         stds  = grouped.std().fillna(0)
         x = means.index.values
@@ -104,7 +105,7 @@ def plot_fusion_time(df_fusion, directions):
         start_d = MOD_DISPLAY.get(start, start.upper())
         new_d   = MOD_DISPLAY.get(new,   new.upper())
 
-        for col, metric_label, color in zip(METRICS, METRIC_LABELS, palette):
+        for col, metric_label, color in zip(FUSION_METRICS, METRIC_LABELS, palette):
             y    = means[col].values
             yerr = stds[col].values
             ax.errorbar(x, y, yerr=yerr, fmt="o-", capsize=4, linewidth=1.8,
@@ -143,7 +144,7 @@ df_no_ce       = pd.read_csv("res/ablation/benv2_no_ce.csv")
 df_protect_lrm = pd.read_csv("res/ablation/benv2_protect_lrm.csv")
 df_fusion_time = pd.read_csv("res/ablation/benv2_fusion_time.csv")
 
-directions = [("s2", "s1")]
+directions = [("s1", "s2")]
 
 # --- Ablation bar plot ---
 available = []
