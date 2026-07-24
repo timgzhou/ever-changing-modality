@@ -1,6 +1,6 @@
 import sys, os, torch
 sys.path.insert(0, os.path.dirname(__file__))
-from evan_main import EVANClassifier
+from delulunet_main import EVANClassifier
 from geobench_data_utils import get_benv2_loaders
 from shot import evaluate_multimodal
 

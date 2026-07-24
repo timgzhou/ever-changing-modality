@@ -14,7 +14,7 @@ These should be identical. This script verifies that.
 import torch
 import torch.nn.functional as F
 from data_utils import get_loaders, create_multimodal_batch
-from evan_main import EVANClassifier
+from delulunet_main import EVANClassifier
 import copy
 
 STAGE0_CKPT = "checkpoints/sft_evan_base_benv2_s2_fft_lr0.0001_20260414_020254.pt"
@@ -154,7 +154,7 @@ print("Verifying student initialization and optimizer param groups...")
 import sys
 sys.path.insert(0, '.')
 from shot import train_shot
-from evan_main import EVANClassifier
+from delulunet_main import EVANClassifier
 import copy, types, argparse
 
 # Reload fresh model from checkpoint
@@ -164,7 +164,7 @@ evan = student.evan
 # Replicate shot_ete.py: create s1 components on evan
 from data_utils import get_loaders
 task_config2 = task_config  # reuse from above
-from evan_main import EVAN
+from delulunet_main import EVAN
 evan.intermediate_projector_type = 'cross'
 evan.intermediate_projector_num_layers = 2
 if not hasattr(evan, 'projector_queries'):

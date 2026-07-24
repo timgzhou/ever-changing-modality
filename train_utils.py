@@ -28,6 +28,8 @@ def make_scheduler(optimizer, num_epochs: int, warmup_epochs: int = 1, eta_min: 
 
 def make_criterion(task_config) -> nn.Module:
     """Build loss criterion from TaskConfig."""
+    if getattr(task_config, 'task_type', None) == 'regression':
+        return nn.MSELoss()
     if task_config.multilabel:
         return nn.BCEWithLogitsLoss()
     ignore = getattr(task_config, 'ignore_index', -100)
@@ -41,9 +43,14 @@ class TrainMetricAccumulator:
     Supports classification (accuracy), multilabel (mAP), and segmentation (mIoU).
     """
 
-    def __init__(self, segmentation: bool, multilabel: bool, num_classes: int, ignore_index: int):
+    def __init__(self, segmentation: bool, multilabel: bool, num_classes: int, ignore_index: int,
+                 regression: bool = False, regression_scale: float = 1.0):
         self.segmentation = segmentation
         self.multilabel = multilabel
+        self.regression = regression
+        # Multiply normalized RMSE by this to report in original target units
+        # (BioMassters AGB std = 289.89 t/ha). Default 1.0 = normalized units.
+        self.regression_scale = regression_scale
         self.num_classes = num_classes
         self.ignore_index = ignore_index
         self.reset()
@@ -55,10 +62,20 @@ class TrainMetricAccumulator:
         self._seg_labels = []
         self._ml_outputs = []
         self._ml_labels = []
+        self._sq_err_sum = 0.0
+        self._n_elem = 0
 
     def update(self, logits: torch.Tensor, labels: torch.Tensor):
         """Register one batch. logits: [B,C] or [B,C,H,W]; labels: [B] or [B,H,W]."""
-        if self.segmentation:
+        if self.regression:
+            # logits: [B,1,H,W] -> [B,H,W]; labels: [B,H,W]. Accumulate SSE for RMSE.
+            pred = logits.detach()
+            if pred.dim() == 4:
+                pred = pred.squeeze(1)
+            tgt = labels.detach().to(pred.dtype)
+            self._sq_err_sum += ((pred - tgt) ** 2).sum().item()
+            self._n_elem += tgt.numel()
+        elif self.segmentation:
             self._seg_preds.append(logits.detach().argmax(dim=1).cpu())
             self._seg_labels.append(labels.detach().cpu())
         elif self.multilabel:
@@ -70,7 +87,10 @@ class TrainMetricAccumulator:
             self._correct += predicted.eq(labels).sum().item()
 
     def compute(self) -> float:
-        """Return epoch metric as a percentage."""
+        """Return epoch metric. Percentage for classification; RMSE for regression."""
+        if self.regression:
+            rmse_norm = (self._sq_err_sum / max(1, self._n_elem)) ** 0.5
+            return rmse_norm * self.regression_scale
         if self.segmentation:
             return compute_miou(
                 torch.cat(self._seg_preds), torch.cat(self._seg_labels),
@@ -83,6 +103,8 @@ class TrainMetricAccumulator:
 
     @property
     def metric_name(self) -> str:
+        if self.regression:
+            return "RMSE"
         if self.segmentation:
             return "mIoU"
         elif self.multilabel:
@@ -132,11 +154,14 @@ class Trainer:
 
     def _make_accumulator(self) -> TrainMetricAccumulator:
         tc = self.task_config
+        is_regression = (getattr(tc, 'task_type', None) == 'regression')
         return TrainMetricAccumulator(
             segmentation=(tc.task_type == 'segmentation'),
             multilabel=tc.multilabel,
             num_classes=tc.num_classes,
             ignore_index=getattr(tc, 'ignore_index', -100),
+            regression=is_regression,
+            regression_scale=getattr(tc, 'regression_scale', 1.0),
         )
 
     def _step(self, loss, params):
@@ -216,7 +241,13 @@ class Trainer:
         accum = self._make_accumulator()
         mod_str = '+'.join(m.upper() for m in modalities)
 
-        best_val_metric = 0.0 if val_loader is not None else None
+        # For regression the metric is RMSE (lower is better); for classification/
+        # segmentation it is accuracy/mAP/mIoU (higher is better).
+        _lower_is_better = (getattr(self.task_config, 'task_type', None) == 'regression')
+        if val_loader is not None:
+            best_val_metric = float('inf') if _lower_is_better else 0.0
+        else:
+            best_val_metric = None
         best_val_test_metric = None
         if val_loader is not None:
             assert best_checkpoint_path is not None, \
@@ -225,6 +256,8 @@ class Trainer:
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         global_step = 0
 
+        _regression = (getattr(self.task_config, 'task_type', None) == 'regression')
+        _regression_scale = getattr(self.task_config, 'regression_scale', 1.0)
         eval_kwargs = dict(
             modality_bands_dict=modality_bands_dict,
             modalities_to_use=modalities,
@@ -233,6 +266,8 @@ class Trainer:
             segmentation=segmentation,
             num_classes=num_classes,
             ignore_index=ignore_index,
+            regression=_regression,
+            regression_scale=_regression_scale,
         )
 
         train_metric = test_metric = 0.0
@@ -242,10 +277,14 @@ class Trainer:
             accum.reset()
             train_loss = 0.0
 
+            regression = (getattr(self.task_config, 'task_type', None) == 'regression')
+
             pbar = tqdm(train_loader, desc=f"{phase_name} Epoch {epoch+1}/{num_epochs} [{mod_str}]")
             for batch in pbar:
                 labels = batch[label_key].to(self.device)
                 if multilabel:
+                    labels = labels.float()
+                elif regression:
                     labels = labels.float()
                 modal_input = create_multimodal_batch(
                     batch, modality_bands_dict=modality_bands_dict, modalities=modalities
@@ -254,6 +293,9 @@ class Trainer:
 
                 self.optimizer.zero_grad()
                 outputs = self.model(modal_input)
+                if regression and outputs.dim() == 4:
+                    # [B,1,H,W] -> [B,H,W] to match the AGB mask target
+                    outputs = outputs.squeeze(1)
                 loss = criterion(outputs, labels)
 
                 grad_norm = self._step(loss, trainable_params)
@@ -261,7 +303,9 @@ class Trainer:
                 train_loss += loss.item()
 
                 pbar_postfix = {'loss': f'{loss.item():.4f}', 'grad_norm': f'{grad_norm:.4f}'}
-                if not segmentation and not multilabel:
+                if regression:
+                    pbar_postfix['rmse'] = f'{accum.compute():.2f}'
+                elif not segmentation and not multilabel:
                     pbar_postfix['acc'] = f'{accum.compute():.2f}%'
                 pbar.set_postfix(pbar_postfix)
 
@@ -289,8 +333,10 @@ class Trainer:
                 print(f"  Test  ({mod_str}): Loss={test_loss:.4f}, {accum.metric_name}={test_metric:.2f}%")
                 if val_metric is not None:
                     print(f"  Val   ({mod_str}): Loss={val_loss:.4f}, {accum.metric_name}={val_metric:.2f}%")
-                    if val_metric > best_val_metric:
-                        print(f"    New val record: {val_metric:.2f} > {best_val_metric:.2f} — saving checkpoint")
+                    improved = (val_metric < best_val_metric) if _lower_is_better else (val_metric > best_val_metric)
+                    if improved:
+                        cmp = '<' if _lower_is_better else '>'
+                        print(f"    New val record: {val_metric:.2f} {cmp} {best_val_metric:.2f} — saving checkpoint")
                         best_val_metric = val_metric
                         best_val_test_metric = test_metric
                         self.model.save_checkpoint(best_checkpoint_path)
@@ -1329,7 +1375,7 @@ def _compute_map(all_outputs, all_labels):
 def evaluate(model, dataloader, criterion, device, modality_bands_dict,
              modalities_to_use=('rgb',), pseudo_modalities=None, intermediate_projectors=None,
              multilabel=False, label_key='label', segmentation=False, num_classes=None,
-             ignore_index=-100):
+             ignore_index=-100, regression=False, regression_scale=1.0):
     """
     Evaluate model on a dataloader.
 
@@ -1358,11 +1404,13 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
     all_labels_list = []
     all_seg_preds = []
     all_seg_labels = []
+    sq_err_sum = 0.0
+    n_elem = 0
 
     with torch.no_grad():
         for batch in dataloader:
             labels = batch[label_key].to(device)
-            if multilabel:
+            if multilabel or regression:
                 labels = labels.float()
 
             # Create multi-modal input with specified modalities
@@ -1376,10 +1424,16 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
             else:
                 outputs = model(modal_input)
 
+            if regression and outputs.dim() == 4:
+                outputs = outputs.squeeze(1)  # [B,1,H,W] -> [B,H,W]
+
             loss = criterion(outputs, labels)
             total_loss += loss.item()
 
-            if segmentation:
+            if regression:
+                sq_err_sum += ((outputs - labels) ** 2).sum().item()
+                n_elem += labels.numel()
+            elif segmentation:
                 # outputs: [B, C, H, W]; labels: [B, H, W]
                 all_seg_preds.append(outputs.argmax(dim=1).cpu())
                 all_seg_labels.append(labels.cpu())
@@ -1392,7 +1446,9 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
                 correct += predicted.eq(labels).sum().item()
 
     avg_loss = total_loss / len(dataloader)
-    if segmentation:
+    if regression:
+        metric = ((sq_err_sum / max(1, n_elem)) ** 0.5) * regression_scale
+    elif segmentation:
         metric = compute_miou(torch.cat(all_seg_preds), torch.cat(all_seg_labels), num_classes, ignore_index=ignore_index)
     elif multilabel:
         metric = _compute_map(torch.cat(all_outputs_list), torch.cat(all_labels_list))

@@ -22,7 +22,11 @@ def distillation_loss(student_logits, teacher_logits, temperature, task_type):
         'classification' — softmax KL divergence [B, C]
         'multilabel'     — per-class BCE against sigmoid teacher probs [B, C]
         'segmentation'   — softmax KL divergence on [B, C, img_H, img_W]
+        'regression'     — MSE between student and teacher predictions [B, 1, H, W]
     """
+    if task_type == "regression":
+        # Match the teacher's continuous per-pixel prediction directly.
+        return F.mse_loss(student_logits, teacher_logits)
     if task_type == "segmentation" and student_logits.dim() == 4:
         C = student_logits.shape[1] # number of classes
         student_logits = student_logits.permute(0, 2, 3, 1).reshape(-1, C) # (batch*n_pixels),classes (per-patch class prediction)
@@ -208,6 +212,7 @@ def evaluate_multimodal(
     num_classes=None, ignore_index=-100,
     use_mask_token=False,
     teacher_classifier=None, agree_ref='teacher',
+    regression_scale=1.0,
 ):
     """
     Single-pass multimodal evaluation (peeking / transfer / addition paths).
@@ -235,6 +240,12 @@ def evaluate_multimodal(
     addition_agree = 0
     total_pixels = 0
 
+    # Regression accumulators (SSE in normalized units; converted below).
+    # regression_scale rescales RMSE to target units for reporting.
+    reg_peek_sse = reg_transfer_sse = reg_addition_sse = reg_ens_sse = 0.0
+    reg_label_elems = 0
+    reg_transfer_agree_sse = reg_addition_agree_sse = 0.0
+    reg_agree_elems = 0
 
     with torch.no_grad():
         for batch in tqdm(loader, desc=desc):
@@ -269,7 +280,17 @@ def evaluate_multimodal(
 
             # Accumulate label-based metrics
             if with_labels:
-                if task_type == "segmentation":
+                if task_type == "regression":
+                    # Continuous per-pixel predictions [B,1,H,W]; target [B,H,W].
+                    def _sq_err(pred):
+                        p = pred.squeeze(1) if pred.dim() == 4 else pred
+                        return ((p - labels) ** 2).sum().item()
+                    reg_peek_sse += _sq_err(peeking_sv)
+                    reg_transfer_sse += _sq_err(transfer_sv)
+                    reg_addition_sse += _sq_err(addition_sv)
+                    reg_ens_sse += _sq_err(ens_sv)
+                    reg_label_elems += labels.numel()
+                elif task_type == "segmentation":
                     peeking_preds_list.append(peeking_sv.argmax(1).cpu())
                     transfer_preds_list.append(transfer_sv.argmax(1).cpu())
                     addition_preds_list.append(addition_sv.argmax(1).cpu())
@@ -294,6 +315,17 @@ def evaluate_multimodal(
                 ref_sv = teacher_classifier({starting_modality: mm_batch[starting_modality]})
             else:
                 ref_sv = peeking_sv
+            if task_type == "regression":
+                # Agreement = similarity of continuous predictions to the reference.
+                # Accumulate SSE (in normalized units); converted to a bounded
+                # higher-is-better similarity after the loop.
+                r = ref_sv.squeeze(1) if ref_sv.dim() == 4 else ref_sv
+                t = transfer_sv.squeeze(1) if transfer_sv.dim() == 4 else transfer_sv
+                a = addition_sv.squeeze(1) if addition_sv.dim() == 4 else addition_sv
+                reg_transfer_agree_sse += ((t - r) ** 2).sum().item()
+                reg_addition_agree_sse += ((a - r) ** 2).sum().item()
+                reg_agree_elems += r.numel()
+                continue
             ref_preds = ref_sv.argmax(1)
             if task_type == "segmentation":
                 transfer_agree += (transfer_sv.argmax(1) == ref_preds).sum().item()
@@ -308,8 +340,18 @@ def evaluate_multimodal(
                 addition_agree += (addition_sv.argmax(1) == ref_preds).sum().item()
 
     results = {}
+    import math
     if with_labels:
-        if task_type == "segmentation":
+        if task_type == "regression":
+            # Report label metrics as NEGATIVE RMSE (target units) so the existing
+            # higher-is-better checkpoint selection picks the lowest-error model.
+            def _neg_rmse(sse):
+                return -((sse / max(1, reg_label_elems)) ** 0.5) * regression_scale
+            results['peeking_acc']  = _neg_rmse(reg_peek_sse)
+            results['transfer_acc'] = _neg_rmse(reg_transfer_sse)
+            results['addition_acc'] = _neg_rmse(reg_addition_sse)
+            results['ens_acc']      = _neg_rmse(reg_ens_sse)
+        elif task_type == "segmentation":
             all_seg_preds = torch.cat(peeking_preds_list)
             all_seg_labels = torch.cat(seg_labels_list)
             results['peeking_acc'] = compute_miou(all_seg_preds, all_seg_labels, num_classes, ignore_index)
@@ -327,6 +369,17 @@ def evaluate_multimodal(
             results['transfer_acc'] = 100.0 * transfer_correct / total
             results['addition_acc'] = 100.0 * addition_correct / total
             results['ens_acc'] = 100.0 * ens_correct / total
+    if task_type == "regression":
+        # Convert prediction-vs-reference RMSE into a bounded higher-is-better
+        # similarity in [0, 100]: 100 * exp(-rmse_agree). Keeps the downstream
+        # score multiplications (peeking * agreement / 100) well-behaved.
+        def _sim(sse):
+            rmse = ((sse / max(1, reg_agree_elems)) ** 0.5) * regression_scale
+            return 100.0 * math.exp(-rmse / max(1e-8, regression_scale))
+        results['transfer_agree'] = _sim(reg_transfer_agree_sse)
+        results['addition_agree'] = _sim(reg_addition_agree_sse)
+        return results
+
     denom = total_pixels if task_type == "segmentation" else total
     results['transfer_agree'] = 100.0 * transfer_agree / denom if denom > 0 else 0.0
     results['addition_agree'] = 100.0 * addition_agree / denom if denom > 0 else 0.0
@@ -357,11 +410,15 @@ def _compute_latent_loss(student_fused, teacher_out, latent_projectors, latent_r
 
 
 def _compute_ce_loss(student_fused, labels, model, ce_fn, device):
-    """Compute cross-entropy (or BCE) loss over all modality heads."""
+    """Compute supervised loss over all modality heads (CE/BCE, or MSE for regression)."""
     ce_loss = torch.tensor(0.0, device=device)
     mods = list(student_fused.keys())
     for mod in mods:
-        ce_loss = ce_loss + ce_fn(model.get_modality_logits(student_fused, mod), labels)
+        logits = model.get_modality_logits(student_fused, mod)
+        # Regression: segmenter head emits [B,1,H,W]; AGB target is [B,H,W].
+        if logits.dim() == 4 and logits.shape[1] == 1 and labels.dim() == 3:
+            logits = logits.squeeze(1)
+        ce_loss = ce_loss + ce_fn(logits, labels)
     return ce_loss / len(mods)
 
 
@@ -375,7 +432,7 @@ def _labeled_batch_step(
     """Process one labeled (monomodal) batch. Returns (total_loss, loss_dict)."""
     evan = model.evan
     labels = batch[label_key].to(device)
-    if task_type == "multilabel":
+    if task_type in ("multilabel", "regression"):
         labels = labels.float()
     unimodal_input = _make_batch(batch, modality_bands_dict, (starting_modality,), device)
     with torch.no_grad():
@@ -520,9 +577,17 @@ def _run_periodic_eval(
     checkpoint_selection, val_weights, best_val_metric, best_checkpoint_state,
     best_checkpoints, latent_projectors,
     use_mask_token=False, agree_ref='teacher',
+    regression_scale=1.0,
 ):
     """Run periodic eval, update checkpoints. Returns updated state."""
-    metric_label = "mIoU" if task_type == "segmentation" else ("mAP" if task_type == "multilabel" else "accuracy")
+    if task_type == "regression":
+        metric_label = "negRMSE"
+    elif task_type == "segmentation":
+        metric_label = "mIoU"
+    elif task_type == "multilabel":
+        metric_label = "mAP"
+    else:
+        metric_label = "accuracy"
 
     test_results = evaluate_multimodal(
         model=model, loader=test_loader, device=device,
@@ -534,6 +599,7 @@ def _run_periodic_eval(
         with_labels=True, desc="Testing",
         num_classes=num_classes, ignore_index=ignore_index,
         use_mask_token=use_mask_token,
+        regression_scale=regression_scale,
     )
     periodic_test_accs = {
         'transfer': test_results['transfer_acc'],
@@ -566,6 +632,7 @@ def _run_periodic_eval(
             task_type=task_type, num_classes=num_classes, ignore_index=ignore_index,
             use_mask_token=use_mask_token,
             teacher_classifier=teacher_classifier, agree_ref=agree_ref,
+            regression_scale=regression_scale,
         )
         val_metrics['transfer_agreement'] = val_mm_results['transfer_agree']
         val_metrics['addition'] = val_mm_results['addition_agree']
@@ -583,6 +650,7 @@ def _run_periodic_eval(
             with_labels=True, task_type=task_type, label_key=label_key,
             num_classes=num_classes, ignore_index=ignore_index,
             use_mask_token=use_mask_token,
+            regression_scale=regression_scale,
         )['peeking_acc']
         val_metrics['peeking'] = peeking_acc
         print(f"  Val peeking {metric_label}: {peeking_acc:.2f}%")
@@ -694,6 +762,7 @@ def train_shot(
     label_key: str = 'label',           # Batch key for labels
     num_classes: int = None,            # Required when task_type='segmentation', for mIoU computation
     ignore_index: int = -100,           # Label value to ignore in CE/mIoU (e.g. 19 for PASTIS void_label)
+    regression_scale: float = 1.0,      # task_type='regression': rescale RMSE to target units for reporting
     unimodal_teacher=None,
     asym_lr_multiplier: float | None = None,  # If set, new components get lr * asym_lr_multiplier
     dyn_teacher: bool = False,
@@ -854,7 +923,15 @@ def train_shot(
     assert task_type in ("classification", "multilabel", "segmentation"), f"Unknown task_type: {task_type!r}"
     starting_modality = evan.starting_modality
     newmod_list = [m for m in all_modalities if m != starting_modality]
-    ce_fn = nn.BCEWithLogitsLoss() if task_type == "multilabel" else nn.CrossEntropyLoss(ignore_index=ignore_index)
+
+    def _make_supervised_loss():
+        if task_type == "regression":
+            return nn.MSELoss()
+        if task_type == "multilabel":
+            return nn.BCEWithLogitsLoss()
+        return nn.CrossEntropyLoss(ignore_index=ignore_index)
+
+    ce_fn = _make_supervised_loss()
 
     best_val_metric = -float('inf')
     best_checkpoint_state = None
@@ -872,12 +949,15 @@ def train_shot(
         if loader is not None:
             _, acc = evaluate_unimodal(
                 unimodal_teacher, loader,
-                nn.BCEWithLogitsLoss() if task_type == "multilabel" else nn.CrossEntropyLoss(ignore_index=ignore_index),
+                _make_supervised_loss(),
                 device, modality_bands_dict, modalities_to_use=(starting_modality,),
                 multilabel=(task_type == "multilabel"), label_key=label_key,
                 segmentation=(task_type == "segmentation"), num_classes=num_classes, ignore_index=ignore_index,
+                regression=(task_type == "regression"), regression_scale=regression_scale,
             )
-            metric_label = "mIoU" if task_type == "segmentation" else ("mAP" if task_type == "multilabel" else "accuracy")
+            metric_label = ("RMSE" if task_type == "regression" else
+                            "mIoU" if task_type == "segmentation" else
+                            "mAP" if task_type == "multilabel" else "accuracy")
             print(f"\nTeacher baseline {set_name} {metric_label} (starting modality only): {acc:.2f}%")
             teacher_baselines[set_name] = acc
 
@@ -997,6 +1077,7 @@ def train_shot(
                 checkpoint_selection, val_weights, best_val_metric, best_checkpoint_state,
                 best_checkpoints, latent_decoders,
                 use_mask_token=use_mask_token, agree_ref=agree_ref,
+                regression_scale=regression_scale,
             )
 
             model.train()

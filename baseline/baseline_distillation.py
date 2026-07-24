@@ -15,7 +15,7 @@ import wandb
 import csv
 from tqdm import tqdm
 
-from evan_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
+from delulunet_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
 from train_utils import _compute_map, compute_miou, evaluate
 
@@ -34,7 +34,7 @@ def _copy_evan_backbone_and_modality(teacher_state_dict, evan_config, student_mo
     Shared helper: build a fresh monomodal EVAN and copy backbone + modality-specific
     weights from the teacher state dict.  Returns the initialised EVAN model.
     """
-    from evan_main import EVAN
+    from delulunet_main import EVAN
 
     evan_config = evan_config.copy()
     evan_config['starting_modality'] = student_modality

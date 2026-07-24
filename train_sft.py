@@ -9,7 +9,7 @@ from datetime import datetime
 import wandb
 import csv
 
-from evan_main import evan_small, evan_base, evan_large, evan_small_s2, BENV2_BAND_INDICES, PASTIS_BAND_INDICES, EVANClassifier, EvanSegmenter
+from delulunet_main import evan_small, evan_base, evan_large, evan_small_s2, BENV2_BAND_INDICES, PASTIS_BAND_INDICES, EVANClassifier, EvanSegmenter
 from train_utils import single_modality_training_loop
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
@@ -19,6 +19,7 @@ BENV2_MODALITIES      = ['s2', 's1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', '
 BENV2FULL_MODALITIES  = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
 PASTIS_MODALITIES     = ['s2', 's1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir']
 DFC2020_MODALITIES    = ['s2', 's1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
+BIOMASSTERS_MODALITIES = ['s2', 's1', 's2_rgb']
 
 
 def get_task_config_and_loaders(dataset, modalities, batch_size, num_workers, data_normalizer=None, num_time_steps=10, data_root=None):
@@ -50,7 +51,7 @@ def _n_chans(entry) -> int:
 def main():
     parser = argparse.ArgumentParser(description='Train EVAN on a single modality (using train1 split)')
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=['eurosat', 'benv2', 'benv2full', 'pastis', 'dfc2020'],
+                        choices=['eurosat', 'benv2', 'benv2full', 'pastis', 'dfc2020', 'biomassters'],
                         help='Dataset to train on')
     parser.add_argument('--modalities', type=str, nargs='+', required=True,
                         help='Modalities to train on (first is primary). '
@@ -97,6 +98,7 @@ def main():
         'benv2full': BENV2FULL_MODALITIES,
         'pastis':    PASTIS_MODALITIES,
         'dfc2020':   DFC2020_MODALITIES,
+        'biomassters': BIOMASSTERS_MODALITIES,
     }[args.dataset]
     for m in args.modalities:
         if m not in valid_modalities:
@@ -157,6 +159,8 @@ def main():
             'benv2full': [3, 2, 1],
             'dfc2020':   [3, 2, 1],
             'pastis':    [2, 1, 0],
+            # BioMassters s2 order B02,B03,B04,...: B04=2, B03=1, B02=0
+            'biomassters': [2, 1, 0],
         }
         rgb_in_s2_indices = (
             _S2_RGB_INDICES.get(args.dataset)
@@ -167,8 +171,11 @@ def main():
         evan = model_fn(load_weights=args.use_dino_weights, rgb_in_s2_indices=rgb_in_s2_indices, **common_kwargs)
 
     is_segmentation = (task_config.task_type == 'segmentation')
+    is_regression = (task_config.task_type == 'regression')
 
-    if is_segmentation:
+    # Regression reuses the dense (per-pixel) segmenter head with num_classes=1:
+    # a 1×1 conv over patch tokens + bilinear upsample -> [B, 1, H, W].
+    if is_segmentation or is_regression:
         model = EvanSegmenter(
             evan,
             num_classes=task_config.num_classes,
@@ -239,7 +246,9 @@ def main():
         )
 
     print(f"\n=== Training for {args.epochs} epochs ===")
-    if is_segmentation:
+    if is_regression:
+        metric_name = "RMSE"
+    elif is_segmentation:
         metric_name = "mIoU"
     elif task_config.multilabel:
         metric_name = "mAP"

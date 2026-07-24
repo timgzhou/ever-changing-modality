@@ -17,3 +17,5 @@ cd datasets
 wget https://zenodo.org/records/10891137/files/BigEarthNet-S2.tar.zst?download=1
 wget https://zenodo.org/records/10891137/files/BigEarthNet-S1.tar.zst?download=1
 ```
+
+4. download DFC2020

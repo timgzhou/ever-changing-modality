@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
-from evan.layers import CrossAttentionBlock, LoRALayer, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
+from delulunet.layers import CrossAttentionBlock, LoRALayer, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
 from functools import partial
 
 logger = logging.getLogger("evan")
@@ -896,8 +896,15 @@ class EVAN(nn.Module):
         Extract features after modality-specific layers (first tz_fusion_time blocks).
         This is useful for MAE training where you want features before fusion.
 
+        Temporal inputs: if modality tensors have shape [B, C, T, H, W] (a time
+        axis), the T dimension is folded into the batch, the non-temporal backbone
+        runs per timestep, and the resulting modality token sequences are mean-pooled
+        over T before returning. Everything downstream (fusion, heads, SHOT losses)
+        therefore sees ordinary [B, ...] features. Non-temporal [B, C, H, W] inputs
+        are unaffected.
+
         Args:
-            x: Dictionary of modality tensors
+            x: Dictionary of modality tensors {mod: [B, C, H, W]} or {mod: [B, C, T, H, W]}
             masks: Optional mask tensor
 
         Returns:
@@ -905,6 +912,29 @@ class EVAN(nn.Module):
         """
         if not isinstance(x, dict) or len(x) == 0:
             raise ValueError("Input must be a non-empty dict of modalities")
+
+        # --- Temporal fold: [B, C, T, H, W] -> [B*T, C, H, W] ---
+        # Detect a 5-D (temporal) input. All modalities must agree on T.
+        temporal_T = None
+        for v in x.values():
+            if v.dim() == 5:
+                t = v.shape[2]
+                if temporal_T is None:
+                    temporal_T = t
+                elif temporal_T != t:
+                    raise ValueError(f"Inconsistent time steps across modalities: {temporal_T} vs {t}")
+        if temporal_T is not None:
+            folded = {}
+            for modality_key, v in x.items():
+                if v.dim() != 5:
+                    raise ValueError(
+                        f"Mixed temporal/non-temporal modalities not supported; "
+                        f"{modality_key!r} has shape {tuple(v.shape)}"
+                    )
+                B, C, T, H, W = v.shape
+                # [B, C, T, H, W] -> [B, T, C, H, W] -> [B*T, C, H, W]
+                folded[modality_key] = v.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
+            x = folded
 
         # Step 1: Embed each modality and prepare tokens
         embedded_modalities = {}
@@ -940,6 +970,14 @@ class EVAN(nn.Module):
                     raise ValueError(f"Unknown augmenter mode: {self.tz_modality_specific_layer_augmenter}")
 
             embedded_modalities[modality_key] = x_mod
+
+        # --- Temporal pool: un-fold [B*T, L, D] -> [B, T, L, D], mean over T ---
+        if temporal_T is not None:
+            for modality_key, x_mod in embedded_modalities.items():
+                BT, L, D = x_mod.shape
+                B = BT // temporal_T
+                x_mod = x_mod.reshape(B, temporal_T, L, D).mean(dim=1)  # [B, L, D]
+                embedded_modalities[modality_key] = x_mod
 
         return embedded_modalities
 
@@ -2025,4 +2063,4 @@ class EvanSegmenter(EvanPredictor):
 if __name__ == '__main__':
     print("why are you calling me?")
 
-# python -u evan_main.py
+# python -u delulunet_main.py

@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from sklearn.decomposition import PCA
 
 sys.path.insert(0, os.path.dirname(__file__))
-from evan_main import EVANClassifier
+from delulunet_main import EVANClassifier
 from geobench_data_utils import get_benv2_loaders, create_multimodal_batch_geobench, BENV2_S2_BANDS
 
 # BEN-v2 S2 band indices for RGB and NIR (within the s2 slice)

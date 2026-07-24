@@ -18,6 +18,12 @@ MODALITIES="${MODALITY_ENTRY//+/ }"
 MODALITY_KEY="${MODALITY_ENTRY}"
 RESULTS_CSV="res/train_sft/${DATASET}.csv"
 
+# BioMassters is temporal: pool features over this many timesteps (<=12).
+EXTRA_ARGS=""
+if [ "${DATASET}" = "biomassters" ]; then
+    EXTRA_ARGS="--num_time_steps ${NUM_TIME_STEPS:-6}"
+fi
+
 echo "Running: model=${MODEL} dataset=${DATASET} train_mode=${TRAIN_MODE} modalities=${MODALITIES} lr=${LR} wd=${WD}"
 
 for USE_DINO in 1 0; do
@@ -42,5 +48,6 @@ for USE_DINO in 1 0; do
         --epochs 24 \
         --lr ${LR} \
         --weight_decay ${WD} \
+        ${EXTRA_ARGS} \
         ${DINO_FLAG}
 done

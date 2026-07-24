@@ -9,13 +9,14 @@ import csv
 from datetime import datetime
 import wandb
 
-from evan_main import EVANClassifier, EvanSegmenter
+from delulunet_main import EVANClassifier, EvanSegmenter
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
 VALID_NEW_MODS = {
     'eurosat': ['vre', 'nir', 'swir', 'rgb'],
     'benv2':   ['s1', 's2', 's2_rgb', 's2_norgb'],
     'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
+    'biomassters': ['s1', 's2'],
 }
 
 
@@ -23,7 +24,7 @@ def _parse_args():
     parser = argparse.ArgumentParser(description='End to end training for SHOT model.')
     # IMPORTANT
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=['eurosat', 'benv2', 'dfc2020'],
+                        choices=['eurosat', 'benv2', 'dfc2020', 'biomassters'],
                         help='Dataset to train on (default: eurosat)')
     parser.add_argument('--stage0_checkpoint', type=str, required=True,
                         help='Path to stage 0 checkpoint (required)')
@@ -83,6 +84,9 @@ def _parse_args():
     # UNIMPORTANT
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=2)
+    parser.add_argument('--num_time_steps', type=int, default=6,
+                        help='Temporal datasets (biomassters): timesteps to load; '
+                             'features are mean-pooled over them. Ignored by non-temporal datasets.')
     parser.add_argument('--epochs', type=int, default=4)
     parser.add_argument('--eval_every_n_epochs', type=int, default=2)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -141,7 +145,8 @@ def main(args=None):
     data_normalizer = None
     train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config = \
         get_loaders(args.dataset, starting_modality, args.batch_size, args.num_workers,
-                    data_normalizer=data_normalizer, new_modality=newmod)
+                    data_normalizer=data_normalizer, new_modality=newmod,
+                    num_time_steps=args.num_time_steps)
 
     modality_bands_dict = task_config.modality_bands_dict
     bands_newmod = modality_bands_dict[newmod]
@@ -201,6 +206,7 @@ def main(args=None):
         label_key=task_config.label_key,
         num_classes=task_config.num_classes,
         ignore_index=getattr(task_config, 'ignore_index', -100),
+        regression_scale=getattr(task_config, 'regression_scale', 1.0),
     )
 
     # Log teacher baselines

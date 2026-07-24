@@ -20,6 +20,9 @@ PAIRS=(
     # "eurosat nir     rgb"
     # "eurosat nir     vre"
     # "eurosat vre     nir"
+    # BioMassters (temporal S1/S2 AGB regression) — S1<->S2 only.
+    # "biomassters s2 s1"
+    # "biomassters s1 s2"
 )
 
 MODELS=('evan_base')

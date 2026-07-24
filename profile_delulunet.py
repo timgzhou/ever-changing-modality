@@ -57,7 +57,7 @@ class PeekWrapper(nn.Module):
         self.model = model
 
     def forward(self, x_s2):
-        from evan_main import hallucinate_intermediate_features, merge_intermediate_features
+        from delulunet_main import hallucinate_intermediate_features, merge_intermediate_features
         evan = self.model.evan
         intermediate = evan.forward_modality_specific_features({STARTING_MOD: x_s2})
         hallucinated = hallucinate_intermediate_features(
@@ -77,7 +77,7 @@ class S1PeekWrapper(nn.Module):
         self.model = model
 
     def forward(self, x_s1):
-        from evan_main import hallucinate_intermediate_features, merge_intermediate_features
+        from delulunet_main import hallucinate_intermediate_features, merge_intermediate_features
         evan = self.model.evan
         intermediate = evan.forward_modality_specific_features({NEW_MOD: x_s1})
         hallucinated = hallucinate_intermediate_features(
@@ -498,7 +498,7 @@ def profile_evan_sft(label, checkpoint, input_mods, in_chans_map, device):
     execute — excludes intermediate_projectors / projector_queries which exist
     in the checkpoint but are never called during a plain forward pass.
     """
-    from evan_main import EVANClassifier
+    from delulunet_main import EVANClassifier
     model = EVANClassifier.from_checkpoint(checkpoint, device=device)
     model.eval()
     total = sum(p.numel() for p in model.parameters())
@@ -570,7 +570,7 @@ def main():
     # 2. DeluluNet
     # ------------------------------------------------------------------ #
     print(f'\n=== Loading DeluluNet from {args.delulu_checkpoint} ===')
-    from evan_main import EVANClassifier
+    from delulunet_main import EVANClassifier
     model = EVANClassifier.from_checkpoint(args.delulu_checkpoint, device=device)
     model.eval()
     evan = model.evan

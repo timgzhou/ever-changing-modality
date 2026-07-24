@@ -33,6 +33,7 @@ class TaskConfig:
     modality_bands_dict: dict   # {modality: slice} for GeoBench, {modality: tuple[str]} for EuroSAT
     img_size: int
     ignore_index: int = -100    # label value to ignore in loss/metric
+    regression_scale: float = 1.0  # regression only: multiply normalized RMSE to report in target units
 
 
 # ---------------------------------------------------------------------------
@@ -64,11 +65,14 @@ def create_multimodal_batch(
     """
     first_val = next(iter(modality_bands_dict.values()))
     if isinstance(first_val, (slice, list)):
-        # GeoBench path: slice pre-normalized stacked image
-        image = batch['image']  # [B, C_total, H, W]
+        # GeoBench path: slice pre-normalized stacked image.
+        # image is [B, C_total, H, W] normally, or [B, C_total, T, H, W] for
+        # temporal datasets (BioMassters). Slice the channel axis (dim 1) in a
+        # rank-agnostic way so the optional T axis rides along untouched.
+        image = batch['image']
         result = {}
         for mod in modalities:
-            x = image[:, modality_bands_dict[mod], :, :]
+            x = image[:, modality_bands_dict[mod], ...]
             if mod == 'rgb':
                 # S2 RGB: clip to [0, 0.2] then rescale to [0,1] for DINOv2 compatibility
                 from eurosat_data_utils import apply_imagenet_normalization, _geobench_rgb_stats
@@ -151,6 +155,14 @@ def get_loaders(
             kwargs['data_normalizer'] = data_normalizer
         # else: leave default (ZScoreNormalizer) in get_benv2_loaders
         return get_benv2_loaders(**kwargs)
+    elif dataset == 'biomassters':
+        from biomassters_data_utils import get_biomassters_loaders
+        kwargs = dict(batch_size=batch_size, num_workers=num_workers,
+                      starting_modality=starting_modality, new_modality=new_modality,
+                      num_time_steps=num_time_steps)
+        if data_normalizer is not None and data_normalizer is not False:
+            kwargs['data_normalizer'] = data_normalizer
+        return get_biomassters_loaders(**kwargs)
     elif dataset == 'benv2full':
         raise NotImplementedError("No support for benv2full yet")
     elif dataset == 'pastis':
@@ -163,7 +175,7 @@ def get_loaders(
             kwargs['normalize'] = False  # raw pixels for OlmoEarth
         return get_dfc2020_loaders(**kwargs)
     else:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Valid: 'eurosat', 'benv2', 'benv2full', 'pastis', 'dfc2020'")
+        raise ValueError(f"Unknown dataset: {dataset!r}. Valid: 'eurosat', 'benv2', 'biomassters', 'benv2full', 'pastis', 'dfc2020'")
 
 
 def _get_eurosat_loaders(starting_modality, new_modality, batch_size, num_workers, data_normalizer=None):

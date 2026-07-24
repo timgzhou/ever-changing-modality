@@ -8,7 +8,7 @@ import csv
 from tqdm import tqdm
 from itertools import combinations
 
-from evan_main import EVANClassifier
+from delulunet_main import EVANClassifier
 from data_utils import create_multimodal_batch
 from eurosat_data_utils import get_modality_bands_dict
 

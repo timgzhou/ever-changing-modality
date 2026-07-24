@@ -26,7 +26,7 @@ import csv
 from tqdm import tqdm
 import kornia.augmentation as K
 
-from evan_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
+from delulunet_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
 from train_utils import make_scheduler, TrainMetricAccumulator, evaluate
 

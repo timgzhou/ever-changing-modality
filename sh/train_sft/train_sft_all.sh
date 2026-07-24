@@ -17,6 +17,9 @@ declare -A MODALITY_CONFIGS
 MODALITY_CONFIGS['eurosat']='vre+nir'
 MODALITY_CONFIGS['benv2']='s2_norgb s2 s2_rgb+s1 s2_rgb+s2_norgb'
 MODALITY_CONFIGS['dfc2020']='s2_norgb s2_rgb+s1 s2_rgb+s2_norgb'
+# BioMassters (temporal S1/S2 AGB regression). Stage-0 oracles: single modality.
+# Combined (s2+s1 / s1+s2) is the addition upper bound. Temporal steps via --num_time_steps.
+MODALITY_CONFIGS['biomassters']='s2 s1 s2+s1'
 
 
 DATASETS=('eurosat')

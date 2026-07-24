@@ -54,6 +54,12 @@ UNPROTECT_FLAG=""
 
 WANDB_PROJECT="delulu-${DATASET}-${STARTING_MOD}-${NEW_MOD}"
 
+# BioMassters is temporal: pool features over this many timesteps (<=12).
+EXTRA_ARGS=""
+if [ "${DATASET}" = "biomassters" ]; then
+    EXTRA_ARGS="--num_time_steps ${NUM_TIME_STEPS:-6}"
+fi
+
 echo "=== ${DATASET} | ${MODEL} | ${STARTING_MOD} -> ${NEW_MOD} | select_by=${SELECT_BY} ==="
 echo "    lr=${LR} wd=${WD} epochs=${EPOCHS} md=${MD} lf=${LF} ls=${LS}"
 
@@ -82,4 +88,5 @@ python -u shot_ete.py \
     --select_by "$SELECT_BY" \
     --results_csv "$RESULTS_CSV" \
     --batch_size 32 \
-    --num_workers 4
+    --num_workers 4 \
+    ${EXTRA_ARGS}
