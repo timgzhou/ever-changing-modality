@@ -1524,30 +1524,38 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                                    segmentation=False, num_classes=None,
                                    ignore_index=-100,
                                    val_loader=None, best_checkpoint_path=None,
-                                   val_per_epoch=1, warmup_epochs=1):
+                                   val_per_epoch=1, warmup_epochs=1,
+                                   task_config=None):
     """
     Supervised training loop for single-modality EVAN training (Stage 0).
 
     Backward-compatible wrapper around Trainer.train_supervised.
 
+    Args:
+        task_config: Pass the caller's real TaskConfig to preserve fields the
+            loose kwargs cannot express (task_type='regression', regression_scale).
+            When None, a TaskConfig is reconstructed from the kwargs, which only
+            covers classification / multilabel / segmentation.
+
     Returns:
         (train_metric, test_metric, best_val_metric, best_val_test_metric)
     """
     from data_utils import TaskConfig
-    task_config = TaskConfig(
-        dataset_name='',
-        task_type='segmentation' if segmentation else ('multilabel' if multilabel else 'classification'),
-        modality_a=modality,
-        modality_b='',
-        modality_a_channels=0,
-        modality_b_channels=0,
-        num_classes=num_classes or 0,
-        multilabel=multilabel,
-        label_key=label_key,
-        modality_bands_dict=modality_bands_dict,
-        img_size=0,
-        ignore_index=ignore_index,
-    )
+    if task_config is None:
+        task_config = TaskConfig(
+            dataset_name='',
+            task_type='segmentation' if segmentation else ('multilabel' if multilabel else 'classification'),
+            modality_a=modality,
+            modality_b='',
+            modality_a_channels=0,
+            modality_b_channels=0,
+            num_classes=num_classes or 0,
+            multilabel=multilabel,
+            label_key=label_key,
+            modality_bands_dict=modality_bands_dict,
+            img_size=0,
+            ignore_index=ignore_index,
+        )
     trainer = Trainer(
         model, optimizer, device, task_config,
         clip_norm=clip_norm, use_wandb=use_wandb, wandb_prefix=wandb_prefix,

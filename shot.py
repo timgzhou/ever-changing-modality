@@ -920,7 +920,7 @@ def train_shot(
         optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=weight_decay)
     scheduler = make_scheduler(optimizer, args.epochs, warmup_epochs=warmup_epochs)
 
-    assert task_type in ("classification", "multilabel", "segmentation"), f"Unknown task_type: {task_type!r}"
+    assert task_type in ("classification", "multilabel", "segmentation", "regression"), f"Unknown task_type: {task_type!r}"
     starting_modality = evan.starting_modality
     newmod_list = [m for m in all_modalities if m != starting_modality]
 

@@ -1,0 +1,6 @@
+dataset,model_type,modality,train_mode,tz_lora_rank,tz_modality_specific_layer_augmenter,learning_rate,weight_decay,trainable_params,epoch,test_metric,val_metric,metric_name,saved_checkpoint,global_rep,dino_init
+biomassters,evan_base,s2,fft,32,fft,0.0005,0.01,87046657,24,61.32,58.41,RMSE,checkpoints/sft_evan_base_biomassters_s2_fft_4367633.pt,clstoken,True
+biomassters,evan_base,s1,fft,32,fft,0.0005,0.01,85867009,24,64.34,61.36,RMSE,checkpoints/sft_evan_base_biomassters_s1_fft_4369852.pt,clstoken,True
+biomassters,evan_base,s2,fft,32,fft,0.0005,0.01,87046657,24,60.92,57.92,RMSE,checkpoints/sft_evan_base_biomassters_s2_fft_4369854.pt,clstoken,True
+biomassters,evan_base,s1,fft,32,fft,0.0005,0.01,85867009,24,60.58,58.26,RMSE,checkpoints/sft_evan_base_biomassters_s1_fft_4373134.pt,clstoken,True
+biomassters,evan_base,s2,fft,32,fft,0.0005,0.01,87046657,24,59.00,56.86,RMSE,checkpoints/sft_evan_base_biomassters_s2_fft_4373133.pt,clstoken,True

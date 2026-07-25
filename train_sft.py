@@ -211,7 +211,10 @@ def main():
 
     # Loss
     ignore_index = getattr(task_config, 'ignore_index', -100)
-    if task_config.multilabel:
+    if is_regression:
+        criterion = nn.MSELoss()
+        print("Loss: MSELoss (regression)")
+    elif task_config.multilabel:
         criterion = nn.BCEWithLogitsLoss()
         print("Loss: BCEWithLogitsLoss (multilabel)")
     else:
@@ -281,6 +284,7 @@ def main():
         best_checkpoint_path=checkpoint_path if not args.skipsave else None,
         val_per_epoch=args.val_per_epoch,
         warmup_epochs=args.warmup_epochs,
+        task_config=task_config,
     )
 
     # Patch normalization into checkpoint config so shot_ete.py can read it back

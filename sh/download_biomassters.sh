@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=5:59:00
+#SBATCH --time=11:59:00
 #SBATCH --account=aip-gpleiss
 #SBATCH --output=logs/download_biomassters/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com
@@ -9,12 +9,16 @@
 
 # Download the BioMassters geobench shards directly (no GPU needed).
 #
-# Why this exists: geobench-v2's hardcoded sha256 values for this dataset are
-# stale relative to the current HuggingFace upload, so its download=True path
-# fetches a *correct* file and then aborts on hash mismatch. However,
-# GeoBenchDataset.dataset_verification() returns early when ALL shards already
-# exist on disk -- the hash check is only run for files it has to fetch itself.
-# So: pre-stage all three shards here, and the training job skips verification.
+# Why this exists: the released geobench-v2 0.9 pins only the FIRST 3 of the
+# dataset's 7 tortilla shards, with sha256 values from an older HuggingFace
+# upload. Downloading only those 3 yields a 43% subset of the benchmark
+# (1735/759/1200 train/val/test instead of the paper's 4011/1739/2776), and the
+# stale hashes make verification fail on correctly-downloaded files.
+#
+# Fix: the installed geobench_v2/datasets/biomassters.py has been patched with
+# the 7-shard path list and current hashes from the upstream git repo
+# (backup at biomassters.py.bak-v09). This script fetches all 7 shards so the
+# full, leaderboard-comparable splits are available.
 #
 # Usage:  sbatch sh/download_biomassters.sh
 
@@ -23,10 +27,15 @@ set -uo pipefail
 DATA_DIR="datasets/geoben2/biomassters"
 BASE_URL="https://hf.co/datasets/aialliance/biomassters/resolve/main"
 
+# All 7 shards (~138 GB total). wget -c skips/resumes ones already complete.
 SHARDS=(
     "geobench_biomassters.0000.part.tortilla"
     "geobench_biomassters.0001.part.tortilla"
     "geobench_biomassters.0002.part.tortilla"
+    "geobench_biomassters.0003.part.tortilla"
+    "geobench_biomassters.0004.part.tortilla"
+    "geobench_biomassters.0005.part.tortilla"
+    "geobench_biomassters.0006.part.tortilla"
 )
 
 mkdir -p logs/download_biomassters "${DATA_DIR}"
