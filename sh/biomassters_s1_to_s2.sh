@@ -16,7 +16,7 @@
 # Optional env overrides:
 #   MODEL          (default evan_base)
 #   LR / WD        stage-0 SFT lr / weight decay (default 0.0005 / 0.01)
-#   NUM_TIME_STEPS temporal pooling window, <=12 (default 6)
+#   NUM_TIME_STEPS temporal pooling window, <=12 (default 12)
 #   SELECT_BY      SHOT hparam bucket in the sweep json (default addition)
 
 set -euo pipefail
@@ -32,7 +32,7 @@ NEW_MOD="s2"
 TRAIN_MODE="fft"
 LR="${LR:-0.0005}"
 WD="${WD:-0.01}"
-NUM_TIME_STEPS="${NUM_TIME_STEPS:-6}"
+NUM_TIME_STEPS="${NUM_TIME_STEPS:-12}"
 SELECT_BY="${SELECT_BY:-addition}"
 
 mkdir -p logs/biomassters_s1_to_s2 checkpoints

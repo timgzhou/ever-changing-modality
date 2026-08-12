@@ -4,8 +4,10 @@ from data_utils import get_loaders
 import torch
 import logging
 import os
+import random
 import argparse
 import csv
+import numpy as np
 from datetime import datetime
 import wandb
 
@@ -30,8 +32,8 @@ def _parse_args():
                         help='Path to stage 0 checkpoint (required)')
     parser.add_argument('--new_mod_group', type=str, required=True,
                         help='New modality to add (eurosat: vre/nir/swir/rgb; benv2/pastis/dfc2020: s1/s2)')
-    parser.add_argument('--token_mask_ratio', '--mae_mask_ratio', type=float, default=0.75,
-                        help='Ratio of tokens masked per modality during training (default: 0.75)')
+    parser.add_argument('--token_mask_ratio', '--mae_mask_ratio', type=float, default=0.4,
+                        help='Ratio of tokens masked per modality during training (default: 0.4)')
     parser.add_argument('--modality_dropout', type=float, default=0.3,
                         help='Probability of fully masking a modality')
     parser.add_argument('--modality_dropout_startmod', type=float, default=None,
@@ -42,7 +44,7 @@ def _parse_args():
                              'for new mod when set (default: None → use --modality_dropout).')
     parser.add_argument('--labeled_frequency', type=float, default=0.3,
                         help='Frequency of labeled monomodal batches from train1 (0-1, default: 0.3)')
-    parser.add_argument('--labeled_start_fraction', type=float, default=0.5,
+    parser.add_argument('--labeled_start_fraction', type=float, default=0,
                         help='Fraction of training before labeled mixing starts (0=start, 0.5=halfway, 1=never)')
     parser.add_argument('--active_losses', type=str, nargs='+', required=True,
                         choices=['latent', 'prefusion', 'distill', 'ce'],
@@ -67,8 +69,8 @@ def _parse_args():
     parser.add_argument('--dyn_teacher', action='store_true',
                         help='Dynamic teacher distillation: starting_modality head trains against '
                              'student peeking (soft-vote), newmod heads train against frozen unimodal teacher')
-    parser.add_argument('--warmup_epochs', type=int, default=3,
-                        help='Linear LR warmup epochs before cosine decay (default: 3)')
+    parser.add_argument('--warmup_epochs', type=int, default=4,
+                        help='Linear LR warmup epochs before cosine decay (default: 4)')
 
     parser.add_argument('--results_csv', type=str, required=True,
                         help='Path to results CSV file')
@@ -84,7 +86,7 @@ def _parse_args():
     # UNIMPORTANT
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=2)
-    parser.add_argument('--num_time_steps', type=int, default=6,
+    parser.add_argument('--num_time_steps', type=int, default=12,
                         help='Temporal datasets (biomassters): timesteps to load; '
                              'features are mean-pooled over them. Ignored by non-temporal datasets.')
     parser.add_argument('--epochs', type=int, default=4)
@@ -100,6 +102,12 @@ def _parse_args():
     parser.add_argument('--checkpoint_name', type=str, default=None)
     parser.add_argument('--save_checkpoint', action='store_true',
                         help='Save final model checkpoint to --checkpoint_dir')
+    parser.add_argument('--seed', type=int, default=0,
+                        help='Random seed for torch/numpy/random; recorded in the results CSV '
+                             'so repeated runs of the same config are distinguishable.')
+    parser.add_argument('--config_label', type=str, default=None,
+                        help='Free-form tag recorded in the results CSV to identify which '
+                             'config a row came from (e.g. "peeking_rank1").')
     args = parser.parse_args()
 
     if args.dyn_teacher:
@@ -117,6 +125,16 @@ def _parse_args():
 def main(args=None):
     if args is None:
         args = _parse_args()
+
+    # Seed before any model/dataloader construction so repeated runs of the same
+    # config differ only by --seed. Note this does not force cudnn determinism;
+    # runs are reproducible up to normal GPU kernel nondeterminism.
+    seed = getattr(args, 'seed', 0)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    print(f"=== Seed: {seed} ===")
 
     print(f"\n=== Loading Stage 0 checkpoint from: {args.stage0_checkpoint} ===")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -207,6 +225,8 @@ def main(args=None):
         num_classes=task_config.num_classes,
         ignore_index=getattr(task_config, 'ignore_index', -100),
         regression_scale=getattr(task_config, 'regression_scale', 1.0),
+        regression_loss_scale=getattr(task_config, 'regression_loss_scale', 1.0),
+        regression_mask_above=getattr(task_config, 'regression_mask_above', None),
     )
 
     # Log teacher baselines
@@ -227,11 +247,34 @@ def main(args=None):
             wandb.run.summary[f'{ckpt_name}_test_addition_ens'] = ckpt_data['test_accs'].get('addition_ens', 0)
 
     # ========================================= CHECKPOINT =====================================
+    # NOTE: this saves the FINAL-epoch model. best_checkpoints tracks the best-val
+    # epochs but only stores metrics (no weights), so the best-val model is not
+    # recoverable from disk -- see the metrics in the results CSV for that epoch.
     if args.save_checkpoint:
-        timestamp_shot = datetime.now().strftime('%m%d_%H%M')
-        ckpt_path = os.path.join(args.checkpoint_dir, f'delulunet_{args.dataset}_{timestamp_shot}.pt')
-        torch.save({'model_state_dict': model.state_dict(), 'config': model.get_config()}, ckpt_path)
-        print(f"Checkpoint saved to: {ckpt_path}")
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
+        if args.checkpoint_name:
+            ckpt_file = args.checkpoint_name
+            if not ckpt_file.endswith('.pt'):
+                ckpt_file += '.pt'
+        else:
+            timestamp_shot = datetime.now().strftime('%m%d_%H%M')
+            # include the modality direction so s1->s2 and s2->s1 runs don't collide
+            ckpt_file = (f'delulunet_{args.dataset}_{starting_modality}to{args.new_mod_group}'
+                         f'_{timestamp_shot}.pt')
+        ckpt_path = os.path.join(args.checkpoint_dir, ckpt_file)
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'config': model.get_config(),
+            # provenance needed to rebuild the eval/viz pipeline for this run
+            'dataset': args.dataset,
+            'starting_modality': starting_modality,
+            'new_modality': args.new_mod_group,
+            'num_time_steps': args.num_time_steps,
+            'stage0_checkpoint': args.stage0_checkpoint,
+            'epochs': args.epochs,
+            'best_checkpoints': best_checkpoints,
+        }, ckpt_path)
+        print(f"Checkpoint saved to: {ckpt_path}  (final epoch {args.epochs})")
 
     # ========================================= CSV LOGGING =====================================
     def get_ckpt_data(ckpt_name, test_key):
@@ -264,6 +307,8 @@ def main(args=None):
         "val_addition", "test_addition",
         "val_ens_addition", "test_ens_addition",
         "stage0_checkpoint",
+        # appended last so existing positional CSV readers keep working
+        "seed", "config_label",
     ]
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
@@ -306,6 +351,8 @@ def main(args=None):
             f"{val_ens_addition:.2f}" if val_ens_addition is not None else "",
             f"{test_ens_addition:.2f}" if test_ens_addition is not None else "",
             args.stage0_checkpoint,
+            seed,
+            args.config_label or "",
         ])
 
     print(f"\nResults appended to {filename}")

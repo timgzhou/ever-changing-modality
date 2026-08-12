@@ -274,10 +274,18 @@ class EVAN(nn.Module):
             flatten_embedding=False,
         )
     def add_new_cls_token(self,modality_name):
-        self.cls_tokens[modality_name] = nn.Parameter(torch.empty(1, 1, self.embed_dim, device=self.device))
+        # NOTE: must be initialized, not left as torch.empty(). DINO weight loading
+        # overwrites these only for the primary modality; any modality added later
+        # (e.g. 's1') would otherwise keep uninitialized memory (inf/NaN) and poison
+        # the whole forward pass. Same std=0.02 convention as projector_queries.
+        param = nn.Parameter(torch.empty(1, 1, self.embed_dim, device=self.device))
+        nn.init.trunc_normal_(param, std=0.02)
+        self.cls_tokens[modality_name] = param
     def add_new_storage_tokens(self,modality_name):
         assert modality_name not in self.storage_tokens, f"{modality_name} already in storage_tokens"
-        self.storage_tokens[modality_name] = nn.Parameter(torch.empty(1, self.n_storage_tokens, self.embed_dim, device=self.device))
+        param = nn.Parameter(torch.empty(1, self.n_storage_tokens, self.embed_dim, device=self.device))
+        nn.init.trunc_normal_(param, std=0.02)
+        self.storage_tokens[modality_name] = param
     def add_new_msla(self, modality, init="backbone"):
         """
         Add modality-specific layer adaptors.
@@ -1850,6 +1858,181 @@ class EVANClassifier(EvanPredictor):
         return model
 
 
+class ConvBNReLU(nn.Sequential):
+    """Conv -> BN -> ReLU, the standard UPerNet building block."""
+
+    def __init__(self, in_ch: int, out_ch: int, kernel_size: int = 3):
+        super().__init__(
+            nn.Conv2d(in_ch, out_ch, kernel_size, padding=kernel_size // 2, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+
+class PPM(nn.ModuleList):
+    """
+    Pyramid Pooling Module (PSPNet), the global-context branch of UPerNet.
+
+    Pools the feature map to several fixed grids, projects each, and upsamples
+    back to the input resolution. Gives the head a global receptive field, which
+    a 1x1 conv lacks -- biomass at a pixel depends on the surrounding stand, not
+    just that one patch. Returns the per-scale maps; the caller concatenates them
+    with the input and runs the bottleneck (matching PANGAEA/mmseg).
+    """
+
+    def __init__(self, pool_scales, in_ch: int, out_ch: int):
+        super().__init__([
+            nn.Sequential(
+                nn.AdaptiveAvgPool2d(s),
+                nn.Conv2d(in_ch, out_ch, 1, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+            )
+            for s in pool_scales
+        ])
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        hw = x.shape[2:]
+        return [
+            F.interpolate(stage(x), size=hw, mode='bilinear', align_corners=False)
+            for stage in self
+        ]
+
+
+class Feature2Pyramid(nn.Module):
+    """
+    Turn a plain ViT's single-scale feature maps into an FPN-style pyramid.
+
+    Port of PANGAEA's `Feature2Pyramid` neck (pangaea/decoders/upernet.py).
+    Each level is rescaled by a fixed factor; channel count is preserved.
+
+        4    -> two ConvTranspose2d (4x up)
+        2    -> one ConvTranspose2d (2x up)
+        1    -> identity
+        0.5  -> MaxPool2d(2)
+        0.25 -> MaxPool2d(4)
+    """
+
+    def __init__(self, embed_dim: list[int], rescales=(4, 2, 1, 0.5)):
+        super().__init__()
+        self.rescales = rescales
+        self.ops = nn.ModuleList()
+        for i, k in enumerate(rescales):
+            d = embed_dim[i]
+            if k == 4:
+                self.ops.append(nn.Sequential(
+                    nn.ConvTranspose2d(d, d, kernel_size=2, stride=2),
+                    nn.BatchNorm2d(d),
+                    nn.GELU(),
+                    nn.ConvTranspose2d(d, d, kernel_size=2, stride=2),
+                ))
+            elif k == 2:
+                self.ops.append(nn.ConvTranspose2d(d, d, kernel_size=2, stride=2))
+            elif k == 1:
+                self.ops.append(nn.Identity())
+            elif k == 0.5:
+                self.ops.append(nn.MaxPool2d(kernel_size=2, stride=2))
+            elif k == 0.25:
+                self.ops.append(nn.MaxPool2d(kernel_size=4, stride=4))
+            else:
+                raise KeyError(f"invalid {k} for feature2pyramid")
+
+    def forward(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
+        assert len(inputs) == len(self.rescales)
+        return [op(x) for op, x in zip(self.ops, inputs)]
+
+
+class UPerNetDecoder(nn.Module):
+    """
+    UPerNet dense-prediction head, ported from PANGAEA's `RegUPerNet`
+    (configs/decoder/reg_upernet.yaml -> pangaea.decoders.upernet.RegUPerNet).
+
+    Pipeline: Feature2Pyramid neck -> PPM on the coarsest level -> top-down FPN
+    -> concat all levels -> fpn_bottleneck -> dropout -> 1x1 predictor.
+
+    EVAN is a plain ViT exposing one 16x16 token grid, so the same map is fed to
+    all four pyramid levels and the neck rescales them to 64/32/16/8 -- exactly
+    what PANGAEA does for non-`pyramid_output` encoders (it repeats
+    `encoder.output_layers` and applies rescales [4, 2, 1, 0.5]).
+
+    Versus the old `linear` head (1x1 conv on the 16x16 grid + 16x bilinear),
+    predictions come from learned, progressively upsampled multi-scale features
+    with a global-context branch, instead of a piecewise-constant 16px map.
+
+    Args:
+        relu_output: apply ReLU to the prediction (PANGAEA's RegUPerNet does this,
+            valid when the target is non-negative, e.g. raw AGB in t/ha).
+    """
+
+    def __init__(self, embed_dim: int, num_classes: int, channels: int = 512,
+                 img_size: int = 256, patch_hw: int = 16,
+                 pool_scales=(1, 2, 3, 6), num_levels: int = 4,
+                 relu_output: bool = False):
+        super().__init__()
+        self.img_size = img_size
+        self.patch_hw = patch_hw
+        self.channels = channels
+        self.relu_output = relu_output
+
+        # Stabilize token statistics before the conv stack (the previous linear
+        # head relied on this non-affine BatchNorm2d; keep it).
+        self.input_norm = nn.BatchNorm2d(embed_dim, affine=False)
+
+        in_channels = [embed_dim] * num_levels
+        scales = [4, 2, 1, 0.5]
+        rescales = [scales[int(i / num_levels * 4)] for i in range(num_levels)]
+        self.neck = Feature2Pyramid(embed_dim=in_channels, rescales=rescales)
+
+        # PSP module on the coarsest level, for global context.
+        self.psp_modules = PPM(pool_scales, in_channels[-1], channels)
+        self.bottleneck = ConvBNReLU(
+            in_channels[-1] + len(pool_scales) * channels, channels, 3)
+
+        # FPN laterals / output convs (top level is handled by the PPM above).
+        self.lateral_convs = nn.ModuleList(
+            [ConvBNReLU(d, channels, 1) for d in in_channels[:-1]])
+        self.fpn_convs = nn.ModuleList(
+            [ConvBNReLU(channels, channels, 3) for _ in in_channels[:-1]])
+
+        self.fpn_bottleneck = ConvBNReLU(len(in_channels) * channels, channels, 3)
+        self.dropout = nn.Dropout2d(0.1)
+        self.predictor = nn.Conv2d(channels, num_classes, kernel_size=1)
+
+    def _psp_forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.bottleneck(torch.cat([x, *self.psp_modules(x)], dim=1))
+
+    def forward(self, feat_map: torch.Tensor) -> torch.Tensor:
+        """feat_map: [B, D, patch_hw, patch_hw] -> [B, num_classes, img_size, img_size]"""
+        x = self.input_norm(feat_map)
+        inputs = self.neck([x] * len(self.neck.rescales))
+
+        # Build laterals; the coarsest level goes through the PPM.
+        laterals = [conv(inputs[i]) for i, conv in enumerate(self.lateral_convs)]
+        laterals.append(self._psp_forward(inputs[-1]))
+
+        # Top-down pathway: add each coarser level into the next finer one.
+        for i in range(len(laterals) - 1, 0, -1):
+            laterals[i - 1] = laterals[i - 1] + F.interpolate(
+                laterals[i], size=laterals[i - 1].shape[2:],
+                mode='bilinear', align_corners=False)
+
+        # Refine, then bring every level to the finest resolution and concat.
+        outs = [conv(laterals[i]) for i, conv in enumerate(self.fpn_convs)]
+        outs.append(laterals[-1])
+        target_hw = outs[0].shape[2:]
+        outs = [
+            o if o.shape[2:] == target_hw else
+            F.interpolate(o, size=target_hw, mode='bilinear', align_corners=False)
+            for o in outs
+        ]
+
+        out = self.predictor(self.dropout(self.fpn_bottleneck(torch.cat(outs, dim=1))))
+        if self.relu_output:
+            out = torch.relu(out)
+        return F.interpolate(out, size=(self.img_size, self.img_size),
+                             mode='bilinear', align_corners=False)
+
+
 class EvanSegmenter(EvanPredictor):
     """
     Segmentation head on top of EVAN.
@@ -1858,6 +2041,9 @@ class EvanSegmenter(EvanPredictor):
     in shot_ete.py, shot.py, and train_stage0.py when task_type == 'segmentation'.
 
     decoder_type='linear' (default): 1×1 Conv2d on patch tokens + bilinear upsample.
+    decoder_type='upernet': UPerNet-style multi-scale decoder (see UPerNetDecoder).
+                            Recommended for dense regression (e.g. BioMassters AGB),
+                            where the linear head's 16x-bilinear output is too coarse.
     """
 
     def __init__(
@@ -1867,6 +2053,8 @@ class EvanSegmenter(EvanPredictor):
         decoder_strategy: str = 'mean',
         decoder_type: str = 'linear',
         device: str = 'cuda',
+        decoder_channels: int = 512,
+        relu_output: bool = False,
     ):
         """
         Args:
@@ -1874,11 +2062,17 @@ class EvanSegmenter(EvanPredictor):
             num_classes: Number of segmentation classes (e.g. 19 for PASTIS).
             decoder_strategy: 'mean' (shared decoder on averaged patch tokens) or
                               'ensemble' (per-modality decoders, average logits).
-            decoder_type: 'linear' (1×1 Conv2d + bilinear upsample)
+            decoder_type: 'linear' (1×1 Conv2d + bilinear upsample) or
+                          'upernet' (PANGAEA RegUPerNet-style multi-scale decoder).
             device: Target device.
+            decoder_channels: Width of the UPerNet decoder (PANGAEA default: 512).
+            relu_output: Apply ReLU to predictions. Only for non-negative
+                         regression targets (e.g. raw AGB in t/ha).
         """
         super().__init__(evan_model, num_classes, decoder_strategy, device)
         self.decoder_type = decoder_type
+        self.decoder_channels = decoder_channels
+        self.relu_output = relu_output
 
         embed_dim = evan_model.embed_dim
         self._patch_hw = evan_model.img_size // evan_model.patch_size
@@ -1956,6 +2150,15 @@ class EvanSegmenter(EvanPredictor):
         """Return a decoder head according to decoder_type."""
         if self.decoder_type == 'unet':
             raise NotImplementedError("UNET decoder not supported for ViT")
+        elif self.decoder_type == 'upernet':
+            return UPerNetDecoder(
+                embed_dim=embed_dim,
+                num_classes=self.num_classes,
+                channels=self.decoder_channels,
+                img_size=self._img_size,
+                patch_hw=self._patch_hw,
+                relu_output=self.relu_output,
+            )
         else:  # 'linear'
             return nn.Sequential(
                 nn.BatchNorm2d(embed_dim, affine=False),
@@ -1965,9 +2168,12 @@ class EvanSegmenter(EvanPredictor):
         """Run patch_tokens [B, N, D] through dec and return [B, C, H, W]."""
         if self.decoder_type == 'unet':
             raise NotImplementedError("UNET decoder not supported for ViT")
-        # linear: reshape to spatial map, apply 1×1 conv, bilinear upsample
         B, N, D = patch_tokens.shape
         feat_map = patch_tokens.permute(0, 2, 1).reshape(B, D, self._patch_hw, self._patch_hw)
+        if self.decoder_type == 'upernet':
+            # UPerNetDecoder handles its own upsampling to full resolution.
+            return dec(feat_map)
+        # linear: apply 1×1 conv, bilinear upsample
         logits_small = dec(feat_map)
         return F.interpolate(logits_small, size=(self._img_size, self._img_size),
                              mode='bilinear', align_corners=False)
@@ -2031,6 +2237,9 @@ class EvanSegmenter(EvanPredictor):
             'evan_config': self.evan.get_config(),
             'num_classes': self.num_classes,
             'decoder_strategy': self.strategy,  # keep old key name for checkpoint compat
+            'decoder_type': self.decoder_type,
+            'decoder_channels': self.decoder_channels,
+            'relu_output': self.relu_output,
         }
 
     @classmethod
@@ -2041,11 +2250,15 @@ class EvanSegmenter(EvanPredictor):
 
         evan, supported_modalities = EvanPredictor._reconstruct_evan(evan_config, device)
 
+        # Pre-upernet checkpoints lack these keys; default to the old linear head.
         model = cls(
             evan_model=evan,
             num_classes=config['num_classes'],
             decoder_strategy=config['decoder_strategy'],
             device=device,
+            decoder_type=config.get('decoder_type', 'linear'),
+            decoder_channels=config.get('decoder_channels', 512),
+            relu_output=config.get('relu_output', False),
         )
 
         if config['decoder_strategy'] == 'ensemble' and supported_modalities:

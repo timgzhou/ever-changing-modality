@@ -57,7 +57,7 @@ WANDB_PROJECT="delulu-${DATASET}-${STARTING_MOD}-${NEW_MOD}"
 # BioMassters is temporal: pool features over this many timesteps (<=12).
 EXTRA_ARGS=""
 if [ "${DATASET}" = "biomassters" ]; then
-    EXTRA_ARGS="--num_time_steps ${NUM_TIME_STEPS:-6}"
+    EXTRA_ARGS="--num_time_steps ${NUM_TIME_STEPS:-12}"
 fi
 
 echo "=== ${DATASET} | ${MODEL} | ${STARTING_MOD} -> ${NEW_MOD} | select_by=${SELECT_BY} ==="

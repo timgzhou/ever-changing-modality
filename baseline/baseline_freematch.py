@@ -1,4 +1,18 @@
-"""FreeMatch Semi-Supervised Baseline: Self-adaptive thresholding for SSL."""
+"""FreeMatch Semi-Supervised Baseline (Wang et al., ICLR 2023).
+
+Self-adaptive thresholding (SAT) + self-adaptive fairness (SAF).
+
+Uses train_split1 as labeled data and train_split2 as unlabeled data. Weak-augmented
+views produce hard pseudo-labels; strong-augmented views are trained against them,
+masked by a per-class threshold tau_t(c) = MaxNorm(p_tilde_t(c)) * tau_t that is
+EMA-estimated from the model's own confidence (paper Eqs. 5-7). SAF (Eq. 11) adds a
+de-biased class-fairness term.
+
+Loss = CE (labeled) + lambda_u * masked CE (unlabeled) + lambda_e * SAF.
+
+Note: unlike MixMatch, FreeMatch does NOT sharpen pseudo-labels — --temperature
+defaults to 1.0 and should stay there (see the flag's help text).
+"""
 
 import sys
 import os
@@ -13,7 +27,6 @@ from datetime import datetime
 import wandb
 import csv
 from tqdm import tqdm
-import kornia.augmentation as K
 
 from delulunet_main import evan_small, evan_base, evan_large, evan_small_s2, BENV2_BAND_INDICES, PASTIS_BAND_INDICES, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
@@ -33,27 +46,11 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 # Augmentation factories
 # ---------------------------------------------------------------------------
 
-def make_weak_augmentation():
-    """Weak augmentation: random flips only (channel-agnostic)."""
-    return K.AugmentationSequential(
-        K.RandomHorizontalFlip(p=0.5),
-        K.RandomVerticalFlip(p=0.5),
-        data_keys=["input"],
-    )
-
-
-def make_strong_augmentation():
-    """Strong augmentation: flips + rotation + blur + intensity + erasing (channel-agnostic)."""
-    return K.AugmentationSequential(
-        K.RandomHorizontalFlip(p=0.5),
-        K.RandomVerticalFlip(p=0.5),
-        K.RandomRotation(degrees=90.0, p=0.5),
-        K.RandomGaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0), p=0.5),
-        K.RandomBrightness(brightness=(0.8, 1.2), p=0.5),
-        K.RandomContrast(contrast=(0.8, 1.2), p=0.5),
-        K.RandomErasing(scale=(0.02, 0.15), ratio=(0.3, 3.3), p=0.3),
-        data_keys=["input"],
-    )
+# Augmentation factories live in train_utils so train_sft.py can reuse the exact
+# same pipelines — keeping the SSL baseline and supervised stage-0 comparable by
+# construction rather than by two definitions kept in sync by hand.
+# Re-exported here since the sweep scripts and docs refer to them by this module.
+from train_utils import make_weak_augmentation, make_strong_augmentation  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -75,11 +72,19 @@ class FreeMatchState:
     """
 
     def __init__(self, num_classes: int, momentum: float = 0.999,
-                 multilabel: bool = False, device: str = 'cuda'):
+                 multilabel: bool = False, device: str = 'cuda',
+                 use_quantile: bool = False, clip_thresh: bool = True,
+                 clip_max: float = 0.95):
         self.num_classes = num_classes
         self.momentum = momentum
         self.multilabel = multilabel
         self.device = device
+        # Match the official FreeMatchThresholingHook: time_p may be estimated
+        # from the 0.8 quantile of max-probs instead of the mean, and is clipped
+        # to <= clip_max to prevent late-training threshold runaway.
+        self.use_quantile = use_quantile
+        self.clip_thresh = clip_thresh
+        self.clip_max = clip_max
 
         if multilabel:
             # Per-class scalar threshold for multilabel
@@ -105,17 +110,24 @@ class FreeMatchState:
 
         if self.multilabel:
             # Per-class EMA of sigmoid confidence (distance from 0.5)
-            self.time_p = m * self.time_p + (1 - m) * max_probs.mean(dim=0)
+            stat = (torch.quantile(max_probs, 0.8, dim=0)
+                    if self.use_quantile else max_probs.mean(dim=0))
+            self.time_p = m * self.time_p + (1 - m) * stat
             self.p_model = m * self.p_model + (1 - m) * probs.mean(dim=0)
             # label_hist: fraction of samples predicted positive per class
             pos_rate = (probs > 0.5).float().mean(dim=0)
             self.label_hist = m * self.label_hist + (1 - m) * pos_rate
         else:
-            self.time_p = m * self.time_p + (1 - m) * max_probs.mean()
+            stat = (torch.quantile(max_probs, 0.8)
+                    if self.use_quantile else max_probs.mean())
+            self.time_p = m * self.time_p + (1 - m) * stat
             self.p_model = m * self.p_model + (1 - m) * probs.mean(dim=0)
             hist = torch.bincount(pred_classes, minlength=C).float()
             hist = hist / hist.sum().clamp(min=1)
             self.label_hist = m * self.label_hist + (1 - m) * hist
+
+        if self.clip_thresh:
+            self.time_p = self.time_p.clamp(max=self.clip_max)
 
     @torch.no_grad()
     def compute_mask(self, max_probs, pred_classes):
@@ -138,9 +150,13 @@ class FreeMatchState:
             mask = (max_probs >= threshold).float()
         return mask
 
-    @torch.no_grad()
     def entropy_loss(self, logits_strong, mask, segmentation=False):
         """Full FreeMatch de-biased class-fairness entropy loss.
+
+        NOTE: deliberately NOT decorated with @torch.no_grad() — SAF is a
+        training objective and must backprop into logits_strong. The EMA state
+        (p_model, label_hist) is detached below so only the strong-branch
+        predictions receive gradient.
 
         Encourages balanced predictions by cross-entropy between de-biased model
         distribution and de-biased batch prediction distribution.
@@ -189,14 +205,16 @@ class FreeMatchState:
         hist_s = torch.bincount(masked_preds, minlength=C).float()
         hist_s = hist_s / hist_s.sum().clamp(min=1)
 
-        # 2. De-bias p_model by inverse of label_hist
-        inv_label_hist = _replace_inf(1.0 / self.label_hist)
-        mod_prob_model = self.p_model * inv_label_hist
+        # 2. De-bias p_model by inverse of label_hist (EMA state — no gradient)
+        inv_label_hist = _replace_inf(1.0 / self.label_hist).detach()
+        mod_prob_model = (self.p_model.detach() * inv_label_hist)
         mod_prob_model = mod_prob_model / mod_prob_model.sum().clamp(min=1e-8)
 
-        # 3. De-bias mean strong probs by inverse of hist_s
+        # 3. De-bias mean strong probs by inverse of hist_s.
+        # mean_prob_s carries the gradient; hist_s comes from argmax so it is
+        # detached (matches the official implementation's scaler .detach()).
         mean_prob_s = probs_flat[masked_idx].mean(dim=0)
-        inv_hist_s = _replace_inf(1.0 / hist_s)
+        inv_hist_s = _replace_inf(1.0 / hist_s).detach()
         mod_mean_prob_s = mean_prob_s * inv_hist_s
         mod_mean_prob_s = mod_mean_prob_s / mod_mean_prob_s.sum().clamp(min=1e-8)
 
@@ -271,8 +289,23 @@ def main():
                         help='Weight for entropy fairness loss (default: 0.01)')
     parser.add_argument('--ema_momentum', type=float, default=0.999,
                         help='EMA momentum for FreeMatch state (default: 0.999)')
-    parser.add_argument('--temperature', type=float, default=0.5,
-                        help='Temperature for pseudo-label sharpening (default: 0.5)')
+    parser.add_argument('--use_quantile', action='store_true',
+                        help='Estimate time_p from the 0.8 quantile of max-probs '
+                             'instead of the mean (official hook option)')
+    parser.add_argument('--no_clip_thresh', action='store_true',
+                        help='Disable clipping time_p to <= 0.95')
+    parser.add_argument('--no_strong_aug', action='store_true',
+                        help='Ablation: degrade the strong branch to weak-equivalent '
+                             '(flips only), so both consistency branches draw from the '
+                             'same augmentation distribution. Measures how much of '
+                             "FreeMatch's benefit comes from augmentation strength vs. "
+                             'self-adaptive thresholding — the control for comparing '
+                             'against methods that use no augmentation (e.g. SHOT).')
+    parser.add_argument('--temperature', type=float, default=1.0,
+                        help='Temperature applied to weak-branch logits before pseudo-labelling. '
+                             'FreeMatch does NOT sharpen: the adaptive threshold is calibrated '
+                             'against raw model confidence, so keep this at 1.0. Values <1 '
+                             'distort time_p/p_model and break SAT (default: 1.0)')
     parser.add_argument('--results_csv', type=str, default=None)
     args = parser.parse_args()
 
@@ -328,6 +361,21 @@ def main():
         img_size=task_config.img_size,
         device=device,
     )
+    # For S2 modalities, tell DINO patch-embed init which channels map to RGB.
+    # Positions mirror train_sft.py / baseline_mixmatch.py — keeping these in
+    # sync matters because FreeMatch and MixMatch are compared head-to-head.
+    _S2_RGB_INDICES = {
+        'eurosat': [3, 2, 1],   # B04, B03, B02 at indices 3, 2, 1
+        'benv2':   [3, 2, 1],
+        'dfc2020': [3, 2, 1],
+        'pastis':  [2, 1, 0],   # B04, B03, B02 at indices 2, 1, 0 (B01/B09/B10 removed)
+    }
+    rgb_in_s2_indices = (
+        _S2_RGB_INDICES.get(args.dataset)
+        if args.modality == 's2' and args.use_dino_weights
+        else None
+    )
+
     if args.use_s2dino_weights:
         if args.model != 'evan_small':
             parser.error('--use_s2dino_weights only with --model evan_small')
@@ -344,7 +392,8 @@ def main():
         )
     else:
         model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
-        evan = model_fn(load_weights=args.use_dino_weights, **common_kwargs)
+        evan = model_fn(load_weights=args.use_dino_weights,
+                        rgb_in_s2_indices=rgb_in_s2_indices, **common_kwargs)
 
     if is_segmentation:
         model = EvanSegmenter(
@@ -396,7 +445,9 @@ def main():
 
     # Augmentations
     weak_aug = make_weak_augmentation()
-    strong_aug = make_strong_augmentation()
+    strong_aug = make_strong_augmentation(no_strong=args.no_strong_aug)
+    if args.no_strong_aug:
+        print("ABLATION: strong augmentation degraded to weak-equivalent (flips only).")
 
     # FreeMatch state
     fm_state = FreeMatchState(
@@ -404,6 +455,8 @@ def main():
         momentum=args.ema_momentum,
         multilabel=multilabel,
         device=device,
+        use_quantile=args.use_quantile,
+        clip_thresh=not args.no_clip_thresh,
     )
 
     # Checkpoint path
@@ -462,7 +515,8 @@ def main():
     fieldnames = [
         "model_type", "modality", "train_mode", "learning_rate", "weight_decay",
         "trainable_params", "epochs", "lambda_u", "lambda_e", "ema_momentum",
-        "temperature", "metric_name", "test_metric", "best_val_metric",
+        "temperature", "use_quantile", "clip_thresh", "no_strong_aug",
+        "metric_name", "test_metric", "best_val_metric",
         "best_val_test_metric", "saved_checkpoint", "global_rep",
         "use_dino_weights", "use_s2dino_weights",
     ]
@@ -473,7 +527,9 @@ def main():
         writer.writerow([
             args.model, args.modality, args.train_mode, args.lr, args.weight_decay,
             trainable_params, args.epochs, args.lambda_u, args.lambda_e,
-            args.ema_momentum, args.temperature, metric_name,
+            args.ema_momentum, args.temperature,
+            args.use_quantile, not args.no_clip_thresh, args.no_strong_aug,
+            metric_name,
             f"{test_metric:.2f}",
             f"{best_val_metric:.2f}" if best_val_metric is not None else "",
             f"{best_val_test_metric:.2f}" if best_val_test_metric is not None else "",
@@ -493,12 +549,16 @@ if __name__ == '__main__':
 
 # DRYRUN examples
 """
-# EuroSAT RGB
+# EuroSAT RGB (single-label classification)
 python -u baseline/baseline_freematch.py --dataset eurosat --modality rgb --epochs 5 --use_dino_weights
 
-# BEN-v2 S2
-python -u baseline/baseline_freematch.py --dataset benv2 --modality s2 --epochs 10 --use_dino_weights
+# BEN-v2 S2 (multilabel) — paper uses w_f=0.05 outside the 10-label CIFAR-10 setting
+python -u baseline/baseline_freematch.py --dataset benv2 --modality s2 --epochs 10 --use_dino_weights --lambda_e 0.05
 
 # DFC2020 S2 (segmentation)
 python -u baseline/baseline_freematch.py --dataset dfc2020 --modality s2 --epochs 10 --use_dino_weights
+
+# Sanity check to run first: watch freematch/mask_ratio and freematch/time_p in wandb.
+# mask_ratio should start low and climb; time_p should rise from 1/C and plateau
+# below 0.95. A mask_ratio pinned at 0.0 or 1.0 from step 1 means SAT is broken.
 """

@@ -35,10 +35,25 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Subset
 
+import torch.nn as nn
+
 from geobench_v2.datasets.biomassters import GeoBenchBioMassters
-from geobench_v2.datasets.normalization import ZScoreNormalizer
 
 from data_utils import TaskConfig  # noqa: F401
+
+
+class IdentityNormalizer(nn.Module):
+    """No-op normalizer: returns raw bands so we can apply min-max ourselves.
+
+    Passed to GeoBenchBioMassters as a pre-initialized instance, so geobench uses
+    it directly (its 'callable instance' branch) instead of constructing it with
+    stats/band_order like a ZScoreNormalizer.
+    """
+    def forward(self, data):
+        return data
+
+    def __call__(self, data):
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -51,10 +66,31 @@ BIOMASSTERS_S2_BANDS = ('B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 
 # S1 SAR (4 bands): ascending + descending VV/VH.
 BIOMASSTERS_S1_BANDS = ('VV_asc', 'VH_asc', 'VV_desc', 'VH_desc')
 
-# AGB normalization (fixed stats baked into the dataset). Used to report RMSE in
-# original AGB units (t/ha): rmse_agb = rmse_normalized * AGB_STD.
+# --- Min-max normalization constants (BioMassters 1st-place solution, kbrodt) ---
+# We normalize with these ourselves rather than using geobench's z-score, since we
+# read the raw BioMassters tortillas directly. Applied per band, in the band order
+# above. S1: (x - min) / (max - min); S2: x / max.
+#
+# Verified against our tortillas (part 0, 60 samples): every observed per-band
+# min/max falls within these bounds (S1 obs maxes 5..16 << [29,28,30,22]; S2 obs
+# maxes ~15k-18k just under s2_max). The winner's raw product has an 11th S2 band
+# (cloud probability, max 255) that geobench drops; confirmed our band 10 maxes at
+# exactly 255, so geobench's 10 spectral bands map 1:1 to the winner's first 10
+# s2_max values below.
+S1_MIN = (-25.0, -62.0, -25.0, -60.0)      # VV_asc, VH_asc, VV_desc, VH_desc
+S1_MAX = ( 29.0,  28.0,  30.0,  22.0)
+S2_MAX = (19616.0, 18400.0, 17536.0, 17097.0, 16928.0,
+          16768.0, 16593.0, 16492.0, 15401.0, 15226.0)  # B02..B12
+S1_NODATA = -9999.0
+
+# AGB target is kept in RAW t/ha (matching the winner), so reported RMSE is already
+# in t/ha and regression_scale is 1.0. Geobench z-normalizes AGB internally with the
+# std below; we invert that in the wrapper to recover raw t/ha.
 AGB_MEAN = 0.0
-AGB_STD = 289.89
+AGB_STD = 289.89   # geobench's internal AGB std, used only to un-normalize the target
+
+# BioMassters winner masks pixels with AGB >= this (t/ha) from the loss.
+BIOMASSTERS_AGB_MASK_THRESHOLD = 400.0
 
 # Native spatial size of BioMassters tiles.
 BIOMASSTERS_IMG_SIZE = 256
@@ -71,24 +107,45 @@ _N_S1 = len(BIOMASSTERS_S1_BANDS)
 class TemporalStackedDataset(Dataset):
     """
     Wraps GeoBenchBioMassters and stacks S2+S1 into one channel-major image
-    tensor while preserving the time axis.
+    tensor while preserving the time axis. Applies the BioMassters 1st-place
+    min-max normalization (not geobench z-score) and keeps the AGB target in raw
+    t/ha. Optionally applies month dropout as a train-time augmentation.
+
+    The wrapped GeoBenchBioMassters is created with an IdentityNormalizer so the
+    bands come out raw (un-normalized); we normalize here instead.
 
     GeoBenchBioMassters (with return_stacked_image=False) yields:
         image_s2: [C_s2, T, H, W]   (or [C_s2, H, W] if num_time_steps == 1)
         image_s1: [C_s1, T, H, W]
-        mask:     [H, W]
+        mask:     [H, W]   (z-normalized by geobench: agb / AGB_STD)
 
-    This wrapper concatenates on the channel axis in a fixed order (s2 then s1):
-        image: [C_s2 + C_s1, T, H, W]   (T dim always present, size 1 if single step)
-        mask:  [H, W]
+    This wrapper outputs (s2 channels then s1):
+        image: [C_s2 + C_s1, T, H, W]   min-max normalized, T dim always present
+        mask:  [H, W]                    raw AGB in t/ha (geobench z-score inverted)
 
-    A leading singleton time axis is inserted when num_time_steps == 1 so the
-    downstream contract ([C, T, H, W]) is uniform.
+    Month dropout: with per-timestep probability `month_dropout`, a timestep's
+    channels are zeroed (matching the winner's augmentation: "simply removing
+    images"). Applied only when `training=True`.
     """
 
-    def __init__(self, dataset, num_time_steps: int):
+    def __init__(self, dataset, num_time_steps: int, training: bool = False,
+                 month_dropout: float = 0.0):
         self.dataset = dataset
         self.num_time_steps = num_time_steps
+        self.training = training
+        self.month_dropout = month_dropout
+
+        # Per-band normalization tensors, shaped [C, 1, 1, 1] to broadcast over
+        # [C, T, H, W]. Order: s2 (10) then s1 (4), matching the stack below.
+        s2_max = torch.tensor(S2_MAX, dtype=torch.float32)
+        s1_min = torch.tensor(S1_MIN, dtype=torch.float32)
+        s1_max = torch.tensor(S1_MAX, dtype=torch.float32)
+        s1_range = s1_max - s1_min
+        # image = cat([s2, s1]); s2 uses x/max (min 0), s1 uses (x-min)/range.
+        self._sub = torch.cat([torch.zeros(_N_S2), s1_min]).view(-1, 1, 1, 1)
+        self._div = torch.cat([s2_max, s1_range]).view(-1, 1, 1, 1)
+        # Which channels are S1 (for -9999 nodata handling before normalization).
+        self._s1_start = _N_S2
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -103,13 +160,32 @@ class TemporalStackedDataset(Dataset):
     def __getitem__(self, index: int) -> dict:
         sample = self.dataset[index]
 
-        s2 = self._ensure_cthw(sample['image_s2'])
-        s1 = self._ensure_cthw(sample['image_s1'])
+        s2 = self._ensure_cthw(sample['image_s2']).float()
+        s1 = self._ensure_cthw(sample['image_s1']).float()
 
         # Concatenate on channel axis; both share the same T, H, W.
         image = torch.cat([s2, s1], dim=0)  # [C_total, T, H, W]
 
-        return {'image': image, 'mask': sample['mask']}
+        # S1 no-data (-9999) -> 0 before min-max (matches winner). S2 missing
+        # months are already zero-filled by geobench.
+        s1_slice = image[self._s1_start:]
+        s1_slice[s1_slice == S1_NODATA] = 0.0
+
+        # Min-max normalization: s2 -> x/max, s1 -> (x-min)/range.
+        image = (image - self._sub) / self._div
+
+        # Month dropout (train only): zero out whole timesteps with prob p.
+        if self.training and self.month_dropout > 0.0:
+            T = image.shape[1]
+            drop = torch.rand(T) < self.month_dropout
+            if drop.all():          # never drop every timestep
+                drop[torch.randint(T, (1,))] = False
+            image[:, drop] = 0.0
+
+        # Recover raw AGB in t/ha (geobench applied agb / AGB_STD internally).
+        mask = sample['mask'].float() * AGB_STD
+
+        return {'image': image, 'mask': mask}
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +200,8 @@ def get_biomassters_loaders(
     starting_modality: str = 's2',
     new_modality: str | None = None,
     num_time_steps: int = 6,
-    data_normalizer=ZScoreNormalizer,
+    data_normalizer=None,          # ignored; we apply min-max ourselves
+    month_dropout: float = 0.3,    # train-time per-timestep drop prob (winner: 0.3)
 ) -> tuple:
     """
     Create the standard 5-loader + TaskConfig tuple for BioMassters.
@@ -157,22 +234,25 @@ def get_biomassters_loaders(
         's1': list(BIOMASSTERS_S1_BANDS),
     }
 
+    # IdentityNormalizer: geobench returns raw bands; we apply the winner's
+    # min-max in TemporalStackedDataset. (data_normalizer arg is ignored.)
     common = dict(
         root=root,
         band_order=band_order,
-        data_normalizer=data_normalizer,
+        data_normalizer=IdentityNormalizer(),   # instance -> geobench uses it as-is (no-op)
         num_time_steps=num_time_steps,
         return_stacked_image=False,   # we stack ourselves to keep the T axis
-        download=True,
+        download=False,               # data already present; installed class lists only 3 parts
     )
 
     train_full = GeoBenchBioMassters(split='train', **common)
     val_full   = GeoBenchBioMassters(split='validation', **common)
     test_full  = GeoBenchBioMassters(split='test', **common)
 
-    train_ds = TemporalStackedDataset(train_full, num_time_steps)
-    val_ds   = TemporalStackedDataset(val_full, num_time_steps)
-    test_ds  = TemporalStackedDataset(test_full, num_time_steps)
+    # Month dropout applies to training splits only.
+    train_ds = TemporalStackedDataset(train_full, num_time_steps, training=True, month_dropout=month_dropout)
+    val_ds   = TemporalStackedDataset(val_full, num_time_steps, training=False)
+    test_ds  = TemporalStackedDataset(test_full, num_time_steps, training=False)
 
     # Disjoint, deterministic 50/50 splits of train and val.
     rng = random.Random(seed)
@@ -230,7 +310,9 @@ def get_biomassters_loaders(
         label_key='mask',
         modality_bands_dict=modality_slices,
         img_size=BIOMASSTERS_IMG_SIZE,
-        regression_scale=AGB_STD,   # report RMSE in AGB units (t/ha)
+        regression_scale=1.0,   # target already in raw t/ha, so RMSE is in t/ha
+        regression_loss_scale=AGB_STD,   # divide distill/CE MSE by AGB_STD^2 to match latent/prefusion scale
+        regression_mask_above=BIOMASSTERS_AGB_MASK_THRESHOLD,   # exclude AGB>=400 (winner)
     )
 
     return train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config

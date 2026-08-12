@@ -15,25 +15,33 @@ import matplotlib.pyplot as plt
 CONFIGURING THE PLOTS
 """
 
-DATASET  = "benv2"   # "benv2" or "dfc2020"
-STARTMOD = "s1"
-NEWMOD   = "s2"
+DATASET  = "biomassters_s2s1"   # "benv2", "dfc2020", "biomassters_s1s2", "biomassters_s2s1"
 K        = 0.2   # fraction of top runs to keep per config (by val score); 1.0 = all runs
 TRIM     = 0   # number of top+bottom points to trim per config (by test metric); 0 = no trim
 
 DATASET_CFG = {
-    "benv2":   {"csv": "res/delulu-sweep/sweep_results_benv2_final_backfilled.csv",   "metric_label": "mAP"},
-    "dfc2020": {"csv": "res/delulu-sweep/sweep_results_dfc2020_final.csv", "metric_label": "mIoU"},
+    "benv2":   {"csv": "res/delulu-sweep/sweep_results_benv2_final_backfilled.csv",   "metric_label": "mAP",  "startmod": "s1", "newmod": "s2"},
+    "dfc2020": {"csv": "res/delulu-sweep/sweep_results_dfc2020_final.csv", "metric_label": "mIoU", "startmod": "s1", "newmod": "s2"},
+    # biomassters is a regression task: metrics are stored negated (higher is better)
+    "biomassters_s1s2": {"csv": "res/delulu-sweep/sweep_results_biomassters_s1s2.csv", "metric_label": "-RMSE", "startmod": "s1", "newmod": "s2"},
+    "biomassters_s2s1": {"csv": "res/delulu-sweep/sweep_results_biomassters_s2s1.csv", "metric_label": "-RMSE", "startmod": "s2", "newmod": "s1"},
 }
 
 cfg          = DATASET_CFG[DATASET]
 METRIC_LABEL = cfg["metric_label"]
+STARTMOD     = cfg["startmod"]
+NEWMOD       = cfg["newmod"]
 
 df = pd.read_csv(cfg["csv"])
 print(f"Rows: {len(df)}")
 
+# use_mask_token / latent_masked_only are written as True/False strings.
+# protect_lrm is numeric in some sweeps (0.0/0.5/1.0) and boolean in others, so
+# only coerce it when it actually looks boolean.
 for col in ['protect_lrm', 'use_mask_token', 'latent_masked_only']:
-    df[col] = df[col].astype(str).str.strip().str.lower().map({'true': True, 'false': False})
+    as_str = df[col].astype(str).str.strip().str.lower()
+    if as_str.isin(['true', 'false']).all():
+        df[col] = as_str.map({'true': True, 'false': False})
 
 out_dir = f'res/delulu-sweep/artifacts'
 os.makedirs(out_dir, exist_ok=True)
@@ -69,6 +77,14 @@ df["_cfg"] = df.apply(classify_config, axis=1)
 sub = df[(df["starting_modality"] == STARTMOD) & (df["new_modality"] == NEWMOD)]
 rng = np.random.default_rng(0)
 
+# Hyperparameter sweeps (e.g. biomassters) contain a single config, so the
+# 5-config ablation plots/table would collapse to one populated column.
+PRESENT_CONFIGS = [c for c in CONFIG_ORDER if not sub[sub["_cfg"] == c].empty]
+RUN_ABLATION    = len(PRESENT_CONFIGS) > 1
+if not RUN_ABLATION:
+    only = PRESENT_CONFIGS[0] if PRESENT_CONFIGS else "none"
+    print(f"Single config present ({only}) — skipping 5-config ablation plots and table.")
+
 # val score used for top-K selection: peeking for peeking, composite score for transfer/addition
 VAL_SEL = "val_peeking"
 
@@ -89,34 +105,35 @@ def trim(vals, t=TRIM):
 # Plot 1 — scatter with mean diamond  (sweep_{DATASET}_5configs.png)
 # ---------------------------------------------------------------------------
 
-fig1, axes1 = plt.subplots(1, 3, figsize=(11, 4.2), sharey=False)
-fig1.suptitle(f"{DATASET} Sweep Config Comparison ({STARTMOD}→{NEWMOD})", fontsize=12, fontweight="bold")
+if RUN_ABLATION:
+    fig1, axes1 = plt.subplots(1, 3, figsize=(11, 4.2), sharey=False)
+    fig1.suptitle(f"{DATASET} Sweep Config Comparison ({STARTMOD}→{NEWMOD})", fontsize=12, fontweight="bold")
 
-for ax, metric, mlabel in zip(axes1, METRICS, METRIC_LABELS):
-    for ci, cfg in enumerate(CONFIG_ORDER):
-        rows = trim(topk(sub[sub["_cfg"] == cfg])[metric].dropna().values)
-        if len(rows) == 0:
-            continue
-        jitter = rng.uniform(-0.18, 0.18, size=len(rows))
-        ax.scatter(ci + jitter, rows, color=COLORS[ci], s=18, alpha=0.45, linewidths=0)
-        mean = rows.mean()
-        ax.scatter(ci, mean, color=COLORS[ci], s=80, marker="D",
-                   edgecolors="black", linewidths=0.8, zorder=5)
-        ax.text(ci, mean + 0.25, f"{mean:.1f}",
-                ha="center", va="bottom", fontsize=8, fontweight="bold")
+    for ax, metric, mlabel in zip(axes1, METRICS, METRIC_LABELS):
+        for ci, cfg_name in enumerate(CONFIG_ORDER):
+            rows = trim(topk(sub[sub["_cfg"] == cfg_name])[metric].dropna().values)
+            if len(rows) == 0:
+                continue
+            jitter = rng.uniform(-0.18, 0.18, size=len(rows))
+            ax.scatter(ci + jitter, rows, color=COLORS[ci], s=18, alpha=0.45, linewidths=0)
+            mean = rows.mean()
+            ax.scatter(ci, mean, color=COLORS[ci], s=80, marker="D",
+                       edgecolors="black", linewidths=0.8, zorder=5)
+            ax.text(ci, mean + 0.25, f"{mean:.1f}",
+                    ha="center", va="bottom", fontsize=8, fontweight="bold")
 
-    ax.set_xticks(np.arange(len(CONFIG_ORDER)))
-    ax.set_xticklabels(CONFIG_DISPLAY, fontsize=9)
-    ax.set_title(mlabel, fontsize=11)
-    ax.set_ylabel(METRIC_LABEL, fontsize=9)
-    ax.tick_params(axis="y", labelsize=8)
-    ax.margins(x=0.08)
-    ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
+        ax.set_xticks(np.arange(len(CONFIG_ORDER)))
+        ax.set_xticklabels(CONFIG_DISPLAY, fontsize=9)
+        ax.set_title(mlabel, fontsize=11)
+        ax.set_ylabel(METRIC_LABEL, fontsize=9)
+        ax.tick_params(axis="y", labelsize=8)
+        ax.margins(x=0.08)
+        ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
 
-fig1.tight_layout()
-out1 = f'{out_dir}/sweep_{DATASET}_5configs.png'
-fig1.savefig(out1, dpi=150, bbox_inches="tight")
-print(f'Saved to {out1}')
+    fig1.tight_layout()
+    out1 = f'{out_dir}/sweep_{DATASET}_5configs.png'
+    fig1.savefig(out1, dpi=150, bbox_inches="tight")
+    print(f'Saved to {out1}')
 
 # ---------------------------------------------------------------------------
 # LaTeX table for Plot 1
@@ -124,100 +141,102 @@ print(f'Saved to {out1}')
 
 ROW_NAMES = ["DeluluNet (ours)", r"$+$ Masking Token", r"$-$ Prefusion MSE", r"$-$ Latent MSE", r"$-$ Batch Mixing"]
 
-# collect means: means[cfg][metric]
-means = {}
-for cfg, metric in [(c, m) for c in CONFIG_ORDER for m in METRICS]:
-    vals = trim(topk(sub[sub["_cfg"] == cfg])[metric].dropna().values)
-    means.setdefault(cfg, {})[metric] = vals.mean() if len(vals) > 0 else float('nan')
+if RUN_ABLATION:
+    # collect means: means[cfg_name][metric]
+    means = {}
+    for cfg_name, metric in [(c, m) for c in CONFIG_ORDER for m in METRICS]:
+        vals = trim(topk(sub[sub["_cfg"] == cfg_name])[metric].dropna().values)
+        means.setdefault(cfg_name, {})[metric] = vals.mean() if len(vals) > 0 else float('nan')
 
-# baseline = delulu row
-baseline = means["delulu"]
+    # baseline = delulu row
+    baseline = means["delulu"]
 
-def fmt_cell(cfg, metric):
-    m = means[cfg][metric]
-    base = baseline[metric]
-    diff = m - base
-    if cfg == "delulu":
-        return f"{m:.1f}"
-    sign = "+" if diff >= 0 else ""
-    color = "\\cellcolor{green!15}" if diff >= 0 else "\\cellcolor{red!15}"
-    return f"{color}{m:.1f} ({sign}{diff:.1f})"
+    def fmt_cell(cfg_name, metric):
+        m = means[cfg_name][metric]
+        base = baseline[metric]
+        diff = m - base
+        if cfg_name == "delulu":
+            return f"{m:.1f}"
+        sign = "+" if diff >= 0 else ""
+        color = "\\cellcolor{green!15}" if diff >= 0 else "\\cellcolor{red!15}"
+        return f"{color}{m:.1f} ({sign}{diff:.1f})"
 
-lines = []
-lines.append(r"\begin{table}[h]")
-lines.append(r"\centering")
-lines.append(r"\setlength{\tabcolsep}{6pt}")
-lines.append(r"\begin{tabular}{lccc}")
-lines.append(r"\toprule")
-lines.append(r"Configuration & Transfer & Peek & Addition \\")
-lines.append(r"\midrule")
-for cfg, row_name in zip(CONFIG_ORDER, ROW_NAMES):
-    cells = " & ".join(fmt_cell(cfg, m) for m in METRICS)
-    lines.append(f"{row_name} & {cells} \\\\")
-lines.append(r"\bottomrule")
-lines.append(r"\end{tabular}")
-lines.append(r"\caption{\textbf{Delulu Components Ablation on reBEN for Masking Transformer, MSE losses, and Batch Mixing} (start with S1, introduce S2), deltas relative to DeluluNet (ours).}")
-lines.append(r"\end{table}")
+    lines = []
+    lines.append(r"\begin{table}[h]")
+    lines.append(r"\centering")
+    lines.append(r"\setlength{\tabcolsep}{6pt}")
+    lines.append(r"\begin{tabular}{lccc}")
+    lines.append(r"\toprule")
+    lines.append(r"Configuration & Transfer & Peek & Addition \\")
+    lines.append(r"\midrule")
+    for cfg_name, row_name in zip(CONFIG_ORDER, ROW_NAMES):
+        cells = " & ".join(fmt_cell(cfg_name, m) for m in METRICS)
+        lines.append(f"{row_name} & {cells} \\\\")
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
+    lines.append(r"\caption{\textbf{Delulu Components Ablation on reBEN for Masking Transformer, MSE losses, and Batch Mixing} (start with S1, introduce S2), deltas relative to DeluluNet (ours).}")
+    lines.append(r"\end{table}")
 
-tex = "\n".join(lines)
-tex_path = f'{out_dir}/sweep_{DATASET}_5configs_table.tex'
-with open(tex_path, 'w') as f:
-    f.write(tex)
-print(f'Saved to {tex_path}')
-print(tex)
+    tex = "\n".join(lines)
+    tex_path = f'{out_dir}/sweep_{DATASET}_5configs_table.tex'
+    with open(tex_path, 'w') as f:
+        f.write(tex)
+    print(f'Saved to {tex_path}')
+    print(tex)
 
 # ---------------------------------------------------------------------------
 # Plot 1b — boxplot with mean ± std  (sweep_{DATASET}_5configs_box.png)
 # ---------------------------------------------------------------------------
 
-fig1b, axes1b = plt.subplots(1, 3, figsize=(11, 4.2), sharey=False)
-fig1b.suptitle(f"{DATASET} Sweep Config Comparison ({STARTMOD}→{NEWMOD})", fontsize=12, fontweight="bold")
+if RUN_ABLATION:
+    fig1b, axes1b = plt.subplots(1, 3, figsize=(11, 4.2), sharey=False)
+    fig1b.suptitle(f"{DATASET} Sweep Config Comparison ({STARTMOD}→{NEWMOD})", fontsize=12, fontweight="bold")
 
-for ax, metric, mlabel in zip(axes1b, METRICS, METRIC_LABELS):
-    group_data = [trim(topk(sub[sub["_cfg"] == cfg])[metric].dropna().values)
-                  for cfg in CONFIG_ORDER]
+    for ax, metric, mlabel in zip(axes1b, METRICS, METRIC_LABELS):
+        group_data = [trim(topk(sub[sub["_cfg"] == cfg_name])[metric].dropna().values)
+                      for cfg_name in CONFIG_ORDER]
 
-    bp = ax.boxplot(
-        group_data, positions=np.arange(len(CONFIG_ORDER)), widths=0.5,
-        patch_artist=True,
-        medianprops=dict(color='black', linewidth=1.5),
-        whiskerprops=dict(linewidth=1),
-        capprops=dict(linewidth=1),
-        flierprops=dict(marker=''),
-    )
-    for patch, color in zip(bp['boxes'], COLORS):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.55)
+        bp = ax.boxplot(
+            group_data, positions=np.arange(len(CONFIG_ORDER)), widths=0.5,
+            patch_artist=True,
+            medianprops=dict(color='black', linewidth=1.5),
+            whiskerprops=dict(linewidth=1),
+            capprops=dict(linewidth=1),
+            flierprops=dict(marker=''),
+        )
+        for patch, color in zip(bp['boxes'], COLORS):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.55)
 
-    ax.set_xticks(np.arange(len(CONFIG_ORDER)))
-    ax.set_xticklabels(CONFIG_DISPLAY, fontsize=9)
-    ax.set_title(mlabel, fontsize=11)
-    ax.set_ylabel(METRIC_LABEL, fontsize=9)
-    ax.tick_params(axis="y", labelsize=8)
-    ax.margins(x=0.08)
-    ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
+        ax.set_xticks(np.arange(len(CONFIG_ORDER)))
+        ax.set_xticklabels(CONFIG_DISPLAY, fontsize=9)
+        ax.set_title(mlabel, fontsize=11)
+        ax.set_ylabel(METRIC_LABEL, fontsize=9)
+        ax.tick_params(axis="y", labelsize=8)
+        ax.margins(x=0.08)
+        ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
 
-    # annotate mean±std inside top of each box
-    for ci, vals in enumerate(group_data):
-        if len(vals) == 0:
-            continue
-        mean, std = vals.mean(), vals.std(ddof=1) if len(vals) > 1 else 0.0
-        ypos = np.percentile(vals, 75)
-        ax.text(ci, ypos, f"{mean:.1f}±{std:.1f}",
-                ha="center", va="bottom", fontsize=7.5, fontweight="bold")
+        # annotate mean±std inside top of each box
+        for ci, vals in enumerate(group_data):
+            if len(vals) == 0:
+                continue
+            mean, std = vals.mean(), vals.std(ddof=1) if len(vals) > 1 else 0.0
+            ypos = np.percentile(vals, 75)
+            ax.text(ci, ypos, f"{mean:.1f}±{std:.1f}",
+                    ha="center", va="bottom", fontsize=7.5, fontweight="bold")
 
-out1b = f'{out_dir}/sweep_{DATASET}_5configs_box.png'
-fig1b.savefig(out1b, dpi=150, bbox_inches="tight")
-print(f'Saved to {out1b}')
+    out1b = f'{out_dir}/sweep_{DATASET}_5configs_box.png'
+    fig1b.savefig(out1b, dpi=150, bbox_inches="tight")
+    print(f'Saved to {out1b}')
 
 # ---------------------------------------------------------------------------
 # Plot 2 — val vs test scatter  (sweep_{DATASET}_val_vs_test.png)
 # ---------------------------------------------------------------------------
 
 VAL_TEST_PAIRS = [
-    ("val_transfer", "test_transfer", "Transfer", "Val score (peek×agree/100)"),
+    ("val_transfer", "test_transfer", "Transfer", f"Val {METRIC_LABEL}"),
     ("val_peeking",  "test_peeking",  "Peek",     f"Val {METRIC_LABEL}"),
-    ("val_addition", "test_addition", "Addition", "Val score (peek×agree/100)"),
+    ("val_addition", "test_addition", "Addition", f"Val {METRIC_LABEL}"),
 ]
 
 df5 = topk(sub[sub["_cfg"] == "delulu"]).copy()
@@ -259,8 +278,9 @@ import json
 
 HPARAM_COLS = [
     "lr", "asym_lr", "weight_decay", "epochs",
-    "modality_dropout", "labeled_frequency", "labeled_start_fraction",
-    "protect_lrm", "use_mask_token", "latent_masked_only",
+    "modality_dropout", "modality_dropout_startmod", "modality_dropout_newmod",
+    "labeled_frequency", "labeled_start_fraction",
+    "protect_lrm", "use_mask_token", "latent_masked_only", "unprotect_starting_mod",
     "lambda_latent", "lambda_prefusion", "lambda_distill", "mae_mask_ratio",
     "active_losses", "stage0_checkpoint",
 ]
@@ -276,6 +296,8 @@ delulu_sub = sub[sub["_cfg"] == "delulu"].copy()
 def row_to_hparams(row):
     out = {}
     for col in HPARAM_COLS:
+        if col not in row.index:
+            continue
         val = row[col]
         if pd.isna(val):
             out[col] = None

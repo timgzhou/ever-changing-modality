@@ -26,9 +26,65 @@ def make_scheduler(optimizer, num_epochs: int, warmup_epochs: int = 1, eta_min: 
     return SequentialLR(optimizer, schedulers=[scheduler1, scheduler2], milestones=[warmup_epochs])
 
 
+def make_weak_augmentation():
+    """Weak augmentation: random flips only (channel-agnostic).
+
+    Channel-agnostic by design: EO modalities have 2-12 channels with no RGB
+    semantics, so colour-space ops (and RandAugment) do not transfer.
+    """
+    import kornia.augmentation as K
+    return K.AugmentationSequential(
+        K.RandomHorizontalFlip(p=0.5),
+        K.RandomVerticalFlip(p=0.5),
+        data_keys=["input"],
+    )
+
+
+def make_strong_augmentation(no_strong: bool = False):
+    """Strong augmentation: flips + rotation + blur + intensity + erasing.
+
+    With no_strong=True, returns a weak-equivalent pipeline (flips only) — the
+    augmentation-parity ablation. See baseline/baseline_freematch.py.
+    """
+    import kornia.augmentation as K
+    if no_strong:
+        return make_weak_augmentation()
+    return K.AugmentationSequential(
+        K.RandomHorizontalFlip(p=0.5),
+        K.RandomVerticalFlip(p=0.5),
+        K.RandomRotation(degrees=90.0, p=0.5),
+        K.RandomGaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0), p=0.5),
+        K.RandomBrightness(brightness=(0.8, 1.2), p=0.5),
+        K.RandomContrast(contrast=(0.8, 1.2), p=0.5),
+        K.RandomErasing(scale=(0.02, 0.15), ratio=(0.3, 3.3), p=0.3),
+        data_keys=["input"],
+    )
+
+
+class MaskedMSELoss(nn.Module):
+    """MSE that excludes target pixels >= `mask_above` (e.g. BioMassters AGB>=400).
+
+    Matches the BioMassters winner's NoNaNRMSE: high-AGB pixels are unreliable and
+    dropped from the loss. If every pixel is masked in a batch, returns 0.
+    """
+    def __init__(self, mask_above: float):
+        super().__init__()
+        self.mask_above = mask_above
+
+    def forward(self, pred, target):
+        keep = target < self.mask_above
+        if not keep.any():
+            return (pred * 0.0).sum()
+        diff = (pred - target)[keep]
+        return (diff * diff).mean()
+
+
 def make_criterion(task_config) -> nn.Module:
     """Build loss criterion from TaskConfig."""
     if getattr(task_config, 'task_type', None) == 'regression':
+        mask_above = getattr(task_config, 'regression_mask_above', None)
+        if mask_above is not None:
+            return MaskedMSELoss(mask_above)
         return nn.MSELoss()
     if task_config.multilabel:
         return nn.BCEWithLogitsLoss()
@@ -44,13 +100,16 @@ class TrainMetricAccumulator:
     """
 
     def __init__(self, segmentation: bool, multilabel: bool, num_classes: int, ignore_index: int,
-                 regression: bool = False, regression_scale: float = 1.0):
+                 regression: bool = False, regression_scale: float = 1.0,
+                 regression_mask_above: float | None = None):
         self.segmentation = segmentation
         self.multilabel = multilabel
         self.regression = regression
-        # Multiply normalized RMSE by this to report in original target units
-        # (BioMassters AGB std = 289.89 t/ha). Default 1.0 = normalized units.
+        # Multiply RMSE by this to report in target units. When the loader already
+        # returns raw t/ha (BioMassters), this is 1.0.
         self.regression_scale = regression_scale
+        # Exclude target pixels >= this from RMSE (BioMassters AGB>=400).
+        self.regression_mask_above = regression_mask_above
         self.num_classes = num_classes
         self.ignore_index = ignore_index
         self.reset()
@@ -68,11 +127,16 @@ class TrainMetricAccumulator:
     def update(self, logits: torch.Tensor, labels: torch.Tensor):
         """Register one batch. logits: [B,C] or [B,C,H,W]; labels: [B] or [B,H,W]."""
         if self.regression:
-            # logits: [B,1,H,W] -> [B,H,W]; labels: [B,H,W]. Accumulate SSE for RMSE.
+            # logits: [B,1,H,W] -> [B,H,W]; labels: [B,H,W]. Accumulate SSE for RMSE,
+            # excluding masked (high-AGB) pixels if a threshold is set.
             pred = logits.detach()
             if pred.dim() == 4:
                 pred = pred.squeeze(1)
             tgt = labels.detach().to(pred.dtype)
+            if self.regression_mask_above is not None:
+                keep = tgt < self.regression_mask_above
+                pred = pred[keep]
+                tgt = tgt[keep]
             self._sq_err_sum += ((pred - tgt) ** 2).sum().item()
             self._n_elem += tgt.numel()
         elif self.segmentation:
@@ -162,6 +226,7 @@ class Trainer:
             ignore_index=getattr(tc, 'ignore_index', -100),
             regression=is_regression,
             regression_scale=getattr(tc, 'regression_scale', 1.0),
+            regression_mask_above=getattr(tc, 'regression_mask_above', None),
         )
 
     def _step(self, loss, params):
@@ -213,6 +278,7 @@ class Trainer:
         best_checkpoint_path: str | None = None,
         val_per_epoch: int = 1,
         phase_name: str = "Training",
+        train_aug=None,
     ) -> tuple:
         """
         Supervised training loop for single or multiple modalities.
@@ -222,6 +288,11 @@ class Trainer:
             criterion: Loss fn. If None, built from task_config via make_criterion().
             best_checkpoint_path: If set (requires val_loader), save best-val checkpoint here.
             val_per_epoch: Run val/test every N epochs and always on the last epoch.
+            train_aug: Optional kornia augmentation applied to training inputs only
+                (never to val/test). Classification and multilabel ONLY — it is
+                ignored with a warning for segmentation/regression, whose dense
+                targets would need the same spatial transform applied to the label
+                map to stay aligned. Each modality is augmented independently.
 
         Returns:
             (train_metric, test_metric, best_val_metric, best_val_test_metric)
@@ -241,6 +312,19 @@ class Trainer:
         accum = self._make_accumulator()
         mod_str = '+'.join(m.upper() for m in modalities)
 
+        # Input augmentation is only safe for image-level targets. Segmentation
+        # masks and dense regression targets would have to be transformed
+        # alongside the image, which this loop does not do — so refuse rather
+        # than silently train on misaligned pairs.
+        _is_regression = (getattr(tc, 'task_type', None) == 'regression')
+        if train_aug is not None and (segmentation or _is_regression):
+            _t = 'segmentation' if segmentation else 'regression'
+            print(f"  [warn] train_aug ignored for {_t}: dense targets are not "
+                  f"transformed alongside the image.")
+            train_aug = None
+        if train_aug is not None:
+            print(f"  Train-time augmentation: ON ({mod_str})")
+
         # For regression the metric is RMSE (lower is better); for classification/
         # segmentation it is accuracy/mAP/mIoU (higher is better).
         _lower_is_better = (getattr(self.task_config, 'task_type', None) == 'regression')
@@ -258,6 +342,7 @@ class Trainer:
 
         _regression = (getattr(self.task_config, 'task_type', None) == 'regression')
         _regression_scale = getattr(self.task_config, 'regression_scale', 1.0)
+        _regression_mask_above = getattr(self.task_config, 'regression_mask_above', None)
         eval_kwargs = dict(
             modality_bands_dict=modality_bands_dict,
             modalities_to_use=modalities,
@@ -268,6 +353,7 @@ class Trainer:
             ignore_index=ignore_index,
             regression=_regression,
             regression_scale=_regression_scale,
+            regression_mask_above=_regression_mask_above,
         )
 
         train_metric = test_metric = 0.0
@@ -290,6 +376,13 @@ class Trainer:
                     batch, modality_bands_dict=modality_bands_dict, modalities=modalities
                 )
                 modal_input = {k: v.to(self.device) for k, v in modal_input.items()}
+
+                # Train-time augmentation (GPU, post-normalization). Applied per
+                # modality: each draws its own transform, matching how the model
+                # sees modalities as independent inputs. Train split only —
+                # evaluate() is untouched.
+                if train_aug is not None:
+                    modal_input = {k: train_aug(v) for k, v in modal_input.items()}
 
                 self.optimizer.zero_grad()
                 outputs = self.model(modal_input)
@@ -329,6 +422,7 @@ class Trainer:
                         self.model, val_loader, criterion, self.device, **eval_kwargs
                     )
 
+                print(f"Epoch {epoch+1}/{num_epochs}:")
                 print(f"  Train ({mod_str}): Loss={train_loss:.4f}, {accum.metric_name}={train_metric:.2f}%")
                 print(f"  Test  ({mod_str}): Loss={test_loss:.4f}, {accum.metric_name}={test_metric:.2f}%")
                 if val_metric is not None:
@@ -639,7 +733,7 @@ class Trainer:
         weak_aug,
         strong_aug,
         freematch_state,
-        temperature: float = 0.5,
+        temperature: float = 1.0,
         lambda_u: float = 1.0,
         lambda_e: float = 0.01,
         best_checkpoint_path: str | None = None,
@@ -797,8 +891,7 @@ class Trainer:
                 # Entropy fairness loss
                 if lambda_e > 0:
                     ent_loss = freematch_state.entropy_loss(
-                        logits_strong.detach() if False else logits_strong,
-                        mask, segmentation=segmentation,
+                        logits_strong, mask, segmentation=segmentation,
                     )
                 else:
                     ent_loss = torch.tensor(0.0, device=self.device)
@@ -1375,7 +1468,8 @@ def _compute_map(all_outputs, all_labels):
 def evaluate(model, dataloader, criterion, device, modality_bands_dict,
              modalities_to_use=('rgb',), pseudo_modalities=None, intermediate_projectors=None,
              multilabel=False, label_key='label', segmentation=False, num_classes=None,
-             ignore_index=-100, regression=False, regression_scale=1.0):
+             ignore_index=-100, regression=False, regression_scale=1.0,
+             regression_mask_above=None):
     """
     Evaluate model on a dataloader.
 
@@ -1431,8 +1525,13 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
             total_loss += loss.item()
 
             if regression:
-                sq_err_sum += ((outputs - labels) ** 2).sum().item()
-                n_elem += labels.numel()
+                pred_r, tgt_r = outputs, labels
+                if regression_mask_above is not None:
+                    keep = labels < regression_mask_above
+                    pred_r = outputs[keep]
+                    tgt_r = labels[keep]
+                sq_err_sum += ((pred_r - tgt_r) ** 2).sum().item()
+                n_elem += tgt_r.numel()
             elif segmentation:
                 # outputs: [B, C, H, W]; labels: [B, H, W]
                 all_seg_preds.append(outputs.argmax(dim=1).cpu())
@@ -1525,7 +1624,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                                    ignore_index=-100,
                                    val_loader=None, best_checkpoint_path=None,
                                    val_per_epoch=1, warmup_epochs=1,
-                                   task_config=None):
+                                   task_config=None, train_aug=None):
     """
     Supervised training loop for single-modality EVAN training (Stage 0).
 
@@ -1571,6 +1670,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         best_checkpoint_path=best_checkpoint_path,
         val_per_epoch=val_per_epoch,
         phase_name=phase_name,
+        train_aug=train_aug,
     )
 
 def compute_miou(preds: torch.Tensor, labels: torch.Tensor, num_classes: int, ignore_index: int = 255) -> float:

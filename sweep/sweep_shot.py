@@ -24,7 +24,7 @@ def main():
 
     # ── Fixed args (non-swept) ────────────────────────────────────────────────
     parser.add_argument('--dataset', type=str, default='eurosat',
-                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020'])
+                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020', 'biomassters'])
     parser.add_argument('--stage0_checkpoint', type=str, required=True)
     parser.add_argument('--new_mod_group', type=str, required=True)
     parser.add_argument('--results_csv', type=str,
@@ -36,6 +36,8 @@ def main():
     parser.add_argument('--eval_every_n_epochs', type=int, default=4)
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--warmup_epochs', type=int, default=3)
+    parser.add_argument('--num_time_steps', type=int, default=12,
+                        help='Temporal datasets (biomassters): timesteps to load.')
     parser.add_argument('--tz_fusion_time', type=int, default=3)
     parser.add_argument('--intermediate_projector_num_layers', type=int, default=2)
 

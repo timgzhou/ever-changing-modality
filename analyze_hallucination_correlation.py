@@ -6,8 +6,16 @@ For each modality (A, B), compares:
   corr(real_B, real_A)  -- cross-modal baseline               [should be lower]
   corr(real_A, real_A)  -- sanity                             [should be ~1.0]
 
+Two additional controls disentangle per-image content recovery from shared
+latent geometry (see shuffled_patch_pearson / batch_pearson):
+  shuffled control  -- hal from image i vs real from image j != i
+  across-sample r   -- Pearson over the sample axis, dataset mean removed
+
 Visualizes samples where hallucination is best: raw S2 (B04/B03/B02 true-color), S1 (2ch composite),
-and 8×8 patch token grids (PCA→RGB) for real and hallucinated modalities.
+and patch token grids (PCA→RGB) for real and hallucinated modalities.
+
+Supports BEN-v2 (classification) and BioMassters (temporal regression); the
+dataset and task head are inferred from the checkpoint config.
 """
 
 import argparse
@@ -25,21 +33,125 @@ import torch.nn.functional as F
 from sklearn.decomposition import PCA
 
 sys.path.insert(0, os.path.dirname(__file__))
-from delulunet_main import EVANClassifier
-from geobench_data_utils import get_benv2_loaders, create_multimodal_batch_geobench, BENV2_S2_BANDS
+from delulunet_main import EVANClassifier, EvanSegmenter
+from data_utils import create_multimodal_batch, get_loaders
 
-# BEN-v2 S2 band indices for RGB and NIR (within the s2 slice)
-_S2_BANDS = list(BENV2_S2_BANDS)
-_S2_R = _S2_BANDS.index('B04')
-_S2_G = _S2_BANDS.index('B03')
-_S2_B = _S2_BANDS.index('B02')
+_DATASETS = ('eurosat', 'benv2', 'dfc2020', 'biomassters')
+
+# Modality pairs that identify a dataset when the checkpoint doesn't record one.
+# EuroSAT modalities are S2 sub-bands; benv2/dfc2020/biomassters use s1/s2.
+_EUROSAT_MODS = {'rgb', 'vre', 'nir', 'swir', 'aw'}
+
+
+def _infer_dataset(mods, ckpt_config):
+    """Best-effort dataset name from checkpoint metadata, else from modality names."""
+    ds = ckpt_config.get('dataset')
+    if ds:
+        return ds
+    if any(m in _EUROSAT_MODS for m in mods):
+        return 'eurosat'
+    # s1/s2 pairs are ambiguous across benv2 / dfc2020 / biomassters.
+    raise ValueError(
+        f"Checkpoint does not record a dataset and modalities {list(mods)} are "
+        f"ambiguous. Pass --dataset explicitly (one of {list(_DATASETS)})."
+    )
+
+
+_GEOBENCH_S2_BANDS = {
+    'benv2':       ('geobench_data_utils',     'BENV2_S2_BANDS'),
+    'biomassters': ('biomassters_data_utils',  'BIOMASSTERS_S2_BANDS'),
+}
+
+
+def _geobench_s2_bands(ds_name):
+    """S2 band order for GeoBench-style datasets; () when unknown (-> grayscale).
+
+    Read from the already-imported dataset module (get_loaders imports it), so a
+    missing optional dependency never silently downgrades the S2 panel.
+    """
+    entry = _GEOBENCH_S2_BANDS.get(ds_name)
+    if entry is None:
+        return ()
+    mod_name, attr = entry
+    mod = sys.modules.get(mod_name)
+    if mod is None:
+        import importlib
+        mod = importlib.import_module(mod_name)
+    return getattr(mod, attr, ())
+
+
+def _rgb_indices(bands):
+    """(R, G, B) positions of B04/B03/B02 within a modality's band list.
+
+    Returns None when the modality has no true-colour triple (e.g. EuroSAT
+    'vre'/'nir', or S1), in which case the caller falls back to a grayscale view.
+    """
+    b = [str(x) for x in bands]
+    try:
+        return b.index('B04'), b.index('B03'), b.index('B02')
+    except ValueError:
+        return None
+
+
+def _load_model(path, device):
+    """Load an EVAN predictor, dispatching on the checkpoint's task head.
+
+    Classification checkpoints carry 'classifier_strategy'; dense-prediction
+    (segmentation / regression) checkpoints carry 'decoder_strategy'.
+    """
+    config = torch.load(path, map_location='cpu', weights_only=False)['config']
+    if 'classifier_strategy' in config:
+        return EVANClassifier.from_checkpoint(path, device), 'classifier'
+    if 'decoder_strategy' in config:
+        return EvanSegmenter.from_checkpoint(path, device), 'segmenter'
+    raise ValueError(
+        f"Cannot determine head type for {path}: config has neither "
+        f"'classifier_strategy' nor 'decoder_strategy'. Keys: {sorted(config)}"
+    )
 
 
 def patch_pearson(a, b):
-    """Per-patch Pearson r across feature dim. a,b: [B, N, D] → [B, N]"""
+    """Per-patch Pearson r across feature dim. a,b: [B, N, D] → [B, N]
+
+    Centering is per-token across D, so this removes each token's own DC offset
+    but NOT any component shared across the dataset (mean token direction,
+    layernorm geometry, positional structure). See batch_pearson() for the
+    across-samples variant that does remove it.
+    """
     a = a - a.mean(-1, keepdim=True)
     b = b - b.mean(-1, keepdim=True)
     return (a * b).sum(-1) / (a.norm(dim=-1) * b.norm(dim=-1) + 1e-8)
+
+
+def shuffled_patch_pearson(a, b, generator=None):
+    """patch_pearson with b's samples derangement-shuffled → [B, N].
+
+    Control for the shared-region component: pairs hallucinated tokens from
+    image i with real tokens from image j != i. If this matches the aligned
+    score, patch_pearson is measuring latent geometry rather than per-image
+    content recovery.
+    """
+    B = a.shape[0]
+    if B < 2:
+        return None
+    # Derangement via cyclic shift: guarantees no index maps to itself.
+    shift = 1 if generator is None else int(torch.randint(1, B, (1,), generator=generator).item())
+    return patch_pearson(a, b.roll(shift, dims=0))
+
+
+def batch_pearson(a, b, eps=1e-8):
+    """Pearson r across the SAMPLE axis, per (patch, feature). a,b: [B, N, D] → [N, D]
+
+    Centering across B subtracts the dataset mean token, removing the shared
+    centroid that patch_pearson leaves in. This isolates per-image information:
+    a projector that collapses to the conditional mean scores ~0 here regardless
+    of how high its patch_pearson is.
+    """
+    a = a - a.mean(0, keepdim=True)
+    b = b - b.mean(0, keepdim=True)
+    num = (a * b).sum(0)
+    den = a.norm(dim=0) * b.norm(dim=0)
+    return num / (den + eps)
 
 
 def _stretch(arr_hwc):
@@ -53,34 +165,53 @@ def _stretch(arr_hwc):
     return (out * 255).astype(np.uint8)
 
 
-def s2_to_rgb(img_chw, s2_slice):
-    """Visualize S2 as true-color RGB (B04/B03/B02) with joint percentile stretch."""
-    s2 = img_chw[s2_slice].cpu().numpy().astype(np.float32)
-    rgb = np.stack([s2[_S2_R], s2[_S2_G], s2[_S2_B]], axis=-1)  # [H, W, 3]
-    return _stretch(rgb)
+def _drop_time(x):
+    """[C, T, H, W] -> [C, H, W] by mean over T; [C, H, W] passes through."""
+    return x.mean(1) if x.dim() == 4 else x
 
 
-def s1_to_rgb(img_chw, s1_slice):
-    """Visualize S1 (VV, VH) as grayscale average with joint percentile stretch."""
-    s1 = img_chw[s1_slice].cpu().numpy().astype(np.float32)
-    avg = (s1[0] + s1[1]) / 2  # [H, W]
-    avg_hwc = np.stack([avg, avg, avg], axis=-1)  # [H, W, 3] grayscale
-    return _stretch(avg_hwc)
+def modality_to_rgb(img_chw, band_spec, rgb_idx=None):
+    """Render one modality as an image with joint percentile stretch.
+
+    True-colour when the modality contains B04/B03/B02 (rgb_idx given), otherwise
+    a grayscale channel-average. Works for any channel count and for temporal
+    [C, T, H, W] inputs.
+    """
+    x = _drop_time(img_chw[band_spec]).cpu().numpy().astype(np.float32)
+    if rgb_idx is not None:
+        r, g, b = rgb_idx
+        return _stretch(np.stack([x[r], x[g], x[b]], axis=-1))
+    avg = x.mean(0)  # [H, W]
+    return _stretch(np.stack([avg, avg, avg], axis=-1))
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', default='checkpoints/delulunet_benv2_0501_0433.pt')
+    parser.add_argument('--dataset', default=None, choices=sorted(_DATASETS),
+                        help='Dataset loaders to use. Default: read from the checkpoint, '
+                             'else inferred from modality names.')
+    parser.add_argument('--num_time_steps', type=int, default=None,
+                        help='Temporal datasets (biomassters): timesteps to load. '
+                             'Default: taken from the checkpoint config.')
+    parser.add_argument('--out_dir', default='res/hallucination_correlation')
     parser.add_argument('--n_batches', type=int, default=20)
     parser.add_argument('--n_vis', type=int, default=6)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     args = parser.parse_args()
 
-    os.makedirs('res/hallucination_correlation', exist_ok=True)
+    os.makedirs(args.out_dir, exist_ok=True)
 
-    # ── Load model ──────────────────────────────────────────────────────────
-    model = EVANClassifier.from_checkpoint(args.checkpoint, args.device)
+    # ── Load model (dispatch on task head) ──────────────────────────────────
+    # Run metadata ('dataset', 'num_time_steps') lives at the checkpoint top
+    # level; model hyperparameters live under 'config'. Merge so lookups below
+    # find either, with 'config' taking precedence on key collisions.
+    _ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    ckpt_config = {k: v for k, v in _ckpt.items() if k != 'model_state_dict'}
+    ckpt_config.update(_ckpt.get('config', {}))
+    del _ckpt
+    model, head_kind = _load_model(args.checkpoint, args.device)
     model.eval()
     evan = model.evan
     n_storage = evan.n_storage_tokens
@@ -89,15 +220,60 @@ def main():
     mod_a, mod_b = mods[0], mods[1]
     print(f"Modalities: A={mod_a}, B={mod_b}")
     print(f"Projector type: {evan.intermediate_projector_type}")
+    print(f"Head type: {head_kind}")
 
     # ── Load data ────────────────────────────────────────────────────────────
-    _, _, _, _, test_loader, task_config = get_benv2_loaders(
+    # get_loaders() normalizes every dataset to the same 5-loader + TaskConfig
+    # interface, including EuroSAT (band-name tuples) vs GeoBench (slices).
+    ds_name = args.dataset or _infer_dataset(mods, ckpt_config)
+    if ds_name not in _DATASETS:
+        raise ValueError(f"Unsupported dataset {ds_name!r}; choose from {list(_DATASETS)}")
+    print(f"Dataset: {ds_name}")
+
+    # Match the checkpoint's T unless overridden; the model mean-pools over it.
+    n_t = args.num_time_steps or ckpt_config.get('num_time_steps') or 10
+    if ds_name == 'biomassters':
+        print(f"num_time_steps: {n_t}")
+
+    _, _, _, _, test_loader, task_config = get_loaders(
+        ds_name,
+        starting_modality=mod_a,
         batch_size=args.batch_size,
         num_workers=4,
-        starting_modality=mod_a,
         new_modality=mod_b,
+        num_time_steps=n_t,
     )
     modality_slices = task_config.modality_bands_dict
+
+    # Preflight: catch a dataset/checkpoint mismatch here rather than as an
+    # opaque conv2d channel error deep in the patch embedder.
+    expected_chans = dict(zip(evan.supported_modalities, evan.supported_modalities_in_chans))
+    for mod in (mod_a, mod_b):
+        spec_bands = modality_slices[mod]
+        got = (spec_bands.stop - spec_bands.start) if isinstance(spec_bands, slice) else len(spec_bands)
+        want = expected_chans.get(mod)
+        if want is not None and got != want:
+            raise ValueError(
+                f"Channel mismatch for modality {mod!r}: checkpoint expects {want} "
+                f"channels but dataset {ds_name!r} provides {got}. The checkpoint was "
+                f"likely trained on a different dataset — pass --dataset explicitly."
+            )
+
+    # Per-modality true-colour indices for visualization. EuroSAT stores band
+    # names directly in modality_bands_dict; GeoBench stores slices into the
+    # stacked image, so the S2 band order comes from the dataset module.
+    # None -> render that modality as a grayscale channel-average.
+    def _viz_rgb(mod):
+        band_spec = modality_slices[mod]
+        if not isinstance(band_spec, slice):
+            return _rgb_indices(band_spec)          # EuroSAT: tuple of band names
+        if mod == 's2':
+            return _rgb_indices(_geobench_s2_bands(ds_name))
+        return None                                  # s1 and friends: no true colour
+
+    rgb_idx = {mod: _viz_rgb(mod) for mod in (mod_a, mod_b)}
+    # Texture filter runs on whichever modality has a true-colour view.
+    tex_mod = next((m for m in (mod_a, mod_b) if rgb_idx[m] is not None), mod_a)
     """
     # ── Evaluate checkpoint on test split (both modalities) ─────────────────
     print('\n=== Evaluating checkpoint on test split (multimodal) ===')
@@ -128,6 +304,14 @@ def main():
     all_corr_ha_rb = []   # corr(hal_A, real_B)
     all_corr_hb_ra = []   # corr(hal_B, real_A)
 
+    # ── Additional analysis (does not affect the metrics above) ─────────────
+    # Shuffled control: hal from image i vs real from image j != i.
+    all_shuf_hal_a = []   # corr(hal_A, real_A[shuffled])
+    all_shuf_hal_b = []   # corr(hal_B, real_B[shuffled])
+    # Raw tokens, kept to compute across-sample correlation on full-dataset
+    # statistics (per-batch means would bias batch_pearson at small B).
+    tok_pa, tok_ha, tok_pb, tok_hb = [], [], [], []
+
     # For visualization: keep raw images and patch tokens for high-corr samples
     vis_candidates = []  # (mean_corr_a, img_raw, patches_a, hal_patches_a, patches_b, hal_patches_b, corr_map_a, corr_map_b)
 
@@ -137,7 +321,7 @@ def main():
                 break
 
             img_raw = batch['image']  # [B, C_total, H, W] — z-score normalized, percentile-stretched for viz
-            x = create_multimodal_batch_geobench(batch, modality_slices, (mod_a, mod_b))
+            x = create_multimodal_batch(batch, modality_slices, (mod_a, mod_b))
             x_a = x[mod_a].to(args.device)
             x_b = x[mod_b].to(args.device)
 
@@ -176,14 +360,23 @@ def main():
             all_corr_ha_rb.append(patch_pearson(ha, pb).cpu())
             all_corr_hb_ra.append(patch_pearson(hb, pa).cpu())
 
+            # Shuffled control + raw tokens for the across-sample metric.
+            shuf_a = shuffled_patch_pearson(ha, pa)
+            shuf_b = shuffled_patch_pearson(hb, pb)
+            if shuf_a is not None:
+                all_shuf_hal_a.append(shuf_a.cpu())
+                all_shuf_hal_b.append(shuf_b.cpu())
+            tok_pa.append(pa.cpu()); tok_ha.append(ha.cpu())
+            tok_pb.append(pb.cpu()); tok_hb.append(hb.cpu())
+
             B = pa.shape[0]
-            s2_sl = modality_slices['s2']
             for s in range(B):
-                # Skip flat/uniform tiles (cloud, ocean) — filter on RGB bands specifically
-                s2 = img_raw[s, s2_sl]
-                rgb_std = s2[[_S2_R, _S2_G, _S2_B]].std().item()
-                if rgb_std < 0.5:
-                    continue
+                # Skip flat/uniform tiles (cloud, ocean). Measure texture on the
+                # true-colour bands when available, else on the whole modality.
+                # The threshold is distribution-relative (applied after the loop)
+                # so it transfers across datasets with different normalizations.
+                tex = _drop_time(img_raw[s, modality_slices[tex_mod]])
+                rgb_std = (tex[list(rgb_idx[tex_mod])] if rgb_idx[tex_mod] is not None else tex).std().item()
                 mean_a = corr_hal_a[s].mean().item()
                 vis_candidates.append((
                     mean_a,
@@ -191,6 +384,7 @@ def main():
                     pa[s].cpu(), ha[s].cpu(),
                     pb[s].cpu(), hb[s].cpu(),
                     corr_hal_a[s].cpu(), corr_hal_b[s].cpu(),
+                    rgb_std,
                 ))
 
     # ── Print metrics ────────────────────────────────────────────────────────
@@ -214,6 +408,45 @@ def main():
     def _cell(tensors):
         m, s = _ms(tensors)
         return f'${m:.3f}\\pm{s:.3f}$'
+
+    # ── Additional analysis 1: shuffled-image control ────────────────────────
+    # Isolates the shared-region component. If the shuffled score is close to
+    # the aligned score, patch_pearson reflects latent geometry (all real S2
+    # tokens occupying a common region) rather than per-image content recovery.
+    print('\n=== Shuffled-image control (patch_pearson, mismatched pairs) ===')
+    if all_shuf_hal_a:
+        stats(all_shuf_hal_a, f'corr(hal_{mod_a},   real_{mod_a}[shuf])')
+        stats(all_shuf_hal_b, f'corr(hal_{mod_b},   real_{mod_b}[shuf])')
+        m_al_a, _ = _ms(all_corr_hal_a)
+        m_sh_a, _ = _ms(all_shuf_hal_a)
+        m_al_b, _ = _ms(all_corr_hal_b)
+        m_sh_b, _ = _ms(all_shuf_hal_b)
+        print(f'  gap ({mod_a}): aligned {m_al_a:.4f} - shuffled {m_sh_a:.4f} = {m_al_a - m_sh_a:.4f}')
+        print(f'  gap ({mod_b}): aligned {m_al_b:.4f} - shuffled {m_sh_b:.4f} = {m_al_b - m_sh_b:.4f}')
+        print('  Large gap → per-image recovery. Small gap → shared latent geometry.')
+    else:
+        print('  skipped (batch size < 2)')
+
+    # ── Additional analysis 2: across-sample Pearson ─────────────────────────
+    # Centering across the dataset removes the mean token, so a projector that
+    # collapses to the conditional mean scores ~0 here however high its
+    # patch_pearson is. Computed on pooled tokens for unbiased dataset means.
+    print('\n=== Across-sample Pearson (per patch-position & feature) ===')
+    cat_pa = torch.cat(tok_pa); cat_ha = torch.cat(tok_ha)
+    cat_pb = torch.cat(tok_pb); cat_hb = torch.cat(tok_hb)
+    n_samples = cat_pa.shape[0]
+    print(f'  pooled over {n_samples} samples')
+    if n_samples < 2:
+        print('  skipped (need >= 2 samples)')
+    else:
+        bp_a = batch_pearson(cat_ha, cat_pa)   # [N, D]
+        bp_b = batch_pearson(cat_hb, cat_pb)
+        bp_x = batch_pearson(cat_pb, cat_pa)   # cross-modal baseline
+        for t, label in ((bp_a, f'corr(hal_{mod_a}, real_{mod_a})   [KEY]'),
+                         (bp_b, f'corr(hal_{mod_b}, real_{mod_b})   [KEY]'),
+                         (bp_x, f'corr(real_{mod_b}, real_{mod_a}) [baseline]')):
+            f = t.flatten()
+            print(f'  {label:40s}  mean={f.mean():.4f}  std={f.std():.4f}  median={f.median():.4f}')
 
     ma, mb = mod_a.upper(), mod_b.upper()
 
@@ -314,7 +547,7 @@ def main():
                     ha='center', va='center', fontsize=11, zorder=3,
                     color='white' if abs(mean_mat[i,j]) > 0.5 else 'black')
     plt.tight_layout()
-    heatmap_path = 'res/hallucination_correlation/corr_matrix.pdf'
+    heatmap_path = os.path.join(args.out_dir, 'corr_matrix.pdf')
     plt.savefig(heatmap_path, bbox_inches='tight')
     plt.close()
     print(f'Saved {heatmap_path}')
@@ -325,14 +558,30 @@ def main():
         return np.clip((proj - lo) / (hi - lo + 1e-8), 0, 1)
 
     # ── Visualize top-n_vis samples ──────────────────────────────────────────
-    vis_candidates.sort(key=lambda x: x[0], reverse=True)
-    top = vis_candidates[:args.n_vis]
+    # Drop the flattest 25% of tiles (cloud/ocean) using a distribution-relative
+    # cutoff, so this works regardless of the dataset's normalization scheme.
+    if vis_candidates:
+        std_cut = float(np.percentile([c[-1] for c in vis_candidates], 25))
+        kept = [c for c in vis_candidates if c[-1] >= std_cut]
+        print(f'\nViz: {len(kept)}/{len(vis_candidates)} tiles pass texture filter '
+              f'(RGB std >= {std_cut:.3f})')
+    else:
+        kept = []
+    kept.sort(key=lambda x: x[0], reverse=True)
+    top = kept[:args.n_vis]
 
-    s2_slice = modality_slices['s2']
-    s1_slice = modality_slices['s1']
+    slice_a = modality_slices[mod_a]
+    slice_b = modality_slices[mod_b]
+    label_a = f'{mod_a.upper()} (RGB)' if rgb_idx[mod_a] is not None else f'{mod_a.upper()} (mean)'
+    label_b = f'{mod_b.upper()} (RGB)' if rgb_idx[mod_b] is not None else f'{mod_b.upper()} (mean)'
+
+    if not top:
+        print('No tiles available for visualization; skipping sample figures.')
+        print('\nDone.')
+        return
 
     n_patches = top[0][2].shape[0]
-    grid_size = int(n_patches ** 0.5)  # 8 for BEN-v2
+    grid_size = int(n_patches ** 0.5)  # 8 for BEN-v2, 16 for BioMassters
 
     # Layout (2 rows × 4 cols):
     #   cols 0-1: S2 / S1 raw images, each spanning both rows (full height)
@@ -342,7 +591,7 @@ def main():
     _TOK = 0.45    # token col width relative to image col; two stacked squares → ~same height as one image
     _col_ratios = [1, 1, _TOK, _TOK]
 
-    for idx, (mean_corr_a, img_raw, pa, ha, pb, hb, corr_a_map, corr_b_map) in enumerate(top):
+    for idx, (mean_corr_a, img_raw, pa, ha, pb, hb, corr_a_map, corr_b_map, _std) in enumerate(top):
         fig = plt.figure(figsize=(10, 5))
 
         # PCA fit on both real token sets jointly; hallucinated tokens projected into same space.
@@ -402,11 +651,11 @@ def main():
         for ax in (ax_s2, ax_s1, ax_pa, ax_ha, ax_pb, ax_hb):
             ax.axis('off')
 
-        ax_s2.imshow(s2_to_rgb(img_raw, s2_slice))
-        ax_s2.text(0.5, -0.02, 'S2 (RGB)', fontsize=11, ha='center', va='top', transform=ax_s2.transAxes)
+        ax_s2.imshow(modality_to_rgb(img_raw, slice_a, rgb_idx[mod_a]))
+        ax_s2.text(0.5, -0.02, label_a, fontsize=11, ha='center', va='top', transform=ax_s2.transAxes)
 
-        ax_s1.imshow(s1_to_rgb(img_raw, s1_slice))
-        ax_s1.text(0.5, -0.02, 'S1 (VV+VH)', fontsize=11, ha='center', va='top', transform=ax_s1.transAxes)
+        ax_s1.imshow(modality_to_rgb(img_raw, slice_b, rgb_idx[mod_b]))
+        ax_s1.text(0.5, -0.02, label_b, fontsize=11, ha='center', va='top', transform=ax_s1.transAxes)
 
         ax_pa.imshow(rgb_pa, interpolation='nearest')
         ax_pa.text(0.5, -0.04, f'real {mod_a}', fontsize=11, ha='center', va='top', transform=ax_pa.transAxes)
@@ -420,7 +669,7 @@ def main():
         ax_hb.imshow(rgb_hb, interpolation='nearest')
         ax_hb.text(0.5, -0.04, f'hall {mod_b}', fontsize=11, ha='center', va='top', transform=ax_hb.transAxes)
 
-        out_path = f'res/hallucination_correlation/sample_{idx:03d}.pdf'
+        out_path = os.path.join(args.out_dir, f'sample_{idx:03d}.pdf')
         plt.savefig(out_path, bbox_inches='tight')
         plt.close()
         print(f'Saved {out_path}')
@@ -432,6 +681,13 @@ if __name__ == '__main__':
     main()
 
 
-# python -u analyze_hallucination_correlation.py --checkpoint checkpoints/sweep_lr7ygzoh_0501_1505.pt
-# python -u analyze_hallucination_correlation.py --checkpoint checkpoints/delulunet_benv2_0501_0635.pt
-# python -u analyze_hallucination_correlation.py --checkpoint checkpoints/delulunet_benv2_0501_1943.pt
+# BEN-v2 (classification):
+# python -u analyze_hallucination_correlation.py --checkpoint checkpoints/delulu-checkpoints/sweep_lr7ygzoh_0501_1505.pt
+# python -u analyze_hallucination_correlation.py --checkpoint checkpoints/delulu-checkpoints/delulunet_benv2_0501_0635.pt
+# python -u analyze_hallucination_correlation.py --checkpoint checkpoints/delulu-checkpoints/delulunet_benv2_0501_1943.pt
+#
+# BioMassters (temporal regression) — dataset/T/head inferred from the checkpoint.
+# Use a smaller batch: 12 timesteps at 256px is far heavier than BEN-v2.
+# python -u analyze_hallucination_correlation.py \
+#     --checkpoint checkpoints/delulunet_biomassters_s1s2_addition_rank1_seed2.pt \
+#     --batch_size 4 --n_batches 40 --out_dir res/hallucination_correlation/biomassters

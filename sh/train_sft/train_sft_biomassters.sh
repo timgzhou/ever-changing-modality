@@ -20,7 +20,7 @@ WDS=('0.01' '0.0')
 # Temporal pooling window (<=12). BioMassters mean-pools features over this many
 # most-recent timesteps inside the model. Full-year signal (12) matches the
 # published protocol; keep in sync with the shot_ete / e2e scripts.
-NUM_TIME_STEPS="${NUM_TIME_STEPS:-6}"
+NUM_TIME_STEPS="${NUM_TIME_STEPS:-12}"
 
 RESULTS_CSV="res/train_sft/${DATASET}.csv"
 mkdir -p logs/train_sft
@@ -30,9 +30,13 @@ for MODALITY_ENTRY in ${MODALITIES}; do
         for WD in "${WDS[@]}"; do
             MODALITY_KEY="${MODALITY_ENTRY}"
             # Skip only when BOTH dino variants are already in the results CSV.
-            DINO_PAT="^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},[^,]+,[^,]+,${LR},${WD},[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+"
-            grep -qP "${DINO_PAT},True"  "${RESULTS_CSV}" 2>/dev/null && DINO_TRUE=1  || DINO_TRUE=0
-            grep -qP "${DINO_PAT},False" "${RESULTS_CSV}" 2>/dev/null && DINO_FALSE=1 || DINO_FALSE=0
+            # The key includes num_time_steps and the decoder tag, so runs at a
+            # different T (or with the old linear head) are not treated as done.
+            # Must stay in sync with the pattern in train_sft_job.sh.
+            DINO_PAT="^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},[^,]+,[^,]+,${LR},${WD},([^,]+,){7}"
+            TAIL="${NUM_TIME_STEPS},\Qupernet+relu\E$"
+            grep -qP "${DINO_PAT}True,${TAIL}"  "${RESULTS_CSV}" 2>/dev/null && DINO_TRUE=1  || DINO_TRUE=0
+            grep -qP "${DINO_PAT}False,${TAIL}" "${RESULTS_CSV}" 2>/dev/null && DINO_FALSE=1 || DINO_FALSE=0
             if [ "$DINO_TRUE" -ge 1 ] && [ "$DINO_FALSE" -ge 1 ]; then
                 echo "Skipping (both dino variants done): modality=${MODALITY_ENTRY} lr=${LR} wd=${WD}"
                 continue

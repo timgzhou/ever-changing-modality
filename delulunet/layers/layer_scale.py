@@ -21,6 +21,11 @@ class LayerScale(nn.Module):
         self.inplace = inplace
         self.gamma = nn.Parameter(torch.empty(dim, device=device))
         self.init_values = init_values
+        # Upstream DINOv3 leaves gamma uninitialized and relies on an external
+        # reset_parameters()/weight-load pass. EVAN only runs that for the primary
+        # modality, so blocks created for a later modality (e.g. 's1') would keep
+        # uninitialized memory and produce inf/NaN activations. Initialize here.
+        self.reset_parameters()
 
     def reset_parameters(self):
         nn.init.constant_(self.gamma, self.init_values)

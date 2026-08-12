@@ -34,6 +34,11 @@ class TaskConfig:
     img_size: int
     ignore_index: int = -100    # label value to ignore in loss/metric
     regression_scale: float = 1.0  # regression only: multiply normalized RMSE to report in target units
+    regression_loss_scale: float = 1.0  # regression only: divide MSE-based losses (distill/CE) by this^2 so they
+                                        # match the feature-space latent/prefusion losses. Set to the target std
+                                        # (e.g. AGB_STD) when the target is in raw units; independent of the
+                                        # reporting scale above.
+    regression_mask_above: float | None = None  # regression only: exclude target pixels >= this from loss/metric
 
 
 # ---------------------------------------------------------------------------

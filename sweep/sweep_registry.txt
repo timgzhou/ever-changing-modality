@@ -59,3 +59,13 @@ delulu-benv2-final-no-batch-mixing-s2s1 tgz/delulu-benv2-final-no-batch-mixing-s
 delulu-benv2-final-no-prefusion-s2s1 tgz/delulu-benv2-final-no-prefusion-s2s1/kpo8msor checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
 delulu-benv2-final-no-latent-s2s1 tgz/delulu-benv2-final-no-latent-s2s1/dvk5htyw checkpoints/sft_evan_base_benv2_s2_fft_lr0.001_20260418_112953.pt s1
 delulu-benv2-masking-s1s2 tgz/delulu-benv2-masking-s1s2/ml7k80qn checkpoints/sft_evan_base_benv2_s1_fft_lr0.0005_20260418_064233.pt s2
+delulu-biomassters-delulu-s2s1 tgz/delulu-biomassters-delulu-s2s1/7f711d7k checkpoints/sft_evan_base_biomassters_s2_fft_lr0.0005_20260725_075836.pt s1
+delulu-biomassters-delulu-s1s2 tgz/delulu-biomassters-delulu-s1s2/eqyhsdsq checkpoints/sft_evan_base_biomassters_s1_fft_lr0.0005_20260725_075947.pt s2
+delulu-biomassters-delulu-s2s1 tgz/delulu-biomassters-delulu-s2s1/68pitzqh checkpoints/sft_evan_base_biomassters_s2_fft_lr0.0005_20260725_075836.pt s1
+delulu-biomassters-delulu-s1s2 tgz/delulu-biomassters-delulu-s1s2/pk3abi7b checkpoints/sft_evan_base_biomassters_s1_fft_lr0.0005_20260725_075947.pt s2
+delulu-biomassters-delulu-s2s1 tgz/delulu-biomassters-delulu-s2s1/ea5yaych checkpoints/sft_evan_base_biomassters_s2_fft_lr0.0005_20260725_075836.pt s1
+delulu-biomassters-delulu-s1s2 tgz/delulu-biomassters-delulu-s1s2/2cf3nt9f checkpoints/sft_evan_base_biomassters_s1_fft_lr0.0005_20260725_075947.pt s2
+delulu-biomassters-delulu-s2s1 tgz/delulu-biomassters-delulu-s2s1/4nvicjkj checkpoints/sft_evan_base_biomassters_s2_fft_lr0.0005_20260725_075836.pt s1
+delulu-biomassters-delulu-s1s2 tgz/delulu-biomassters-delulu-s1s2/errk482l checkpoints/sft_evan_base_biomassters_s1_fft_lr0.0005_20260725_075947.pt s2
+delulu-biomassters-delulu-s2s1 tgz/delulu-biomassters-delulu-s2s1/bcghnc0e checkpoints/sft_evan_base_biomassters_s2_fft_lr0.0005_20260725_075836.pt s1
+delulu-biomassters-delulu-s1s2 tgz/delulu-biomassters-delulu-s1s2/fay6f1gi checkpoints/sft_evan_base_biomassters_s1_fft_lr0.0005_20260725_075947.pt s2

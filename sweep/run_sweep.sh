@@ -1,10 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=shot-sweep
+#SBATCH --exclude=kn101
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=3:00:00
+#SBATCH --time=8:00:00
 #SBATCH --output=logs/sweep/%j.out
 #SBATCH --account=aip-gpleiss
 #SBATCH --mail-user=tiange.zhou@outlook.com
@@ -20,6 +21,7 @@ cd "$REPO_ROOT"
 source sh/env.sh
 export TQDM_DISABLE=1
 export WANDB_DIR="$HOME/wandb"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$WANDB_DIR"
 
 echo "Starting sweep agent: $SWEEP_ID"

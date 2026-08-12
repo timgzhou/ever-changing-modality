@@ -229,3 +229,6 @@ one-off/
 cache
 .venv_clean
 DFC2020.zip
+# Large binary artifacts — exceed GitHub's 100 MB file limit
+*.zip
+model/models.zip

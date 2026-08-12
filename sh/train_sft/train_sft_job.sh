@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=2:00:00
+#SBATCH --time=6:00:00
 #SBATCH --account=aip-gpleiss
 #SBATCH --output=logs/train_sft/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com
@@ -9,7 +9,7 @@
 #SBATCH --mem=64G
 
 # Expected env vars (set by train_sft_all.sh):
-#   DATASET, MODEL, TRAIN_MODE, MODALITY_ENTRY, LR, WD
+#   DATASET, MODEL, TRAIN_MODE, MODALITY_ENTRY, LR, WD, TRAIN_SPLIT
 
 source sh/env.sh
 export TQDM_DISABLE=1
@@ -19,12 +19,27 @@ MODALITY_KEY="${MODALITY_ENTRY}"
 RESULTS_CSV="res/train_sft/${DATASET}.csv"
 
 # BioMassters is temporal: pool features over this many timesteps (<=12).
+# It is also regression on non-negative AGB, so use the PANGAEA RegUPerNet-style
+# multi-scale decoder with a ReLU-clamped output.
+# T and DECODER_TAG also form part of the results-CSV key below, so a run at a
+# different T (or with a different head) is not suppressed by an older row.
 EXTRA_ARGS=""
-if [ "${DATASET}" = "biomassters" ]; then
-    EXTRA_ARGS="--num_time_steps ${NUM_TIME_STEPS:-6}"
-fi
+T=10                                    # train_sft.py --num_time_steps default
+DECODER_TAG="linear"                    # dense-head default; "cls" for classification
+case "${DATASET}" in
+    biomassters)
+        T="${NUM_TIME_STEPS:-12}"
+        DECODER_TAG="upernet+relu"
+        EXTRA_ARGS="--num_time_steps ${T} --decoder_type upernet --relu_output"
+        ;;
+    benv2|eurosat)
+        DECODER_TAG="cls"
+        ;;
+esac
 
-echo "Running: model=${MODEL} dataset=${DATASET} train_mode=${TRAIN_MODE} modalities=${MODALITIES} lr=${LR} wd=${WD}"
+TRAIN_SPLIT="${TRAIN_SPLIT:-split1}"
+
+echo "Running: model=${MODEL} dataset=${DATASET} train_mode=${TRAIN_MODE} modalities=${MODALITIES} lr=${LR} wd=${WD} train_split=${TRAIN_SPLIT}"
 
 for USE_DINO in 1 0; do
     DINO_VAL="True"
@@ -34,8 +49,16 @@ for USE_DINO in 1 0; do
         DINO_FLAG=""
     fi
 
-    if grep -qP "^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},[^,]+,[^,]+,${LR},${WD},[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,${DINO_VAL}" "${RESULTS_CSV}" 2>/dev/null; then
-        echo "  → dino_init=${DINO_VAL} already in results, skipping"
+    # Key must include T, the decoder tag, train_aug and train_split, else an
+    # older row (different temporal window / linear head / augmentation / data
+    # split) wrongly suppresses this run. train_split matters most here: a
+    # 'full' run is identical to its 'split1' counterpart in EVERY other
+    # column, so without it the split1 row would always suppress the full run.
+    # Every row carries train_split since the migration, so it is required (not
+    # optional like the legacy trailing columns).
+    TRAIN_AUG="${TRAIN_AUG:-none}"
+    if grep -qP "^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},[^,]+,[^,]+,${LR},${WD},([^,]+,){7}${DINO_VAL},${T},\Q${DECODER_TAG}\E,${TRAIN_AUG},${TRAIN_SPLIT}\r?$" "${RESULTS_CSV}" 2>/dev/null; then
+        echo "  → dino_init=${DINO_VAL} train_split=${TRAIN_SPLIT} already in results, skipping"
         continue
     fi
 
@@ -48,6 +71,8 @@ for USE_DINO in 1 0; do
         --epochs 24 \
         --lr ${LR} \
         --weight_decay ${WD} \
+        --train_aug ${TRAIN_AUG} \
+        --train_split ${TRAIN_SPLIT} \
         ${EXTRA_ARGS} \
         ${DINO_FLAG}
 done
