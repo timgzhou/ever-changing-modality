@@ -16,7 +16,14 @@ export TQDM_DISABLE=1
 
 MODALITIES="${MODALITY_ENTRY//+/ }"
 MODALITY_KEY="${MODALITY_ENTRY}"
-RESULTS_CSV="res/train_sft/${DATASET}.csv"
+# DFC2020 has two incompatible splits (roi = ROI-disjoint 10-class,
+# cobench = Copernicus-Bench 3156/986/986 8-class). Keep their results in
+# separate files so the dedup below never treats one as satisfying the other.
+CSV_SUFFIX=""
+if [ "${DATASET}" = "dfc2020" ] && [ -n "${DFC2020_SPLIT}" ] && [ "${DFC2020_SPLIT}" != "roi" ]; then
+    CSV_SUFFIX="_${DFC2020_SPLIT}"
+fi
+RESULTS_CSV="res/train_sft/${DATASET}${CSV_SUFFIX}.csv"
 
 # BioMassters is temporal: pool features over this many timesteps (<=12).
 # It is also regression on non-negative AGB, so use the PANGAEA RegUPerNet-style
@@ -34,6 +41,18 @@ case "${DATASET}" in
         ;;
     benv2|eurosat)
         DECODER_TAG="cls"
+        ;;
+    dfc2020)
+        # Copernicus-Bench appends a UPerNet decoder (+ auxiliary FCN) for
+        # segmentation; our default linear head is a 1x1 conv over the 16x16
+        # token grid + 16x bilinear upsample, which loses the multi-scale
+        # detail segmentation depends on. Set DECODER=upernet to match their
+        # setup. DECODER_TAG is part of the results-CSV key, so upernet rows
+        # never suppress the linear ones.
+        if [ "${DECODER:-linear}" = "upernet" ]; then
+            DECODER_TAG="upernet"
+            EXTRA_ARGS="--decoder_type upernet"
+        fi
         ;;
 esac
 

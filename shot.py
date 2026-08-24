@@ -417,8 +417,15 @@ def _compute_latent_loss(student_fused, teacher_out, latent_projectors, latent_r
         projected_patches = projected_seq[:, 1:, :]
         if latent_masked_only and modality_masks is not None and mod in modality_masks:
             mask = modality_masks[mod].unsqueeze(-1).float()   # [B, N, 1], 1=masked
-            n_masked = mask.sum().clamp(min=1)
-            patch_loss = ((projected_patches - teacher_patches) ** 2 * mask).sum() / n_masked
+            # Normalize by masked ELEMENTS, not masked patches. mask.sum() counts
+            # patches (mask is [B, N, 1]) while the squared error sums over
+            # [B, N, D], so dividing by it alone left the loss inflated by
+            # embed_dim (768) relative to F.mse_loss -- which is what the
+            # unmasked branch below and the prefusion loss both use. That made
+            # latent ~250x prefusion and over 98% of the total training signal.
+            # Fixed 2026-08-20; lambda_latent must be re-tuned at this scale.
+            n_masked_elems = mask.sum().clamp(min=1) * projected_patches.shape[-1]
+            patch_loss = ((projected_patches - teacher_patches) ** 2 * mask).sum() / n_masked_elems
         else:
             patch_loss = F.mse_loss(projected_patches, teacher_patches)
         latent_loss = latent_loss + F.mse_loss(projected_cls, teacher_cls) + patch_loss
@@ -949,6 +956,29 @@ def train_shot(
             params += list(latent_decoders.parameters())
         print(f"Total trainable parameters: {sum(p.numel() for p in params):,}")
         optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=weight_decay)
+    # ---- automatic loss balancing (optional) -------------------------------
+    # mode 'none' reproduces the fixed-lambda behaviour exactly. 'uncertainty'
+    # learns one log-variance per term and REPLACES lambda_latent /
+    # lambda_prefusion / lambda_distill; 'running_mean' divides each term by an
+    # EMA of its own magnitude so the lambdas become preferences rather than
+    # scale corrections. See loss_balancing.py.
+    from loss_balancing import LossBalancer
+    _balance_mode = getattr(args, 'loss_balance', 'none') or 'none'
+    loss_balancer = LossBalancer(_balance_mode, base_weights=loss_weights,
+                                 device=device)
+    if _balance_mode != 'none':
+        loss_balancer = loss_balancer.to(device)
+        print(f"  Loss balancing: {_balance_mode}")
+        if _balance_mode == 'uncertainty':
+            # the learned log-variances must be optimized alongside the model
+            optimizer.add_param_group(
+                {'params': list(loss_balancer.parameters()), 'lr': args.lr,
+                 'weight_decay': 0.0})
+            print(f"    + {sum(p.numel() for p in loss_balancer.parameters())} "
+                  "learnable log-variance scalars (weight_decay=0)")
+    else:
+        loss_balancer = None
+
     scheduler = make_scheduler(optimizer, args.epochs, warmup_epochs=warmup_epochs)
 
     assert task_type in ("classification", "multilabel", "segmentation", "regression"), f"Unknown task_type: {task_type!r}"
@@ -1032,10 +1062,14 @@ def train_shot(
         )
 
         for batch, is_labeled in pbar:
+            # Balancer-derived weights. mode='none' returns the fixed lambdas
+            # unchanged, so this is a no-op unless --loss_balance is set.
+            step_weights = (loss_balancer.weights() if loss_balancer is not None
+                            else loss_weights)
             if is_labeled:
                 total_loss, loss_dict = _labeled_batch_step(
                     batch, model,
-                    active_losses, loss_weights, starting_modality, newmod_list,
+                    active_losses, step_weights, starting_modality, newmod_list,
                     modality_bands_dict, ce_fn,
                     task_type, label_key, device,
                     use_mask_token=use_mask_token,
@@ -1044,7 +1078,7 @@ def train_shot(
             else:
                 total_loss, loss_dict = _unlabeled_batch_step(
                     batch, model, unimodal_teacher, latent_decoders,
-                    active_losses, loss_weights, starting_modality, newmod_list, all_modalities,
+                    active_losses, step_weights, starting_modality, newmod_list, all_modalities,
                     latent_reconstruct_modalities, modality_bands_dict,
                     args.token_mask_ratio, {
                         mod: (args.modality_dropout_startmod if mod == starting_modality else args.modality_dropout_newmod)
@@ -1061,6 +1095,14 @@ def train_shot(
                     regression_loss_scale=regression_loss_scale,
                 )
                 unlabeled_count += 1
+
+            if loss_balancer is not None:
+                # EMA of raw magnitudes (running_mean); no-op otherwise.
+                loss_balancer.observe(loss_dict)
+                # +sum_i s_i keeps uncertainty weighting from collapsing to zero
+                # precision. Only over the terms active in THIS step.
+                active_now = {k for k, v in loss_dict.items() if v != 0.0}
+                total_loss = total_loss + loss_balancer.regularizer(active_now)
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -1094,7 +1136,9 @@ def train_shot(
                     'effective_labeled_freq': effective_labeled_freq,
                     'grad_norm': grad_norm.item(),
                     'epoch': epoch + 1,
-                    'lr': optimizer.param_groups[0]['lr']
+                    'lr': optimizer.param_groups[0]['lr'],
+                    # learned precisions / EMA scales, so the balance is auditable
+                    **(loss_balancer.report() if loss_balancer is not None else {}),
                 })
 
         # Epoch summary

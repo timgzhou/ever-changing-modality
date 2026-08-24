@@ -39,6 +39,13 @@ def main():
     parser.add_argument('--num_time_steps', type=int, default=12,
                         help='Temporal datasets (biomassters): timesteps to load.')
     parser.add_argument('--tz_fusion_time', type=int, default=3)
+    # shot_ete.main() writes these into the results CSV; the sweep wrapper must
+    # define them or the run trains fully and then dies at the CSV-write step
+    # (AttributeError: 'Namespace' object has no attribute 'config_label').
+    parser.add_argument('--loss_balance', type=str, default='none',
+                        choices=['none', 'running_mean', 'uncertainty'])
+    parser.add_argument('--config_label', type=str, default=None)
+    parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--intermediate_projector_num_layers', type=int, default=2)
 
     # ── Swept continuous hyperparameters ─────────────────────────────────────

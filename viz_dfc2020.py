@@ -56,36 +56,43 @@ from matplotlib.patches import Patch
 
 from data_utils import get_loaders, create_multimodal_batch
 from delulunet_main import EvanSegmenter
-from dfc2020_data_utils import (
+from dfc2020_official_data_utils import (
     DFC2020_IGNORE_INDEX,
     DFC2020_NUM_CLASSES,
     DFC2020_S2_MEAN,
     DFC2020_S2_STD,
 )
 
-# The 8 surviving DFC2020 classes after the 0-17 -> 0-7 remap in
-# dfc2020_data_utils.DFC2020_CLASSES.
+# The 10 scored DFC2020 classes (official IGBP2DFC mapping, ids 1-10 shifted to
+# 0-9). The old MODIS-backed loader collapsed these to 8 by dropping Savanna and
+# Snow/Ice; the official benchmark scores both.
+# NOTE: dfc2020_cobench_data_utils uses a DIFFERENT 8-class mapping (Copernicus-
+# Bench ignores Background/Savanna/Snow-Ice) -- see COBENCH_CLASS_NAMES there.
 CLASS_NAMES = [
     "Forest",
     "Shrubland",
+    "Savanna",
     "Grassland",
-    "Wetland",
-    "Cropland",
-    "Urban",
+    "Wetlands",
+    "Croplands",
+    "Urban/Built-up",
+    "Snow/Ice",
     "Barren",
     "Water",
 ]
 
 # Perceptually distinct, colour-blind-safe-ish palette, one entry per class.
 CLASS_COLORS = [
-    "#1b7837",  # Forest      — dark green
-    "#a6dba0",  # Shrubland   — light green
-    "#d9f0a3",  # Grassland   — yellow-green
-    "#80cdc1",  # Wetland     — teal
-    "#f6e8c3",  # Cropland    — wheat
-    "#d73027",  # Urban       — red
-    "#8c510a",  # Barren      — brown
-    "#4575b4",  # Water       — blue
+    "#1b7837",  # Forest         — dark green
+    "#a6dba0",  # Shrubland      — light green
+    "#c2a5cf",  # Savanna        — mauve
+    "#d9f0a3",  # Grassland      — yellow-green
+    "#80cdc1",  # Wetlands       — teal
+    "#f6e8c3",  # Croplands      — wheat
+    "#d73027",  # Urban/Built-up — red
+    "#f7f7f7",  # Snow/Ice       — near-white
+    "#8c510a",  # Barren         — brown
+    "#4575b4",  # Water          — blue
 ]
 
 # S2 band order in the stacked image: B1,B2,B3,B4,B5,B6,B7,B8,B8A,B9,B10,B11,B12.

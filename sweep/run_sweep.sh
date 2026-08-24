@@ -22,6 +22,10 @@ source sh/env.sh
 export TQDM_DISABLE=1
 export WANDB_DIR="$HOME/wandb"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# DFC2020 has two incompatible splits. The cobench teachers have 8-class heads;
+# the default 'roi' loader is 10-class, so an unset value silently mismatches
+# the head and the label mapping. Harmless for other datasets.
+export DFC2020_SPLIT="${DFC2020_SPLIT:-cobench}"
 mkdir -p "$WANDB_DIR"
 
 echo "Starting sweep agent: $SWEEP_ID"

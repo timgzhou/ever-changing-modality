@@ -21,7 +21,18 @@ MODALITY_CONFIGS['eurosat']='vre+nir'
 #   MODALITY_CONFIGS['benv2']='s2_norgb s2 s2_rgb+s1 s2_rgb+s2_norgb'
 #   MODALITY_CONFIGS['dfc2020']='s2_norgb s2_rgb+s1 s2_rgb+s2_norgb'
 MODALITY_CONFIGS['benv2']='s2_rgb s2_rgb+s1'
-MODALITY_CONFIGS['dfc2020']='s2_rgb s2_rgb+s1'
+# DFC2020 single-modality stage-0 teachers + their pairwise addition upper bounds.
+# Rationale: DeluluNet is supposed to add a *useful* modality. With only the
+# s2_rgb teacher, the one addition available (+s1) is nearly worthless on this
+# dataset (modality main effect was +0.6 mIoU across the 32-run sweep), so a
+# null result would say nothing about the method. Training s1 and s2_norgb
+# teachers as well gives additions that span a range of usefulness -- notably
+# s1 -> +s2_rgb, where the added modality carries most of the signal.
+#   singles:  s2_rgb (DONE, 16 runs) s2_norgb s1
+#   pairs:    the joint-SFT oracle each corresponding delulu run must beat
+# The CSV dedup + in-flight guard below skip the s2_rgb/s2_rgb+s1 combos that
+# already have both dino variants, so re-running this launcher is safe.
+MODALITY_CONFIGS['dfc2020']='s2_rgb s2_norgb s1 s2_rgb+s1 s2_norgb+s1 s2_rgb+s2_norgb'
 # BioMassters (temporal S1/S2 AGB regression). Stage-0 oracles: single modality.
 # Combined (s2+s1 / s1+s2) is the addition upper bound. Temporal steps via --num_time_steps.
 MODALITY_CONFIGS['biomassters']='s2 s1 s2+s1'
@@ -71,8 +82,18 @@ for DATASET in "${DATASETS[@]}"; do
                 for LR in "${LRS[@]}"; do
                     for WD in "${WDS[@]}"; do
                       for TRAIN_SPLIT in "${TRAIN_SPLITS[@]}"; do
-                        MODALITY_KEY="${MODALITY_ENTRY}"
-                        RESULTS_CSV="res/train_sft/${DATASET}.csv"
+                        # '+' is a regex metacharacter, so a combined entry like
+                        # 's2_rgb+s1' would compile to 's2_rg' + one-or-more 'b' and
+                        # never match its own CSV rows -- silently resubmitting every
+                        # finished combined-modality run. Escape it for the grep below.
+                        MODALITY_KEY="${MODALITY_ENTRY//+/\\+}"
+                        # Mirror train_sft_job.sh: dfc2020's two split
+                        # definitions keep separate results files.
+                        CSV_SUFFIX=""
+                        if [ "${DATASET}" = "dfc2020" ] && [ -n "${DFC2020_SPLIT}" ] && [ "${DFC2020_SPLIT}" != "roi" ]; then
+                            CSV_SUFFIX="_${DFC2020_SPLIT}"
+                        fi
+                        RESULTS_CSV="res/train_sft/${DATASET}${CSV_SUFFIX}.csv"
                         # dino_init is followed by num_time_steps,decoder,train_aug,train_split.
                         # Anchor on train_aug AND train_split so the augmented/unaugmented
                         # and split1/full arms are tracked separately. train_split is the

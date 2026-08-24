@@ -1,6 +1,7 @@
 """Training utilities for EVAN."""
 
 import copy
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -38,6 +39,26 @@ def make_weak_augmentation():
         K.RandomVerticalFlip(p=0.5),
         data_keys=["input"],
     )
+
+
+def _photometric_only(x):
+    """Strong-style augmentation with NO spatial component.
+
+    Used for dense tasks (segmentation / per-pixel regression) where the strong
+    view must stay pixel-aligned with the weak view that produced the
+    pseudo-label. Spatial ops (flips, rotation, crops) would break that
+    correspondence; these only change intensities, so the label map still
+    applies. Erasing is kept: it occludes rather than moves pixels.
+    """
+    import kornia.augmentation as K
+    aug = K.AugmentationSequential(
+        K.RandomGaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0), p=0.5),
+        K.RandomBrightness(brightness=(0.8, 1.2), p=0.5),
+        K.RandomContrast(contrast=(0.8, 1.2), p=0.5),
+        K.RandomErasing(scale=(0.02, 0.15), ratio=(0.3, 3.3), p=0.3),
+        data_keys=["input"],
+    )
+    return aug(x)
 
 
 def make_strong_augmentation(no_strong: bool = False):
@@ -754,6 +775,9 @@ class Trainer:
         tc = self.task_config
         label_key = tc.label_key
         segmentation = (tc.task_type == 'segmentation')
+        # Dense (per-pixel) tasks need pixel-aligned weak/strong views; see the
+        # augmentation block in the unlabeled step below.
+        regression = (tc.task_type == 'regression')
         multilabel = tc.multilabel
         num_classes = tc.num_classes
         ignore_index = getattr(tc, 'ignore_index', -100)
@@ -827,9 +851,23 @@ class Trainer:
                 )
                 x_u_tensor = x_u[modality].to(self.device)
 
-                # Apply augmentations (kornia, on GPU)
+                # Apply augmentations (kornia, on GPU).
+                #
+                # Dense tasks: the pseudo-label produced from the weak view is a
+                # spatial map, so the weak and strong views must be in the SAME
+                # spatial frame or every pixel target is misaligned. weak_aug and
+                # strong_aug both draw their own random flips/rotations, so two
+                # independent calls disagree even when both are flip-only. For
+                # segmentation/regression we therefore build the strong view from
+                # the SAME weakly-augmented tensor and restrict the extra strong
+                # ops to photometric ones (blur/brightness/contrast/erasing),
+                # which do not move pixels. Classification is unaffected: its
+                # label is global, so independent spatial views are the point.
                 x_weak = weak_aug(x_u_tensor)
-                x_strong = strong_aug(x_u_tensor)
+                if segmentation or regression:
+                    x_strong = _photometric_only(x_weak) if strong_aug is not None else x_weak
+                else:
+                    x_strong = strong_aug(x_u_tensor)
 
                 # Weak forward → pseudo-labels (no grad)
                 with torch.no_grad():
@@ -1161,17 +1199,39 @@ class Trainer:
                     y_l = F.one_hot(labels.long(), num_classes).float()  # [B_l, C]
 
                 if segmentation:
-                    # --- Segmentation: MixUp labeled only; unlabeled uses hard CE ---
-                    # MixUp labeled with a random shuffle of itself.
-                    lam_vals_l = np.random.beta(alpha, alpha, size=B_l)
-                    lam_vals_l = np.maximum(lam_vals_l, 1 - lam_vals_l)
-                    mean_lam = float(lam_vals_l.mean())
-                    lam_l = torch.tensor(lam_vals_l, dtype=torch.float32, device=self.device)
-                    perm_l = torch.randperm(B_l, device=self.device)
-                    lam_img = lam_l.view(-1, 1, 1, 1)
-                    lam_y   = lam_l.view(-1, 1, 1)
-                    mixed_x_l = lam_img * x_l_aug + (1 - lam_img) * x_l_aug[perm_l]
-                    mixed_y_l = lam_y   * y_l     + (1 - lam_y)   * y_l[perm_l]
+                    # --- Segmentation: NO input MixUp; unlabeled uses hard CE ---
+                    #
+                    # MixUp blends two images pixel-wise and blends their targets
+                    # by the same lambda. That is coherent for a whole-image label
+                    # but not for dense prediction: the blended image superimposes
+                    # two unrelated scenes, so pixel (i,j) has no single correct
+                    # class, and its target lam*A + (1-lam)*B describes a scene
+                    # that does not exist. With alpha=0.75 (and lam clamped to
+                    # >=0.5) ~72% of steps had lam<0.9, i.e. most supervised
+                    # gradient came from superimposed scenes -- which is why the
+                    # segmentation arm scored near the majority-class floor
+                    # (12-22 mIoU vs 56-67 for every other method).
+                    #
+                    # Fixed 2026-08-21: train the labeled branch on the plain
+                    # (weakly-augmented, already flip-aligned with its label map)
+                    # images. The MixMatch mechanism that actually matters here --
+                    # K-view averaged, sharpened pseudo-labels on unlabeled data --
+                    # is untouched. Set MIXMATCH_SEG_MIXUP=1 to restore the old
+                    # behaviour for comparison.
+                    if os.environ.get('MIXMATCH_SEG_MIXUP') == '1':
+                        lam_vals_l = np.random.beta(alpha, alpha, size=B_l)
+                        lam_vals_l = np.maximum(lam_vals_l, 1 - lam_vals_l)
+                        mean_lam = float(lam_vals_l.mean())
+                        lam_l = torch.tensor(lam_vals_l, dtype=torch.float32, device=self.device)
+                        perm_l = torch.randperm(B_l, device=self.device)
+                        lam_img = lam_l.view(-1, 1, 1, 1)
+                        lam_y   = lam_l.view(-1, 1, 1)
+                        mixed_x_l = lam_img * x_l_aug + (1 - lam_img) * x_l_aug[perm_l]
+                        mixed_y_l = lam_y   * y_l     + (1 - lam_y)   * y_l[perm_l]
+                    else:
+                        mean_lam = 1.0
+                        mixed_x_l = x_l_aug
+                        mixed_y_l = y_l
 
                     # --- Step 5: Forward ---
                     logits_lab = self.model({modality: mixed_x_l})  # [B_l, C, H, W]
@@ -1626,9 +1686,21 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
                                    val_per_epoch=1, warmup_epochs=1,
                                    task_config=None, train_aug=None):
     """
-    Supervised training loop for single-modality EVAN training (Stage 0).
+    Supervised training loop for EVAN Stage 0 on one OR MORE modalities.
 
     Backward-compatible wrapper around Trainer.train_supervised.
+
+    `modality` accepts either a single name ('s2_rgb') or a sequence
+    (('s2_rgb', 's1')). Every element is fed to the model each step; the EVAN
+    backbone averages patch tokens across modalities under
+    decoder_strategy='mean'.
+
+    NOTE (fixed 2026-08-20): this wrapper previously hardcoded
+    `modalities=(modality,)`, so a combined run like --modalities s2_rgb s1
+    built both modalities' components but only ever fed the FIRST one. Those
+    runs were single-modality models with extra untrained parameters, which is
+    why combined entries never beat their best single modality. Any result
+    produced before this date with two --modalities is affected.
 
     Args:
         task_config: Pass the caller's real TaskConfig to preserve fields the
@@ -1640,12 +1712,16 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         (train_metric, test_metric, best_val_metric, best_val_test_metric)
     """
     from data_utils import TaskConfig
+    # Normalized here too: the fallback TaskConfig below needs scalar names.
+    _mods = (modality,) if isinstance(modality, str) else tuple(modality)
+    if not _mods:
+        raise ValueError("modality must name at least one modality")
     if task_config is None:
         task_config = TaskConfig(
             dataset_name='',
             task_type='segmentation' if segmentation else ('multilabel' if multilabel else 'classification'),
-            modality_a=modality,
-            modality_b='',
+            modality_a=_mods[0],
+            modality_b=_mods[1] if len(_mods) > 1 else '',
             modality_a_channels=0,
             modality_b_channels=0,
             num_classes=num_classes or 0,
@@ -1665,7 +1741,7 @@ def single_modality_training_loop(model, train_loader, test_loader, device,
         val_loader=val_loader,
         test_loader=test_loader,
         num_epochs=num_epochs,
-        modalities=(modality,),
+        modalities=_mods,
         criterion=criterion,
         best_checkpoint_path=best_checkpoint_path,
         val_per_epoch=val_per_epoch,

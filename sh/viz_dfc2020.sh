@@ -16,14 +16,14 @@ source sh/env.sh
 export TQDM_DISABLE=1
 mkdir -p logs/viz_dfc2020 figs
 
-# DFC2020 lives in a 10GB zip at the repo root and is not extracted anywhere yet.
-# get_dfc2020_loaders defaults to this path; extract once into $SLURM_TMPDIR-backed
-# local storage would be lost between jobs, so extract into datasets/ instead.
-DATA_DIR="datasets/GFM-Bench/DFC2020"
-if [ ! -f "${DATA_DIR}/DFC2020/metadata.csv" ]; then
-    echo "=== Extracting DFC2020.zip -> ${DATA_DIR} (one-time, ~10GB) ==="
-    mkdir -p "${DATA_DIR}"
-    unzip -q -n DFC2020.zip -d "${DATA_DIR}"
+# Data comes from the official IEEE DataPort release via get_loaders(); the
+# split is selected by DFC2020_SPLIT (roi | cobench). The old GFM-Bench
+# extraction was removed on 2026-08-20 -- that packaging shipped MODIS `lc`
+# rasters instead of the contest ground truth.
+export DFC2020_SPLIT="${DFC2020_SPLIT:-cobench}"
+if [ ! -d "datasets/DFC2020_official/DFC_Public_Dataset" ]; then
+    echo "[error] official DFC2020 not found at datasets/DFC2020_official/DFC_Public_Dataset"
+    exit 1
 fi
 
 # NOTE: res/delulu/hptuned_apr21.csv is unreliable for identifying modality

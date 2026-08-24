@@ -29,7 +29,7 @@ VALID_MODALITIES = {
     'eurosat': ['rgb', 'vre', 'nir', 'swir'],
     'benv2':   ['s1', 's2', 's2_rgb'],
     'pastis':  ['s1', 's2', 'rgb'],
-    'dfc2020': ['s1', 's2', 's2_rgb'],
+    'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
 }
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
@@ -113,6 +113,15 @@ def main():
                         help='Max unsupervised loss weight; ramped from 0 over warmup_epochs (default: 75.0)')
     parser.add_argument('--mixmatch_warmup_epochs', type=int, default=4,
                         help='Epochs over which lambda_u is linearly ramped per-step to its max value (default: 4)')
+    # Dense decoder head. For teacher-based baselines this MUST match the
+    # teacher checkpoint: an upernet teacher with a linear student is not a
+    # like-for-like comparison (~10 mIoU apart on dfc2020). Ignored for
+    # classification/multilabel tasks, which use EVANClassifier.
+    parser.add_argument('--decoder_type', type=str, default='linear',
+                        choices=['linear', 'upernet'],
+                        help='Dense head: linear (1x1 conv + upsample) or upernet (multi-scale).')
+    parser.add_argument('--decoder_channels', type=int, default=512,
+                        help='Width of the upernet decoder (ignored for linear).')
     args = parser.parse_args()
 
     # Validate modality
@@ -178,6 +187,8 @@ def main():
         model = EvanSegmenter(
             evan, num_classes=task_config.num_classes,
             decoder_strategy="mean", device=device,
+            decoder_type=args.decoder_type,
+            decoder_channels=args.decoder_channels,
         )
     else:
         model = EVANClassifier(

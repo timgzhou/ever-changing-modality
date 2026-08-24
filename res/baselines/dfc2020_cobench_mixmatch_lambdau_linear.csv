@@ -1,0 +1,16 @@
+model_type,modality,train_mode,learning_rate,weight_decay,trainable_params,epochs,K,temperature,alpha,lambda_u,mixmatch_warmup_epochs,metric_name,test_metric,best_val_metric,best_val_test_metric,saved_checkpoint,global_rep,use_dino_weights
+evan_base,s1,fft,0.0001,0.0001,85479176,64,2,0.5,0.75,75.0,4,mIoU,12.85,14.76,14.70,checkpoints/evan_mixmatch_dfc2020_s1_20260824_164627.pt,clstoken,True
+evan_base,s1,fft,0.0001,0.0001,85479176,64,2,0.5,0.75,5.0,4,mIoU,13.47,22.24,21.87,checkpoints/evan_mixmatch_dfc2020_s1_20260824_164620.pt,clstoken,True
+evan_base,s1,fft,0.0001,0.0001,85479176,64,2,0.5,0.75,1.0,4,mIoU,43.61,45.30,45.73,checkpoints/evan_mixmatch_dfc2020_s1_20260824_164607.pt,clstoken,True
+evan_base,s2_rgb,fft,0.0001,0.0001,85675784,64,2,0.5,0.75,25.0,4,mIoU,20.42,29.65,29.51,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260824_164658.pt,clstoken,True
+evan_base,s1,fft,0.0001,0.0001,85479176,64,2,0.5,0.75,25.0,4,mIoU,14.64,20.30,19.57,checkpoints/evan_mixmatch_dfc2020_s1_20260824_164627.pt,clstoken,True
+evan_base,s1,fft,0.0001,0.0001,85479176,64,2,0.5,0.75,0.5,4,mIoU,43.37,46.76,46.75,checkpoints/evan_mixmatch_dfc2020_s1_20260824_164609.pt,clstoken,True
+evan_base,s2_rgb,fft,0.0001,0.0001,85675784,64,2,0.5,0.75,75.0,4,mIoU,1.23,25.90,25.68,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260824_164709.pt,clstoken,True
+evan_base,s2_norgb,fft,0.0001,0.0001,87052040,64,2,0.5,0.75,75.0,4,mIoU,1.37,13.29,13.42,checkpoints/evan_mixmatch_dfc2020_s2_norgb_20260824_164738.pt,clstoken,True
+evan_base,s2_rgb,fft,0.0001,0.0001,85675784,64,2,0.5,0.75,1.0,4,mIoU,51.85,54.77,54.59,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260824_164649.pt,clstoken,True
+evan_base,s2_norgb,fft,0.0001,0.0001,87052040,64,2,0.5,0.75,1.0,4,mIoU,54.14,55.65,55.68,checkpoints/evan_mixmatch_dfc2020_s2_norgb_20260824_164711.pt,clstoken,True
+evan_base,s2_norgb,fft,0.0001,0.0001,87052040,64,2,0.5,0.75,25.0,4,mIoU,13.24,17.76,17.88,checkpoints/evan_mixmatch_dfc2020_s2_norgb_20260824_164722.pt,clstoken,True
+evan_base,s2_rgb,fft,0.0001,0.0001,85675784,64,2,0.5,0.75,5.0,4,mIoU,21.58,35.76,34.31,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260824_164656.pt,clstoken,True
+evan_base,s2_norgb,fft,0.0001,0.0001,87052040,64,2,0.5,0.75,5.0,4,mIoU,13.11,25.63,26.81,checkpoints/evan_mixmatch_dfc2020_s2_norgb_20260824_164717.pt,clstoken,True
+evan_base,s2_norgb,fft,0.0001,0.0001,87052040,64,2,0.5,0.75,0.5,4,mIoU,54.56,57.28,56.77,checkpoints/evan_mixmatch_dfc2020_s2_norgb_20260824_164708.pt,clstoken,True
+evan_base,s2_rgb,fft,0.0001,0.0001,85675784,64,2,0.5,0.75,0.5,4,mIoU,46.73,56.39,55.81,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260824_164630.pt,clstoken,True

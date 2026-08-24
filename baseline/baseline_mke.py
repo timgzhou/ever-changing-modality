@@ -172,6 +172,15 @@ def main():
                         help='Run validation every N epochs (default: 1)')
     parser.add_argument('--warmup_epochs', type=int, default=3)
     parser.add_argument('--results_csv', type=str, default=None)
+    # Dense decoder head. For teacher-based baselines this MUST match the
+    # teacher checkpoint: an upernet teacher with a linear student is not a
+    # like-for-like comparison (~10 mIoU apart on dfc2020). Ignored for
+    # classification/multilabel tasks, which use EVANClassifier.
+    parser.add_argument('--decoder_type', type=str, default='linear',
+                        choices=['linear', 'upernet'],
+                        help='Dense head: linear (1x1 conv + upsample) or upernet (multi-scale).')
+    parser.add_argument('--decoder_channels', type=int, default=512,
+                        help='Width of the upernet decoder (ignored for linear).')
     args = parser.parse_args()
 
     if args.results_csv is None:
@@ -313,6 +322,8 @@ def main():
         student_model = EvanSegmenter(
             evan_model, num_classes=num_classes,
             decoder_strategy="mean", device=device,
+            decoder_type=args.decoder_type,
+            decoder_channels=args.decoder_channels,
         )
     else:
         student_model = EVANClassifier(

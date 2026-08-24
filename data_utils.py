@@ -173,7 +173,35 @@ def get_loaders(
     elif dataset == 'pastis':
         raise NotImplementedError("No support for PASTIS yet")
     elif dataset == 'dfc2020':
-        from dfc2020_data_utils import get_dfc2020_loaders
+        # Official IEEE DataPort DFC2020 (10 m human-annotated `dfc_` labels,
+        # 10 classes, ROI-disjoint splits). NOT dfc2020_data_utils, which reads
+        # the HuggingFace GFM-Bench packaging -- that ships the SEN12MS MODIS
+        # `lc` product instead of the contest ground truth (blocky ~16-region
+        # tiles vs ~1200 for the real labels; a majority-class predictor scores
+        # 56.8% pixel acc there). Any number from the old loader measures MODIS
+        # prediction, not the DFC2020 benchmark. The old module is kept for
+        # reproducing pre-2026-08-19 results only.
+        # Which split: DFC2020_SPLIT=roi (default) or cobench.
+        #   roi     -> dfc2020_official_data_utils, ROI-disjoint, 10 classes.
+        #              Honest generalization; val is one ROI (Chabarovsk) whose
+        #              class mix is unrepresentative, so val is weak for model
+        #              selection (test-vs-val Spearman rho was 0.53).
+        #   cobench -> dfc2020_cobench_data_utils, the Copernicus-Bench official
+        #              3156/986/986 random split over the same imagery, 8 classes
+        #              (Savanna/Snow-Ice/Background ignored, per their
+        #              cls_mapping). Comparable to published baselines
+        #              (DFC2020-S2 mIoU: supervised ViT-B/16 66.2, random 62.3).
+        # The two are NOT comparable to each other and their checkpoints have
+        # different head sizes (10 vs 8), so they cannot be interchanged.
+        import os
+        _split = os.environ.get('DFC2020_SPLIT', 'roi').lower()
+        if _split == 'cobench':
+            from dfc2020_cobench_data_utils import get_dfc2020_loaders
+        elif _split == 'roi':
+            from dfc2020_official_data_utils import get_dfc2020_loaders
+        else:
+            raise ValueError(
+                f"DFC2020_SPLIT must be 'roi' or 'cobench', got {_split!r}")
         kwargs = dict(batch_size=batch_size, num_workers=num_workers,
                       starting_modality=starting_modality, new_modality=new_modality)
         if data_normalizer is False:

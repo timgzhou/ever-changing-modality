@@ -69,3 +69,15 @@ delulu-biomassters-delulu-s2s1 tgz/delulu-biomassters-delulu-s2s1/4nvicjkj check
 delulu-biomassters-delulu-s1s2 tgz/delulu-biomassters-delulu-s1s2/errk482l checkpoints/sft_evan_base_biomassters_s1_fft_lr0.0005_20260725_075947.pt s2
 delulu-biomassters-delulu-s2s1 tgz/delulu-biomassters-delulu-s2s1/bcghnc0e checkpoints/sft_evan_base_biomassters_s2_fft_lr0.0005_20260725_075836.pt s1
 delulu-biomassters-delulu-s1s2 tgz/delulu-biomassters-delulu-s1s2/fay6f1gi checkpoints/sft_evan_base_biomassters_s1_fft_lr0.0005_20260725_075947.pt s2
+delulu-dfc2020-cobench-s1_to_s2norgb tgz/delulu-dfc2020-cobench-s1_to_s2norgb/pu7iq8lu checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260820_180911.pt s2_norgb
+delulu-dfc2020-cobench-s2rgb_to_s2norgb tgz/delulu-dfc2020-cobench-s2rgb_to_s2norgb/bqx85i90 checkpoints/sft_evan_base_dfc2020_s2_rgb_fft_lr0.0005_20260820_174307.pt s2_norgb
+delulu-dfc2020-cobench-s2norgb_to_s2rgb tgz/delulu-dfc2020-cobench-s2norgb_to_s2rgb/53dq75nv checkpoints/sft_evan_base_dfc2020_s2_norgb_fft_lr0.0005_20260820_180815.pt s2_rgb
+delulu-dfc2020-cobench-s1_to_s2norgb-split1 tgz/delulu-dfc2020-cobench-s1_to_s2norgb-split1/6ia8kt1q checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260821_194707.pt s2_norgb
+delulu-dfc2020-cobench-s2rgb_to_s2norgb-split1 tgz/delulu-dfc2020-cobench-s2rgb_to_s2norgb-split1/3avr9vsv checkpoints/sft_evan_base_dfc2020_s2_rgb_fft_lr0.0005_20260821_192848.pt s2_norgb
+delulu-dfc2020-cobench-s2norgb_to_s2rgb-split1 tgz/delulu-dfc2020-cobench-s2norgb_to_s2rgb-split1/4rss8cio checkpoints/sft_evan_base_dfc2020_s2_norgb_fft_lr0.0005_20260821_194419.pt s2_rgb
+delulu-dfc2020-cobench-s1_to_s2norgb-uncertainty tgz/delulu-dfc2020-cobench-s1_to_s2norgb-uncertainty/ah0fkjvg checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260821_194707.pt s2_norgb
+delulu-dfc2020-cobench-s2rgb_to_s2norgb-uncertainty tgz/delulu-dfc2020-cobench-s2rgb_to_s2norgb-uncertainty/lpnjd1if checkpoints/sft_evan_base_dfc2020_s2_rgb_fft_lr0.0005_20260821_192848.pt s2_norgb
+delulu-dfc2020-cobench-s2norgb_to_s2rgb-uncertainty tgz/delulu-dfc2020-cobench-s2norgb_to_s2rgb-uncertainty/kf46tviv checkpoints/sft_evan_base_dfc2020_s2_norgb_fft_lr0.0005_20260821_194419.pt s2_rgb
+delulu-dfc2020-cobench-s1_to_s2norgb-uncbal2 tgz/delulu-dfc2020-cobench-s1_to_s2norgb-uncbal2/o27eqvd5 checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260821_194707.pt s2_norgb
+delulu-dfc2020-cobench-s2rgb_to_s2norgb-uncbal2 tgz/delulu-dfc2020-cobench-s2rgb_to_s2norgb-uncbal2/84u0cmvc checkpoints/sft_evan_base_dfc2020_s2_rgb_fft_lr0.0005_20260821_192848.pt s2_norgb
+delulu-dfc2020-cobench-s2norgb_to_s2rgb-uncbal2 tgz/delulu-dfc2020-cobench-s2norgb_to_s2rgb-uncbal2/ctx9zfje checkpoints/sft_evan_base_dfc2020_s2_norgb_fft_lr0.0005_20260821_194419.pt s2_rgb

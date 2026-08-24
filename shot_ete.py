@@ -105,6 +105,14 @@ def _parse_args():
     parser.add_argument('--seed', type=int, default=0,
                         help='Random seed for torch/numpy/random; recorded in the results CSV '
                              'so repeated runs of the same config are distinguishable.')
+    parser.add_argument('--loss_balance', type=str, default='none',
+                        choices=['none', 'running_mean', 'uncertainty'],
+                        help="Automatic balancing of the four loss terms. "
+                             "'none' uses the fixed --lambda_* values. "
+                             "'running_mean' divides each term by an EMA of its "
+                             "own magnitude. 'uncertainty' learns a log-variance "
+                             "per term (Kendall et al. 2018) and REPLACES the "
+                             "lambda_latent/prefusion/distill search dimensions.")
     parser.add_argument('--config_label', type=str, default=None,
                         help='Free-form tag recorded in the results CSV to identify which '
                              'config a row came from (e.g. "peeking_rank1").')

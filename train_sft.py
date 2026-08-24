@@ -353,7 +353,11 @@ def main():
     train_metric, test_metric, best_val_metric, best_val_test_metric = single_modality_training_loop(
         model, train1_loader, test_loader, device,
         modality_bands_dict, criterion, optimizer, args.epochs,
-        modality=primary_modality,
+        # ALL requested modalities, not just the primary. Passing
+        # primary_modality here meant a `--modalities s2_rgb s1` run built both
+        # modalities' components but fed only s2_rgb, silently producing a
+        # single-modality model (fixed 2026-08-20).
+        modality=tuple(args.modalities),
         phase_name="Stage 0",
         use_wandb=bool(args.wandb_project),
         wandb_prefix='stage0',
@@ -382,8 +386,15 @@ def main():
     if best_val_metric is not None:
         print(f"  Best val {metric_name}: {best_val_metric:.2f}% — checkpoint: {checkpoint_path}")
 
-    # CSV logging
-    filename = f"res/train_sft/{args.dataset}.csv"
+    # CSV logging. DFC2020 has two incompatible split definitions (ROI-disjoint
+    # 10-class vs Copernicus-Bench 8-class); their rows must never share a file,
+    # since the launcher's dedup would treat one as satisfying the other.
+    _suffix = ""
+    if args.dataset == "dfc2020":
+        _sp = os.environ.get("DFC2020_SPLIT", "roi").lower()
+        if _sp != "roi":
+            _suffix = f"_{_sp}"
+    filename = f"res/train_sft/{args.dataset}{_suffix}.csv"
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
     fieldnames = [
