@@ -60,14 +60,61 @@ def load_baseline(name, decoder=DEC):
     return {k: max(v) for k, v in out.items()}
 
 
-def load_semisl(name, decoder=DEC):
-    """{modality: best val-selected test mIoU} — no teacher, single modality."""
-    f = f'res/baselines/dfc2020_cobench_{name}_{decoder}.csv'
+def load_distill_transfer_sweep(decoder=DEC, init=None, kl=None):
+    """{(teacher, new_mod): best test mIoU} from the 16-trial transfer HP sweep.
+
+    `init` filters on init_from_teacher: 'False' = RANDOM init (baseline_distillation.py builds the student with
+    load_weights=False, so there is no DINO prior),
+    'True' = student starts from the teacher's weights. Reported separately
+    because they differ systematically -- teacher-init is 2.5-5.9 mIoU WORSE in every
+    direction than starting from scratch -- a transfer student appears to have to
+    unlearn the teacher's modality-specific features before it can learn the new
+    modality.
+    """
+    f = f'res/baselines/dfc2020_cobench_distill_transfer_sweep_{decoder}.csv'
     out = defaultdict(list)
     if not os.path.exists(f):
         return {}
     for r in csv.DictReader(open(f)):
-        out[r['modality']].append(float(r['best_val_test_metric']))
+        if init is not None and r.get('init_from_teacher') != init:
+            continue
+        if kl is not None and r.get('kl_type') != kl:
+            continue
+        out[(r['teacher_modality'], r['student_modality'])].append(float(r['test_metric']))
+    return {k: max(v) for k, v in out.items()}
+
+
+def load_distill_transfer(decoder=DEC, kl=None):
+    """{(teacher, new_mod): best test mIoU} for the TRANSFER distillation runs.
+
+    These use a UNIMODAL student on the new modality (--modalities <new>), which
+    is the correct analogue of delulu's `transfer`. The other distillation file
+    holds bimodal students and belongs under Addition.
+    """
+    f = f'res/baselines/dfc2020_cobench_distill_transfer_{decoder}.csv'
+    out = defaultdict(list)
+    if not os.path.exists(f):
+        return {}
+    for r in csv.DictReader(open(f)):
+        if kl is not None and r.get('kl_type') != kl:
+            continue
+        out[(r['teacher_modality'], r['student_modality'])].append(float(r['test_metric']))
+    return {k: max(v) for k, v in out.items()}
+
+
+def load_semisl(name, decoder=DEC):
+    """{modality: best val-selected test mIoU} — no teacher, single modality."""
+    # MixMatch's default lambda_u=75 is mis-scaled for the dense CE objective
+    # (see sh/mixmatch_lambdau_dfc2020.sh); prefer the lambda_u sweep when it
+    # exists so the baseline is represented at its tuned setting.
+    cands = [f'res/baselines/dfc2020_cobench_{name}_lambdau_{decoder}.csv',
+             f'res/baselines/dfc2020_cobench_{name}_{decoder}.csv']
+    out = defaultdict(list)
+    for f in cands:
+        if not os.path.exists(f):
+            continue
+        for r in csv.DictReader(open(f)):
+            out[r['modality']].append(float(r['best_val_test_metric']))
     return {k: max(v) for k, v in out.items()}
 
 
@@ -128,15 +175,23 @@ def main():
     # student (student_modality is always 'teacher+new'), so they are evaluated
     # on both modalities and have no new-modality-only arm. Putting them in this
     # panel compares different test-time inputs.
+    ddino = load_distill_transfer_sweep(init='False')
+    dt_kd = load_distill_transfer_sweep(init='True', kl='kd')
+    dt_ttm = load_distill_transfer_sweep(init='True', kl='ttm')
     print('\n[1] TRANSFER  (test-time input = NEW modality only)')
-    print('     no comparable baseline: distillation/MKE students are bimodal')
-    print(f"{'direction':24s} {'init SFT(new)':>14s} "
-          f"{'delulu':>9s} {'oracle SFT(new,full)':>21s}")
+    print('     distillation = UNIMODAL-student variant, best of the 16-trial HP sweep')
+    print('     KD and TTM are the two KD variants (kl_type), reported separately')
+    print(f"{'direction':24s} {'SFT teacher':>12s} {'KD':>8s} {'TTM':>8s} "
+          f"{'delulu':>8s} {'SFT oracle(new,full)':>21s}   [rand-init]")
     for s, n in dirs:
-        init = sft_best(n, 'split1')
-        orc = sft_best(n, 'full')
+        tch = sft_best(s, 'split1')          # the teacher the method starts from
+        orc = sft_best(n, 'full')            # oracle on the STUDENT modality
         d = delulu[(s, n)]['transfer']
-        print(f'{s+" -> +"+n:24s} {init:14.2f} {d:9.2f} {orc:21.2f}')
+        a, b = dt_kd.get((s, n)), dt_ttm.get((s, n))
+        rnd = ddino.get((s, n))
+        print(f'{s+" -> +"+n:24s} {tch:12.2f} '
+              f'{(f"{a:.2f}" if a else "--"):>8s} {(f"{b:.2f}" if b else "--"):>8s} '
+              f'{d:8.2f} {orc:21.2f}   {(f"{rnd:.2f}" if rnd else "--"):>9s}')
 
     # ---- 2. PEEKING: test on START modality -> vs semi-supervised ----------
     print('\n[2] PEEKING  (test-time input = START modality; new modality seen '

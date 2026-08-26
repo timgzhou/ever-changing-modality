@@ -40,8 +40,37 @@ LAMBDA_DISTILL="0.15374988356364516"
 TOKEN_MASK_RATIO="0.40414477259411485"
 PROTECT_LRM="0.0"
 SEED="${SEED:-0}"
+# teacher (default) | random. NOTE: the distillation baseline's apparent
+# 2.5-5.9 mIoU advantage for random init was a CONFOUND -- init_student_from_teacher
+# did not forward --decoder_type, so its teacher-init arm silently ran a linear
+# head while the random arm ran upernet (a 39,335,680-param difference). Delulu
+# was never affected: EvanSegmenter.from_checkpoint restores decoder_type, and
+# both arms share one model object. Measured delulu effect is ~null
+# (transfer -0.03 mIoU, n=6).
+STUDENT_INIT="${STUDENT_INIT:-teacher}"
 
-RUN_TAG="${START}_to_${NEW}_${DECODER}_ll${LAMBDA_LATENT}_seed${SEED}"
+# --- Ablation: distillation-only ------------------------------------------
+# ACTIVE_LOSSES=distill isolates the distill term.
+#
+# IMPORTANT: do NOT also zero modality_dropout/token_mask_ratio. Masking is not
+# a loss term, it is what routes the intermediate projectors into the forward
+# pass: mask_input() builds masked_mod_features via
+#     torch.where(full_mask_expanded, projected_seq, features)
+# so with an all-False mask the projector output is computed but discarded and
+# receives ZERO gradient. Training then never exercises the hallucination path,
+# while `transfer` at eval time depends on it entirely -- transfer collapses to
+# 7-31 mIoU while addition stays ~57-63. That is an artifact of the ablation,
+# not a property of the distill loss.
+ACTIVE_LOSSES="${ACTIVE_LOSSES:-latent prefusion distill ce}"
+if [ "${DISTILL_ONLY:-0}" = "1" ]; then
+    ACTIVE_LOSSES="distill"
+    LABELED_FREQUENCY="0"        # no labeled batch mixing -> no CE path at all
+    LAMBDA_DISTILL="1.0"
+    # modality_dropout / token_mask_ratio intentionally left at their defaults
+fi
+
+RUN_TAG="${START}_to_${NEW}_${DECODER}_ll${LAMBDA_LATENT}_init${STUDENT_INIT}_seed${SEED}"
+[ "${DISTILL_ONLY:-0}" = "1" ] && RUN_TAG="${START}_to_${NEW}_${DECODER}_distillonly_init${STUDENT_INIT}_seed${SEED}"
 
 echo "=== shot_ete | dfc2020 (cobench) ${START} -> +${NEW} | decoder=${DECODER} ==="
 echo "    teacher: ${TEACHER}"
@@ -51,7 +80,7 @@ python -u shot_ete.py \
     --dataset dfc2020 \
     --new_mod_group "${NEW}" \
     --stage0_checkpoint "${TEACHER}" \
-    --active_losses latent prefusion distill ce \
+    --active_losses ${ACTIVE_LOSSES} \
     --lr "${LR}" \
     --weight_decay "${WEIGHT_DECAY}" \
     --modality_dropout "${MODALITY_DROPOUT}" \
@@ -70,6 +99,7 @@ python -u shot_ete.py \
     --batch_size "${BATCH_SIZE}" \
     --num_workers 4 \
     --seed "${SEED}" \
+    --student_init "${STUDENT_INIT}" \
     --save_checkpoint \
     --checkpoint_dir checkpoints \
     --checkpoint_name "delulunet_dfc2020_${RUN_TAG}" \

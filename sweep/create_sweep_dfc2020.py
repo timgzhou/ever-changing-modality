@@ -85,7 +85,11 @@ def _teacher_for(modality: str) -> str:
 def _load_merged_config() -> dict:
     with open(os.path.join(_YAML_DIR, 'base.yaml')) as f:
         base = yaml.safe_load(f)
-    with open(os.path.join(_YAML_DIR, 'sweep_dfc2020_cobench.yaml')) as f:
+    # control arm (--loss_balance none) sweeps the three lambdas itself; the
+    # balanced arm drops them because the balancer learns them.
+    _yaml = ('sweep_dfc2020_cobench_nobal.yaml' if LOSS_BALANCE == 'none'
+             else 'sweep_dfc2020_cobench.yaml')
+    with open(os.path.join(_YAML_DIR, _yaml)) as f:
         override = yaml.safe_load(f)
     merged = override.copy()
     merged['parameters'] = {**base.get('parameters', {}),

@@ -30,6 +30,7 @@ VALID_MODALITIES = {
     'benv2':   ['s1', 's2', 's2_rgb'],
     'pastis':  ['s1', 's2', 'rgb'],
     'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
+    'biomassters': ['s1', 's2'],
 }
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
@@ -74,7 +75,7 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
 def main():
     parser = argparse.ArgumentParser(description='MixMatch Semi-Supervised Baseline')
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020'])
+                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020', 'biomassters'])
     parser.add_argument('--modality', type=str, required=True,
                         help='Modality to train on (single modality)')
     parser.add_argument('--model', type=str, default='evan_base',
@@ -117,6 +118,9 @@ def main():
     # teacher checkpoint: an upernet teacher with a linear student is not a
     # like-for-like comparison (~10 mIoU apart on dfc2020). Ignored for
     # classification/multilabel tasks, which use EVANClassifier.
+    parser.add_argument('--relu_output', action='store_true',
+                        help='Clamp predictions to >=0. Regression only (biomassters '
+                             'AGB is non-negative); ignored for other task types.')
     parser.add_argument('--decoder_type', type=str, default='linear',
                         choices=['linear', 'upernet'],
                         help='Dense head: linear (1x1 conv + upsample) or upernet (multi-scale).')
@@ -148,7 +152,9 @@ def main():
 
     is_segmentation = (task_config.task_type == 'segmentation')
     multilabel = task_config.multilabel
-    metric_name = "mIoU" if is_segmentation else ("mAP" if multilabel else "Acc")
+    is_regression = (task_config.task_type == 'regression')
+    metric_name = ("RMSE" if is_regression else
+                   "mIoU" if is_segmentation else ("mAP" if multilabel else "Acc"))
 
     print(f"  train1 (labeled): {len(train1.dataset)} samples")
     print(f"  train2 (unlabeled): {len(train2.dataset)} samples")
@@ -183,12 +189,15 @@ def main():
     model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
     evan = model_fn(load_weights=args.use_dino_weights, rgb_in_s2_indices=rgb_in_s2_indices, **common_kwargs)
 
-    if is_segmentation:
+    # Regression (biomassters AGB) reuses the dense per-pixel head with
+    # num_classes=1; relu_output clamps predictions to non-negative t/ha.
+    if is_segmentation or is_regression:
         model = EvanSegmenter(
             evan, num_classes=task_config.num_classes,
             decoder_strategy="mean", device=device,
             decoder_type=args.decoder_type,
             decoder_channels=args.decoder_channels,
+            relu_output=(args.relu_output and is_regression),
         )
     else:
         model = EVANClassifier(

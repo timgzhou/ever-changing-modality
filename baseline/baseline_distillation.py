@@ -23,6 +23,7 @@ VALID_NEW_MODS = {
     'eurosat': ['vre', 'nir', 'swir', 'rgb', 's2'],
     'benv2':   ['s1', 's2', 's2_norgb'],
     'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
+    'biomassters': ['s1', 's2'],
 }
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
@@ -90,6 +91,9 @@ def init_student_from_teacher(
     student_n_chans: int,
     task_type: str = 'classification',
     device: str = 'cpu',
+    decoder_type: str = 'linear',
+    decoder_channels: int = 512,
+    relu_output: bool = False,
 ):
     """
     Create a monomodal student (EVANClassifier or EvanSegmenter) initialised from a
@@ -124,11 +128,17 @@ def init_student_from_teacher(
         teacher_state_dict, evan_config, student_modality, student_n_chans, teacher_modality, device
     )
 
-    if task_type == 'segmentation':
+    if task_type in ('segmentation', 'regression'):
+        # decoder_type/channels/relu_output MUST be forwarded: they default to a
+        # linear head, so omitting them silently gave the teacher-init arm a
+        # different (much smaller) head than the random-init arm.
         student_model = EvanSegmenter(
             evan_model=student_evan,
             num_classes=config['num_classes'],
             decoder_strategy=config.get('decoder_strategy', 'mean'),
+            decoder_type=decoder_type,
+            decoder_channels=decoder_channels,
+            relu_output=(relu_output and task_type == 'regression'),
             device=device,
         )
         print("  Segmentation decoder randomly initialised (spatial head — no weight copying)")
@@ -159,9 +169,17 @@ def evaluate_ensemble(student_model, teacher_model, test_loader, device,
                       student_modality_bands_dict, teacher_modality_bands_dict,
                       student_modality, teacher_modality, ensemble_mode='avg',
                       multilabel=False, label_key='label', segmentation=False,
-                      num_classes=None, ignore_index=-100):
+                      num_classes=None, ignore_index=-100,
+                      regression=False, regression_scale=1.0,
+                      regression_mask_above=None):
     """
     Evaluate ensemble of teacher and student models on test set.
+
+    Regression (biomassters) is not supported: averaging a teacher's and a
+    student's continuous predictions is a different estimator than the
+    classification soft-vote this was written for, and the number is a
+    diagnostic rather than a reported baseline. Returns NaN so the caller can
+    log it without branching.
 
     Args:
         student_model: Student EVAN classifier or EvanSegmenter
@@ -182,6 +200,8 @@ def evaluate_ensemble(student_model, teacher_model, test_loader, device,
     Returns:
         Ensemble metric: accuracy (%), mAP (%), or mIoU (%)
     """
+    if regression:
+        return float('nan')
     student_model.eval()
     teacher_model.eval()
     correct = 0
@@ -414,7 +434,7 @@ def distillation_training_loop(
 def main():
     parser = argparse.ArgumentParser(description='Baseline Distillation: Train student using teacher soft labels')
     parser.add_argument('--dataset', type=str, default='eurosat',
-                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020'],
+                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020', 'biomassters'],
                         help='Dataset to train on (default: eurosat)')
     parser.add_argument('--teacher_checkpoint', type=str, required=True,
                         help='Path to teacher checkpoint file')
@@ -427,6 +447,8 @@ def main():
                         help='Batch size for training (default: 32)')
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate (default: 1e-4)')
+    parser.add_argument('--weight_decay', type=float, default=0.01,
+                        help='AdamW weight decay (default: 0.01, PyTorch default).')
     parser.add_argument('--epochs', type=int, default=1,
                         help='Number of training epochs (default: 1)')
     parser.add_argument('--num_workers', type=int, default=4,
@@ -464,6 +486,9 @@ def main():
     # teacher checkpoint: an upernet teacher with a linear student is not a
     # like-for-like comparison (~10 mIoU apart on dfc2020). Ignored for
     # classification/multilabel tasks, which use EVANClassifier.
+    parser.add_argument('--relu_output', action='store_true',
+                        help='Clamp predictions to >=0. Regression only (biomassters '
+                             'AGB is non-negative); ignored for other task types.')
     parser.add_argument('--decoder_type', type=str, default='linear',
                         choices=['linear', 'upernet'],
                         help='Dense head: linear (1x1 conv + upsample) or upernet (multi-scale).')
@@ -523,11 +548,15 @@ def main():
     multilabel = task_config.multilabel
     label_key = task_config.label_key
     ignore_index = getattr(task_config, 'ignore_index', -100)
-    metric_name = "mIoU" if is_segmentation else ("mAP" if multilabel else "Acc")
+    is_regression = (task_config.task_type == 'regression')
+    metric_name = ("RMSE" if is_regression else
+                   "mIoU" if is_segmentation else ("mAP" if multilabel else "Acc"))
 
     # Load teacher model — dispatch on task type
     print(f"\n=== Loading teacher from {teacher_checkpoint_path} ===")
-    if is_segmentation:
+    # Regression (biomassters AGB) reuses the dense per-pixel head with
+    # num_classes=1; relu_output clamps predictions to non-negative t/ha.
+    if is_segmentation or is_regression:
         teacher_model = EvanSegmenter.from_checkpoint(teacher_checkpoint_path, device=device)
     else:
         teacher_model = EVANClassifier.from_checkpoint(teacher_checkpoint_path, device=device)
@@ -553,7 +582,9 @@ def main():
 
     # Evaluate teacher on test split before distillation
     print(f"\n=== Teacher baseline ({teacher_modality.upper()}) on different splits ===")
-    if is_segmentation:
+    if is_regression:
+        _ce = nn.MSELoss()
+    elif is_segmentation:
         _ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
     elif multilabel:
         _ce = nn.BCEWithLogitsLoss()
@@ -565,6 +596,9 @@ def main():
         multilabel=multilabel, label_key=label_key,
         segmentation=is_segmentation, num_classes=task_config.num_classes,
         ignore_index=ignore_index,
+        regression=is_regression,
+        regression_scale=getattr(task_config, 'regression_scale', 1.0),
+        regression_mask_above=getattr(task_config, 'regression_mask_above', None),
     )
     print(f"  Teacher test {metric_name}: {teacher_test_metric:.2f}%")
     _, teacher_train1_metric = evaluate(
@@ -573,6 +607,9 @@ def main():
         multilabel=multilabel, label_key=label_key,
         segmentation=is_segmentation, num_classes=task_config.num_classes,
         ignore_index=ignore_index,
+        regression=is_regression,
+        regression_scale=getattr(task_config, 'regression_scale', 1.0),
+        regression_mask_above=getattr(task_config, 'regression_mask_above', None),
     )
     _, teacher_train2_metric = evaluate(
         teacher_model, train2_loader, _ce, device,
@@ -580,6 +617,9 @@ def main():
         multilabel=multilabel, label_key=label_key,
         segmentation=is_segmentation, num_classes=task_config.num_classes,
         ignore_index=ignore_index,
+        regression=is_regression,
+        regression_scale=getattr(task_config, 'regression_scale', 1.0),
+        regression_mask_above=getattr(task_config, 'regression_mask_above', None),
     )
     print(f"  Teacher train1 {metric_name}: {teacher_train1_metric:.2f}%")
     print(f"  Teacher train2 {metric_name}: {teacher_train2_metric:.2f}%")
@@ -608,6 +648,9 @@ def main():
             student_n_chans=all_student_n_chans[0],
             task_type=task_config.task_type,
             device=device,
+            decoder_type=args.decoder_type,
+            decoder_channels=args.decoder_channels,
+            relu_output=args.relu_output,
         )
         student_model = student_model.to(device)
     else:
@@ -624,12 +667,13 @@ def main():
             load_weights=False, # was true
         )
 
-        if is_segmentation:
+        if is_segmentation or is_regression:
             student_model = EvanSegmenter(
                 evan_model, num_classes=task_config.num_classes,
                 decoder_strategy="mean", device=device,
                 decoder_type=args.decoder_type,
                 decoder_channels=args.decoder_channels,
+                relu_output=(args.relu_output and is_regression),
             )
         else:
             student_model = EVANClassifier(
@@ -660,7 +704,11 @@ def main():
     print(f"Trainable parameters: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
 
     # Training setup
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, student_model.parameters()), lr=args.lr)
+    # weight_decay was previously left at AdamW's 0.01 default and was not
+    # tunable, which made it the one un-swept optimizer knob.
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, student_model.parameters()),
+        lr=args.lr, weight_decay=args.weight_decay)
     num_epochs = args.epochs
 
     print(f"\n=== Distillation training for {num_epochs} epochs ===")
@@ -712,6 +760,9 @@ def main():
         multilabel=multilabel, label_key=label_key,
         segmentation=is_segmentation, num_classes=task_config.num_classes,
         ignore_index=ignore_index,
+        regression=is_regression,
+        regression_scale=getattr(task_config, 'regression_scale', 1.0),
+        regression_mask_above=getattr(task_config, 'regression_mask_above', None),
     )
     print(f"  Ensemble {metric_name} (avg logits): {ensemble_metric_avg:.2f}%")
 
@@ -722,6 +773,9 @@ def main():
         multilabel=multilabel, label_key=label_key,
         segmentation=is_segmentation, num_classes=task_config.num_classes,
         ignore_index=ignore_index,
+        regression=is_regression,
+        regression_scale=getattr(task_config, 'regression_scale', 1.0),
+        regression_mask_above=getattr(task_config, 'regression_mask_above', None),
     )
     print(f"  Ensemble {metric_name} (avg softmax): {ensemble_metric_softmax:.2f}%")
 
@@ -743,7 +797,7 @@ def main():
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
     fieldnames = ["model_type", "teacher_modality", "student_modality", "train_mode", "tz_lora_rank",
-                  "tz_modality_specific_layer_augmenter", "learning_rate", "trainable_params",
+                  "tz_modality_specific_layer_augmenter", "learning_rate", "weight_decay", "trainable_params",
                   "epoch", "temperature", "alpha", "distillation_mode", "kl_type",
                   "metric_name", "teacher_test_metric", "test_metric", "best_test_metric(oracle)", "best_epoch",
                   "best_val_agreement",
@@ -756,7 +810,7 @@ def main():
             writer.writerow(fieldnames)
         writer.writerow([
             args.model, teacher_modality, student_label, args.train_mode, args.tz_lora_rank,
-            args.tz_modality_specific_layer_augmenter, args.lr, trainable_params,
+            args.tz_modality_specific_layer_augmenter, args.lr, args.weight_decay, trainable_params,
             num_epochs, args.temperature, args.alpha, args.distillation_mode, args.kl_type, metric_name,
             f"{teacher_test_metric:.2f}", f"{test_metric:.2f}", f"{best_test_metric:.2f}", best_epoch,
             f"{best_agreement:.2f}" if best_agreement >= 0 else "",

@@ -1,0 +1,3 @@
+model_type,modality,train_mode,learning_rate,weight_decay,trainable_params,epochs,K,temperature,alpha,lambda_u,mixmatch_warmup_epochs,metric_name,test_metric,best_val_metric,best_val_test_metric,saved_checkpoint,global_rep,use_dino_weights
+evan_base,s2,fft,0.0001,0.0001,126384129,1,2,0.5,0.75,1.0,4,RMSE,1864050.47,1791293.90,1864050.47,checkpoints/evan_mixmatch_biomassters_s2_20260825_202547.pt,clstoken,True
+evan_base,s2,fft,0.0001,0.0001,126384129,1,2,0.5,0.75,1.0,4,RMSE,92.42,91.46,92.42,checkpoints/evan_mixmatch_biomassters_s2_20260826_114436.pt,clstoken,True

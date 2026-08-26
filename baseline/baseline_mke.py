@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import logging
 import argparse
 from datetime import datetime
@@ -28,7 +29,7 @@ import kornia.augmentation as K
 
 from delulunet_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
-from train_utils import make_scheduler, TrainMetricAccumulator, evaluate
+from train_utils import make_scheduler, TrainMetricAccumulator, evaluate, make_criterion
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
@@ -75,7 +76,9 @@ def _n_chans(entry) -> int:
 
 def _evaluate_teacher(teacher_model, loader, ce_criterion, device, teacher_modality,
                        modality_bands_dict, multilabel, label_key, is_segmentation,
-                       num_classes, ignore_index, split_name):
+                       num_classes, ignore_index, split_name,
+                       is_regression=False, regression_scale=1.0,
+                       regression_mask_above=None):
     """Evaluate teacher on a given split and print result."""
     _, metric = evaluate(
         teacher_model, loader, ce_criterion, device,
@@ -83,16 +86,20 @@ def _evaluate_teacher(teacher_model, loader, ce_criterion, device, teacher_modal
         multilabel=multilabel, label_key=label_key,
         segmentation=is_segmentation, num_classes=num_classes,
         ignore_index=ignore_index,
+        regression=is_regression,
+        regression_scale=regression_scale,
+        regression_mask_above=regression_mask_above,
     )
-    metric_name = "mIoU" if is_segmentation else ("mAP" if multilabel else "Acc")
-    print(f"  Teacher {split_name} {metric_name}: {metric:.2f}%")
+    metric_name = ("RMSE" if is_regression else
+                   "mIoU" if is_segmentation else ("mAP" if multilabel else "Acc"))
+    print(f"  Teacher {split_name} {metric_name}: {metric:.2f}")
     return metric
 
 
 def _compute_mke_teacher_agreement(
     student_model, teacher_model, val_loader, device,
     modality_bands_dict, student_modalities, teacher_modality,
-    label_key, segmentation=False, ignore_index=-100,
+    label_key, segmentation=False, ignore_index=-100, regression=False,
 ) -> float:
     """Teacher-agreement on val2 for multimodal student checkpoint selection.
 
@@ -117,8 +124,19 @@ def _compute_mke_teacher_agreement(
             )
             teacher_input = {k: v.to(device) for k, v in teacher_input.items()}
 
-            s_preds = student_model(student_input).argmax(dim=1)
-            t_preds = teacher_model(teacher_input).argmax(dim=1)
+            s_out = student_model(student_input)
+            t_out = teacher_model(teacher_input)
+
+            if regression:
+                # argmax over a 1-channel map is always 0 -> fake 100% agreement.
+                if s_out.dim() == 4 and s_out.shape[1] == 1: s_out = s_out.squeeze(1)
+                if t_out.dim() == 4 and t_out.shape[1] == 1: t_out = t_out.squeeze(1)
+                agree += ((s_out - t_out) ** 2).sum().item()
+                total += t_out.numel()
+                continue
+
+            s_preds = s_out.argmax(dim=1)
+            t_preds = t_out.argmax(dim=1)
 
             if segmentation:
                 valid = t_preds != ignore_index
@@ -129,6 +147,9 @@ def _compute_mke_teacher_agreement(
                 total += s_preds.size(0)
 
     student_model.train()
+    if regression:
+        # Negative RMSE-to-teacher: higher is still better.
+        return -((agree / max(1, total)) ** 0.5)
     return 100.0 * agree / max(1, total)
 
 
@@ -140,7 +161,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='MKE Baseline: multimodal student trained on teacher pseudo-labels')
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020'])
+                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020', 'biomassters'])
     parser.add_argument('--modalities', type=str, nargs='+', required=True,
                         help='Student modalities (must include teacher modality). '
                              'Example: --modalities s2 s1')
@@ -176,6 +197,9 @@ def main():
     # teacher checkpoint: an upernet teacher with a linear student is not a
     # like-for-like comparison (~10 mIoU apart on dfc2020). Ignored for
     # classification/multilabel tasks, which use EVANClassifier.
+    parser.add_argument('--relu_output', action='store_true',
+                        help='Clamp predictions to >=0. Regression only (biomassters '
+                             'AGB is non-negative); ignored for other task types.')
     parser.add_argument('--decoder_type', type=str, default='linear',
                         choices=['linear', 'upernet'],
                         help='Dense head: linear (1x1 conv + upsample) or upernet (multi-scale).')
@@ -235,7 +259,9 @@ def main():
     multilabel = task_config.multilabel
     label_key = task_config.label_key
     ignore_index = getattr(task_config, 'ignore_index', -100)
-    metric_name = "mIoU" if is_segmentation else ("mAP" if multilabel else "Acc")
+    is_regression = (task_config.task_type == 'regression')
+    metric_name = ("RMSE" if is_regression else
+                   "mIoU" if is_segmentation else ("mAP" if multilabel else "Acc"))
     num_classes = task_config.num_classes
 
     student_modalities = args.modalities
@@ -250,7 +276,9 @@ def main():
     # Load teacher
     # ------------------------------------------------------------------
     print(f"\n=== Loading teacher from {teacher_checkpoint_path} ===")
-    if is_segmentation:
+    # Regression (biomassters AGB) reuses the dense per-pixel head with
+    # num_classes=1; relu_output clamps predictions to non-negative t/ha.
+    if is_segmentation or is_regression:
         teacher_model = EvanSegmenter.from_checkpoint(teacher_checkpoint_path, device=device)
     else:
         teacher_model = EVANClassifier.from_checkpoint(teacher_checkpoint_path, device=device)
@@ -261,7 +289,10 @@ def main():
     # ------------------------------------------------------------------
     # Teacher baseline evaluation (train1, train2, test)
     # ------------------------------------------------------------------
-    if is_segmentation:
+    if is_regression:
+        # Ground-truth eval: needs the AGB mask + shape alignment.
+        _ce = make_criterion(task_config)
+    elif is_segmentation:
         _ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
     elif multilabel:
         _ce = nn.BCEWithLogitsLoss()
@@ -273,16 +304,25 @@ def main():
         teacher_model, train1_loader, _ce, device, teacher_modality,
         modality_bands_dict, multilabel, label_key, is_segmentation,
         num_classes, ignore_index, split_name="train1",
+        is_regression=is_regression,
+        regression_scale=getattr(task_config, 'regression_scale', 1.0),
+        regression_mask_above=getattr(task_config, 'regression_mask_above', None),
     )
     teacher_train2_metric = _evaluate_teacher(
         teacher_model, train2_loader, _ce, device, teacher_modality,
         modality_bands_dict, multilabel, label_key, is_segmentation,
         num_classes, ignore_index, split_name="train2",
+        is_regression=is_regression,
+        regression_scale=getattr(task_config, 'regression_scale', 1.0),
+        regression_mask_above=getattr(task_config, 'regression_mask_above', None),
     )
     teacher_test_metric = _evaluate_teacher(
         teacher_model, test_loader, _ce, device, teacher_modality,
         modality_bands_dict, multilabel, label_key, is_segmentation,
         num_classes, ignore_index, split_name="test",
+        is_regression=is_regression,
+        regression_scale=getattr(task_config, 'regression_scale', 1.0),
+        regression_mask_above=getattr(task_config, 'regression_mask_above', None),
     )
 
     # ------------------------------------------------------------------
@@ -318,12 +358,13 @@ def main():
         rgb_in_s2_indices=rgb_in_s2_indices,
     )
 
-    if is_segmentation:
+    if is_segmentation or is_regression:
         student_model = EvanSegmenter(
             evan_model, num_classes=num_classes,
             decoder_strategy="mean", device=device,
             decoder_type=args.decoder_type,
             decoder_channels=args.decoder_channels,
+            relu_output=(args.relu_output and is_regression),
         )
     else:
         student_model = EVANClassifier(
@@ -365,7 +406,10 @@ def main():
     )
     scheduler = make_scheduler(optimizer, args.epochs, args.warmup_epochs)
 
-    if is_segmentation:
+    if is_regression:
+        # MSE, not CE: the pseudo-label is the teacher's continuous prediction.
+        ce_criterion = nn.MSELoss()
+    elif is_segmentation:
         ce_criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
     elif multilabel:
         ce_criterion = nn.BCEWithLogitsLoss()
@@ -401,6 +445,9 @@ def main():
         multilabel=multilabel,
         num_classes=num_classes,
         ignore_index=ignore_index,
+        regression=is_regression,
+        regression_scale=getattr(task_config, 'regression_scale', 1.0),
+        regression_mask_above=getattr(task_config, 'regression_mask_above', None),
     )
 
     # ------------------------------------------------------------------
@@ -409,7 +456,7 @@ def main():
     print(f"\n=== MKE training for {args.epochs} epochs ===")
     print(f"  Teacher: {teacher_modality.upper()} | Student: {[m.upper() for m in student_modalities]}")
 
-    best_test_metric = 0.0
+    best_test_metric = float("inf") if is_regression else 0.0
     best_epoch = 0
     best_agreement = -1.0
     valchecked_test_metric = None
@@ -436,7 +483,20 @@ def main():
             with torch.no_grad():
                 teacher_logits = teacher_model(teacher_input)
 
-            if is_segmentation:
+            if is_regression:
+                # MKE Eq.(2): the pseudo-label IS the teacher's raw output
+                # y~_i = f_t(x^alpha; theta_t*). For classification the paper
+                # allows either hard (argmax + CE) or soft (KL) targets; for a
+                # continuous target there is no argmax, so the pseudo-label is
+                # the teacher's prediction itself and l_cls becomes MSE -- i.e.
+                # the distillation loss. MKE's identity here is what it always
+                # was: unimodal teacher -> multimodal student, plus the L_reg
+                # consistency term realised through augmentation.
+                #
+                # Note MKE's Theorem 1 is stated for K-way classification and
+                # does not carry over; the construction does.
+                pseudo_labels = teacher_logits.detach()               # [B, 1, H, W]
+            elif is_segmentation:
                 pseudo_labels = teacher_logits.argmax(dim=1)          # [B, H, W]
             elif multilabel:
                 pseudo_labels = (teacher_logits.sigmoid() > 0.5).float()  # [B, C]
@@ -452,12 +512,34 @@ def main():
             )
             student_input = {k: v.to(device) for k, v in student_input.items()}
 
-            if is_segmentation:
-                # Stack all modality channels, augment jointly with pseudo-label mask
+            if is_segmentation or is_regression:
+                # Stack all modality channels, augment jointly with the target so
+                # the (dense) pseudo-label stays pixel-aligned with the student's
+                # crop. Regression keeps float targets -- the .long() cast used
+                # for class indices would quantise continuous AGB to 0/1.
                 combined = torch.cat([student_input[m] for m in student_modalities], dim=1)
-                pseudo_mask = pseudo_labels.unsqueeze(1).float()      # [B, 1, H, W]
-                combined_aug, pseudo_aug = aug_with_mask(combined, pseudo_mask)
-                pseudo_labels_aug = pseudo_aug.squeeze(1).long()      # [B, H, W]
+                # Temporal datasets (biomassters) give [B, C, T, H, W]; kornia
+                # augmentation only accepts 2-D or 4-D. Fold T into the batch
+                # dim, augment, then unfold -- every timestep of a sample gets
+                # the SAME transform because the pseudo-label is shared across T.
+                _T = None
+                if combined.dim() == 5:
+                    _B, _C, _T, _H, _W = combined.shape
+                    combined = combined.permute(0, 2, 1, 3, 4).reshape(_B * _T, _C, _H, _W)
+                pseudo_mask = (pseudo_labels if is_regression
+                               else pseudo_labels.unsqueeze(1).float())
+                if pseudo_mask.dim() == 3:
+                    pseudo_mask = pseudo_mask.unsqueeze(1)            # [B, 1, H, W]
+                if _T is not None:
+                    # replicate the (time-invariant) target across folded steps
+                    pseudo_mask = pseudo_mask.repeat_interleave(_T, dim=0)
+                combined_aug, pseudo_aug = aug_with_mask(combined, pseudo_mask.float())
+                if _T is not None:
+                    _BC = combined_aug.shape[1]
+                    combined_aug = combined_aug.reshape(_B, _T, _BC, _H, _W).permute(0, 2, 1, 3, 4)
+                    pseudo_aug = pseudo_aug.reshape(_B, _T, *pseudo_aug.shape[1:])[:, 0]
+                pseudo_labels_aug = (pseudo_aug if is_regression
+                                     else pseudo_aug.squeeze(1).long())
 
                 # Split combined_aug back to per-modality
                 student_input_aug = {}
@@ -467,8 +549,22 @@ def main():
                     offset += nc
 
                 student_logits = student_model(student_input_aug)
-                loss = ce_criterion(student_logits, pseudo_labels_aug)
-                accum.update(student_logits.detach(), pseudo_labels_aug.detach())
+                if is_regression:
+                    # l_cls -> MSE against the teacher's continuous output.
+                    # Scaled by regression_loss_scale so the loss is O(1) in
+                    # normalised units rather than raw t/ha (see shot.py).
+                    _sc = getattr(task_config, 'regression_loss_scale', 1.0) or 1.0
+                    loss = F.mse_loss(student_logits / _sc, pseudo_labels_aug / _sc)
+                else:
+                    loss = ce_criterion(student_logits, pseudo_labels_aug)
+                _p, _t = student_logits.detach(), pseudo_labels_aug.detach()
+                if is_regression:
+                    # accumulator/metric convention is [B,H,W] for dense targets;
+                    # leaving the channel dim on both sides broadcasts to
+                    # [B,B,H,W] and corrupts RMSE (observed: 1.8e6).
+                    if _p.dim() == 4 and _p.shape[1] == 1: _p = _p.squeeze(1)
+                    if _t.dim() == 4 and _t.shape[1] == 1: _t = _t.squeeze(1)
+                accum.update(_p, _t)
             else:
                 for mod in student_modalities:
                     student_input[mod] = aug(student_input[mod])
@@ -501,11 +597,17 @@ def main():
                 multilabel=multilabel, label_key=label_key,
                 segmentation=is_segmentation, num_classes=num_classes,
                 ignore_index=ignore_index,
+                # Without these, evaluate() takes the classification path and
+                # returns an accuracy-shaped number over continuous targets.
+                regression=is_regression,
+                regression_scale=getattr(task_config, 'regression_scale', 1.0),
+                regression_mask_above=getattr(task_config, 'regression_mask_above', None),
             )
             print(f"Epoch {epoch+1}/{args.epochs} | loss={train_loss:.4f} | "
                   f"train {metric_name}={train_metric:.2f}% | test {metric_name}={test_metric:.2f}%")
 
-            if test_metric > best_test_metric:
+            # RMSE is lower-is-better; accuracy/mIoU higher-is-better.
+            if (test_metric < best_test_metric) if is_regression else (test_metric > best_test_metric):
                 best_test_metric = test_metric
                 best_epoch = epoch + 1
 
@@ -516,6 +618,7 @@ def main():
                 student_model, teacher_model, val2_loader, device,
                 modality_bands_dict, student_modalities, teacher_modality,
                 label_key, segmentation=is_segmentation, ignore_index=ignore_index,
+                regression=is_regression,
             )
             print(f"  Val2 teacher-agreement: {agreement:.2f}%")
             if agreement > best_agreement:

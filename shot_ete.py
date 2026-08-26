@@ -105,6 +105,13 @@ def _parse_args():
     parser.add_argument('--seed', type=int, default=0,
                         help='Random seed for torch/numpy/random; recorded in the results CSV '
                              'so repeated runs of the same config are distinguishable.')
+    parser.add_argument('--student_init', type=str, default='teacher',
+                        choices=['teacher', 'random'],
+                        help="Student initialisation. 'teacher' (default) starts "
+                             "from the stage-0 checkpoint. 'random' re-rolls the "
+                             "student's weights while keeping the same frozen "
+                             "teacher, testing whether teacher-init helps or "
+                             "hurts (it hurts for the distillation baseline).")
     parser.add_argument('--loss_balance', type=str, default='none',
                         choices=['none', 'running_mean', 'uncertainty'],
                         help="Automatic balancing of the four loss terms. "
@@ -197,9 +204,56 @@ def main(args=None):
         evan.create_modality_components(newmod, num_newmod_channels)
         model = model.to(device)
 
+    # ---- optional: randomly re-initialise the STUDENT ----------------------
+    # The stage-0 checkpoint plays two roles: it is the frozen teacher (the
+    # distillation / latent-reconstruction target) AND the student's init. Those
+    # are separable. The distillation baseline showed that initialising a
+    # transfer student from the teacher is 2.5-5.9 mIoU WORSE than a
+    # modality-agnostic DINO init -- the student has to unlearn the teacher's
+    # modality-specific features before it can learn the new modality. The same
+    # logic may apply to SHOT, whose student is likewise teacher-initialised.
+    #
+    # --student_init random  re-rolls the student's weights while KEEPING the
+    # teacher, so the supervision signal is unchanged and only the starting
+    # point moves. The teacher must therefore be snapshotted BEFORE the reset,
+    # since train_shot() otherwise deep-copies the (already reset) model.
+    unimodal_teacher = None
+    if getattr(args, 'student_init', 'teacher') == 'random':
+        import copy as _copy
+        unimodal_teacher = _copy.deepcopy(model)
+        unimodal_teacher.freeze_all()
+        unimodal_teacher.eval()
+        print("\n=== --student_init random: re-initialising student weights ===")
+        print("    (frozen teacher snapshotted first; targets are unchanged)")
+
+        # module.reset_parameters() covers Conv/Linear/Norm but NOT bare
+        # nn.Parameter tensors (cls tokens, storage tokens, modality encodings),
+        # which are a real part of EVAN. Reset those explicitly afterwards.
+        reset_mods = 0
+        for m in model.modules():
+            if hasattr(m, 'reset_parameters'):
+                m.reset_parameters()
+                reset_mods += 1
+        leftover = 0
+        seen = {id(p) for m in model.modules() if hasattr(m, 'reset_parameters')
+                for p in m.parameters(recurse=False)}
+        with torch.no_grad():
+            for name, p in model.named_parameters():
+                if id(p) in seen:
+                    continue
+                if p.dim() >= 2:
+                    torch.nn.init.trunc_normal_(p, std=0.02)
+                else:
+                    p.zero_()
+                leftover += p.numel()
+        n_total = sum(p.numel() for p in model.parameters())
+        print(f"    reset {reset_mods} modules + {leftover:,} loose parameters "
+              f"({n_total:,} total)")
+
     # ========================================== TRAIN Delulu ===========================================
     trainable_total, best_checkpoints, best_checkpoint_summary, teacher_baselines = train_shot(
         model=model,
+        unimodal_teacher=unimodal_teacher,
         train_loader=train2_loader,
         device=device,
         args=args,
@@ -316,8 +370,23 @@ def main(args=None):
         "val_ens_addition", "test_ens_addition",
         "stage0_checkpoint",
         # appended last so existing positional CSV readers keep working
-        "seed", "config_label",
+        "seed", "config_label", "student_init", "loss_balance",
     ]
+    # If the file predates a newly-added column, widen it in place. A positional
+    # csv.writer would otherwise append values with no header to name them.
+    if file_exists:
+        with open(filename, newline='') as _f:
+            _rows = list(csv.reader(_f))
+        if _rows and _rows[0] != fieldnames and set(_rows[0]).issubset(set(fieldnames)):
+            _old = _rows[0]
+            _new_rows = [fieldnames]
+            for _r in _rows[1:]:
+                _d = dict(zip(_old, _r))
+                _new_rows.append([_d.get(c, '') for c in fieldnames])
+            with open(filename, 'w', newline='') as _f:
+                csv.writer(_f).writerows(_new_rows)
+            print(f"  (widened {filename} header: {len(_old)} -> {len(fieldnames)} cols)")
+
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
         if not file_exists:
@@ -361,6 +430,8 @@ def main(args=None):
             args.stage0_checkpoint,
             seed,
             args.config_label or "",
+            getattr(args, 'student_init', 'teacher'),
+            getattr(args, 'loss_balance', 'none'),
         ])
 
     print(f"\nResults appended to {filename}")

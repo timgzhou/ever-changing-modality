@@ -27,6 +27,21 @@ def make_scheduler(optimizer, num_epochs: int, warmup_epochs: int = 1, eta_min: 
     return SequentialLR(optimizer, schedulers=[scheduler1, scheduler2], milestones=[warmup_epochs])
 
 
+def _aug_temporal_safe(aug, x):
+    """Apply a kornia augmentation to a possibly-temporal tensor.
+
+    Temporal datasets (biomassters) yield [B, C, T, H, W]; kornia accepts only
+    2-D or 4-D. Fold T into the batch dimension so every timestep of a sample
+    receives the SAME transform, then unfold.
+    """
+    if x.dim() != 5:
+        return aug(x)
+    B, C, T, H, W = x.shape
+    flat = x.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
+    out = aug(flat)
+    return out.reshape(B, T, out.shape[1], H, W).permute(0, 2, 1, 3, 4)
+
+
 def make_weak_augmentation():
     """Weak augmentation: random flips only (channel-agnostic).
 
@@ -93,6 +108,19 @@ class MaskedMSELoss(nn.Module):
         self.mask_above = mask_above
 
     def forward(self, pred, target):
+        # Dense heads emit [B,1,H,W] while targets are [B,H,W]. Align the channel
+        # dim explicitly -- broadcasting would silently produce [B,B,H,W] and
+        # compare every sample against every other one.
+        if pred.dim() == target.dim() + 1 and pred.shape[1] == 1:
+            pred = pred.squeeze(1)
+        elif target.dim() == pred.dim() + 1 and target.shape[1] == 1:
+            target = target.squeeze(1)
+        if pred.shape != target.shape:
+            raise ValueError(
+                f"MaskedMSELoss shape mismatch: pred {tuple(pred.shape)} vs "
+                f"target {tuple(target.shape)}"
+            )
+        target = target.to(pred.dtype)
         keep = target < self.mask_above
         if not keep.any():
             return (pred * 0.0).sum()
@@ -512,7 +540,12 @@ class Trainer:
         num_classes = tc.num_classes if segmentation else None
         ignore_index = getattr(tc, 'ignore_index', -100)
 
-        if segmentation:
+        regression = (tc.task_type == 'regression')
+        if regression:
+            # make_criterion applies the AGB mask and aligns [B,1,H,W] vs [B,H,W];
+            # a bare nn.MSELoss() silently broadcasts to [B,B,H,W].
+            ce_criterion = make_criterion(tc)
+        elif segmentation:
             ce_criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
         elif multilabel:
             ce_criterion = nn.BCEWithLogitsLoss()
@@ -523,9 +556,10 @@ class Trainer:
         accum = self._make_accumulator()
         teacher_model.eval()
 
-        best_test_metric = 0.0
+        _lower_is_better = (tc.task_type == 'regression')
+        best_test_metric = float('inf') if _lower_is_better else 0.0
         best_epoch = 0
-        best_agreement = -1.0
+        best_agreement = float('-inf')
         test_loss = test_metric = 0.0
 
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
@@ -541,6 +575,9 @@ class Trainer:
             num_classes=num_classes,
             ignore_index=ignore_index,
             pseudo_modalities=student_pseudo_modalities,
+            regression=regression,
+            regression_scale=getattr(tc, 'regression_scale', 1.0),
+            regression_mask_above=getattr(tc, 'regression_mask_above', None),
         )
 
         train_metric = test_metric = 0.0
@@ -589,6 +626,7 @@ class Trainer:
                     distill_loss = distillation_loss(
                         student_logits, teacher_logits, temperature,
                         kl_type=kl_type, task_type=tc.task_type,
+                        regression_loss_scale=getattr(tc, 'regression_loss_scale', 1.0),
                     )
                     if distillation_mode == 'with_guidance':
                         raise NotImplementedError("not implemented with guidance")
@@ -614,7 +652,8 @@ class Trainer:
                 test_loss, test_metric = evaluate(
                     self.model, test_loader, ce_criterion, self.device, **eval_kwargs
                 )
-                best_test_metric = max(best_test_metric, test_metric)
+                best_test_metric = (min(best_test_metric, test_metric) if _lower_is_better
+                                    else max(best_test_metric, test_metric))
                 best_epoch = epoch + 1
                 print(f"  Train ({student_label}): Loss={train_loss:.4f}")
                 print(f"  Test  ({student_label}): Loss={test_loss:.4f}, {metric_name}={test_metric:.2f}%")
@@ -627,8 +666,13 @@ class Trainer:
                     student_modalities, teacher_modality, label_key,
                     segmentation=segmentation, ignore_index=ignore_index,
                     student_pseudo_modalities=student_pseudo_modalities,
+                    regression=regression,
                 )
-                print(f"  Val2 teacher-agreement: {agreement:.2f}%")
+                if regression:
+                    # reported as negative RMSE-to-teacher, not a percentage
+                    print(f"  Val2 teacher-agreement (-RMSE): {agreement:.3f}")
+                else:
+                    print(f"  Val2 teacher-agreement: {agreement:.2f}%")
                 if agreement > best_agreement:
                     best_agreement = agreement
                     if best_checkpoint_path is not None:
@@ -676,7 +720,9 @@ class Trainer:
         ce_criterion = make_criterion(tc)
         scheduler = make_scheduler(self.optimizer, num_epochs, self.warmup_epochs)
 
-        best_val_metric = 0.0
+        _lower_is_better = (tc.task_type == 'regression')
+        regression = _lower_is_better
+        best_val_metric = float('inf') if _lower_is_better else 0.0
         best_val_test_metric = 0.0
 
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
@@ -687,6 +733,11 @@ class Trainer:
             modalities_to_use=(modality,),
             multilabel=multilabel,
             label_key=label_key,
+            # Without these, evaluate() takes the classification path and
+            # returns an accuracy-shaped number over continuous targets.
+            regression=regression,
+            regression_scale=getattr(tc, 'regression_scale', 1.0),
+            regression_mask_above=getattr(tc, 'regression_mask_above', None),
         )
         test_metric = 0.0
 
@@ -725,7 +776,7 @@ class Trainer:
             val_metric = None
             if val_loader is not None:
                 _, val_metric = evaluate(self.model, val_loader, ce_criterion, self.device, **eval_kwargs)
-                if val_metric > best_val_metric:
+                if (val_metric < best_val_metric) if _lower_is_better else (val_metric > best_val_metric):
                     best_val_metric = val_metric
                     best_val_test_metric = test_metric
                     if best_checkpoint_path is not None:
@@ -788,7 +839,9 @@ class Trainer:
         accum = self._make_accumulator()
         mod_upper = modality.upper()
 
-        best_val_metric = 0.0 if val1_loader is not None else None
+        _lower_is_better = (tc.task_type == 'regression')
+        best_val_metric = ((float('inf') if _lower_is_better else 0.0)
+                           if val1_loader is not None else None)
         best_val_test_metric = None
         if val1_loader is not None and best_checkpoint_path is not None:
             pass  # will save best checkpoint
@@ -804,6 +857,11 @@ class Trainer:
             segmentation=segmentation,
             num_classes=num_classes if segmentation else None,
             ignore_index=ignore_index,
+            # Without these, evaluate() takes the classification path and
+            # returns an accuracy-shaped number over continuous targets.
+            regression=regression,
+            regression_scale=getattr(tc, 'regression_scale', 1.0),
+            regression_mask_above=getattr(tc, 'regression_mask_above', None),
         )
 
         train_metric = test_metric = 0.0
@@ -999,7 +1057,7 @@ class Trainer:
                 print(f"  Test  ({mod_upper}): Loss={test_loss:.4f}, {metric_name}={test_metric:.2f}%")
                 if val_metric is not None:
                     print(f"  Val   ({mod_upper}): Loss={val_loss:.4f}, {metric_name}={val_metric:.2f}%")
-                    if val_metric > best_val_metric:
+                    if (val_metric < best_val_metric) if _lower_is_better else (val_metric > best_val_metric):
                         print(f"    New val record: {val_metric:.2f} > {best_val_metric:.2f} — saving checkpoint")
                         best_val_metric = val_metric
                         best_val_test_metric = test_metric
@@ -1048,6 +1106,8 @@ class Trainer:
         tc = self.task_config
         label_key = tc.label_key
         segmentation = (tc.task_type == 'segmentation')
+        # Dense regression (biomassters AGB): no sharpening, MSE losses.
+        regression = (tc.task_type == 'regression')
         multilabel = tc.multilabel
         num_classes = tc.num_classes
         ignore_index = getattr(tc, 'ignore_index', -100)
@@ -1058,7 +1118,9 @@ class Trainer:
         accum = self._make_accumulator()
         mod_upper = modality.upper()
 
-        best_val_metric = 0.0 if val1_loader is not None else None
+        _lower_is_better = (tc.task_type == 'regression')
+        best_val_metric = ((float('inf') if _lower_is_better else 0.0)
+                           if val1_loader is not None else None)
         best_val_test_metric = None
 
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
@@ -1072,6 +1134,11 @@ class Trainer:
             segmentation=segmentation,
             num_classes=num_classes if segmentation else None,
             ignore_index=ignore_index,
+            # Without these, evaluate() takes the classification path and
+            # returns an accuracy-shaped number over continuous targets.
+            regression=regression,
+            regression_scale=getattr(tc, 'regression_scale', 1.0),
+            regression_mask_above=getattr(tc, 'regression_mask_above', None),
         )
 
         train_metric = test_metric = 0.0
@@ -1123,13 +1190,57 @@ class Trainer:
                 # transform on segmentation prediction maps before averaging.
                 views_and_params = []
                 for _ in range(K):
-                    v = weak_aug(x_u_tensor)
-                    views_and_params.append((v, copy.deepcopy(weak_aug._params)))
+                    v = _aug_temporal_safe(weak_aug, x_u_tensor)
+                    # For temporal inputs the aug ran on a time-folded tensor of
+                    # B*T rows, so weak_aug._params has B*T entries while model
+                    # outputs have B rows (time is pooled away). Every timestep
+                    # of a sample got the SAME transform, so take every T-th
+                    # entry to recover the per-sample flags.
+                    _p = copy.deepcopy(weak_aug._params)
+                    if x_u_tensor.dim() == 5:
+                        _T = x_u_tensor.shape[2]
+                        for _prm in _p:
+                            if 'batch_prob' in _prm.data:
+                                _prm.data['batch_prob'] = _prm.data['batch_prob'][::_T]
+                    views_and_params.append((v, _p))
                 views = [v for v, _ in views_and_params]
 
                 self.model.eval()
                 with torch.no_grad():
-                    if segmentation:
+                    if regression:
+                        # MixMatch label guessing, regression variant: average
+                        # the K views' predictions in the ORIGINAL frame (undo
+                        # each view's flip first), then re-apply each view's
+                        # flip so the target matches that view.
+                        #
+                        # Sharpening is DROPPED. p^(1/T) renormalised is an
+                        # operation on a categorical distribution; a continuous
+                        # per-pixel prediction has no distribution to sharpen.
+                        # K-view averaging is the part that survives -- it is
+                        # just variance reduction on the pseudo-target.
+                        avg_pred = None
+                        for v, aug_params in views_and_params:
+                            pred_v = self.model({modality: v})          # [B_u,1,H,W]
+                            for param in reversed(aug_params):
+                                bp = param.data['batch_prob'].bool().to(pred_v.device)
+                                if 'Horizontal' in param.name:
+                                    pred_v[bp] = pred_v[bp].flip(-1)
+                                elif 'Vertical' in param.name:
+                                    pred_v[bp] = pred_v[bp].flip(-2)
+                            avg_pred = pred_v if avg_pred is None else avg_pred + pred_v
+                        avg_pred = avg_pred / K
+                        q_views = []
+                        for _, aug_params in views_and_params:
+                            t = avg_pred.clone()
+                            for param in aug_params:
+                                bp = param.data['batch_prob'].bool().to(t.device)
+                                if 'Horizontal' in param.name:
+                                    t[bp] = t[bp].flip(-1)
+                                elif 'Vertical' in param.name:
+                                    t[bp] = t[bp].flip(-2)
+                            q_views.append(t)
+                        q = q_views
+                    elif segmentation:
                         # Average probs in original frame, then argmax → hard pseudo-labels.
                         # Re-apply each view's flip to the hard label map so image and
                         # pseudo-label are in the same (augmented) coordinate frame.
@@ -1175,13 +1286,37 @@ class Trainer:
 
                 self.model.train()
                 # --- Step 2: Build labeled targets; MixUp labeled batch ---
-                x_l_aug = weak_aug(x_l_tensor)
+                x_l_aug = _aug_temporal_safe(weak_aug, x_l_tensor)
 
-                if segmentation:
+                # weak_aug ran on a time-folded tensor for 5-D inputs, so its
+                # batch_prob has B*T entries while the label map has B rows.
+                # Every timestep of a sample shares one transform, so take every
+                # T-th flag to recover per-sample flips (same as the view loop).
+                _lp = weak_aug._params
+                if x_l_tensor.dim() == 5:
+                    _lp = copy.deepcopy(_lp)
+                    _Tl = x_l_tensor.shape[2]
+                    for _prm in _lp:
+                        if 'batch_prob' in _prm.data:
+                            _prm.data['batch_prob'] = _prm.data['batch_prob'][::_Tl]
+
+                if regression:
+                    # Dense regression: the target is a continuous map, not a class
+                    # index, so there is no one-hot to build. Flip it to match the
+                    # spatial augmentation applied to x_l_aug, as segmentation does.
+                    labels_aug = labels.clone().float()
+                    for param in _lp:
+                        bp = param.data['batch_prob'].bool().to(labels_aug.device)
+                        if 'Horizontal' in param.name:
+                            labels_aug[bp] = labels_aug[bp].flip(-1)
+                        elif 'Vertical' in param.name:
+                            labels_aug[bp] = labels_aug[bp].flip(-2)
+                    y_l = None
+                elif segmentation:
                     H, W = x_l_tensor.shape[2], x_l_tensor.shape[3]
                     # Flip integer label map to match x_l_aug.
                     labels_aug = labels.clone()
-                    for param in weak_aug._params:
+                    for param in _lp:
                         bp = param.data['batch_prob'].bool().to(labels_aug.device)
                         if 'Horizontal' in param.name:
                             labels_aug[bp] = labels_aug[bp].flip(-1)
@@ -1198,7 +1333,21 @@ class Trainer:
                 else:
                     y_l = F.one_hot(labels.long(), num_classes).float()  # [B_l, C]
 
-                if segmentation:
+                if regression:
+                    # --- Regression: no MixUp, no sharpening; MSE on both branches
+                    mean_lam = 1.0
+                    logits_lab = self.model({modality: x_l_aug})       # [B_l,1,H,W]
+                    tgt = labels_aug
+                    if logits_lab.dim() == 4 and tgt.dim() == 3:
+                        tgt = tgt.unsqueeze(1)
+                    _sc = getattr(tc, 'regression_loss_scale', 1.0) or 1.0
+                    sup_loss = F.mse_loss(logits_lab / _sc, tgt / _sc)
+                    unsup_loss = torch.tensor(0.0, device=self.device)
+                    for v, q_v in zip(views, q_views):
+                        pv = self.model({modality: v})
+                        unsup_loss = unsup_loss + F.mse_loss(pv / _sc, q_v / _sc)
+                    unsup_loss = unsup_loss / K
+                elif segmentation:
                     # --- Segmentation: NO input MixUp; unlabeled uses hard CE ---
                     #
                     # MixUp blends two images pixel-wise and blends their targets
@@ -1366,7 +1515,7 @@ class Trainer:
                 print(f"  Test  ({mod_upper}): Loss={test_loss:.4f}, {metric_name}={test_metric:.2f}%")
                 if val_metric is not None:
                     print(f"  Val   ({mod_upper}): Loss={val_loss:.4f}, {metric_name}={val_metric:.2f}%")
-                    if val_metric > best_val_metric:
+                    if (val_metric < best_val_metric) if _lower_is_better else (val_metric > best_val_metric):
                         print(f"    New val record: {val_metric:.2f} > {best_val_metric:.2f} — saving checkpoint")
                         best_val_metric = val_metric
                         best_val_test_metric = test_metric
@@ -1390,12 +1539,17 @@ def _compute_teacher_agreement(
     segmentation: bool = False,
     ignore_index: int = -100,
     student_pseudo_modalities=None,
+    regression: bool = False,
 ) -> float:
     """
     Compute fraction of val2 samples where student prediction matches teacher prediction.
     Used as val criterion for distillation checkpoint selection.
 
     student_modalities: tuple of modality names for the student (may be multimodal).
+
+    For regression there is no discrete label to match, so "agreement" is
+    reported as NEGATIVE RMSE between student and teacher outputs. That keeps the
+    higher-is-better convention used by checkpoint selection.
     """
     if isinstance(student_modalities, str):
         student_modalities = (student_modalities,)
@@ -1427,12 +1581,23 @@ def _compute_teacher_agreement(
                 valid = t_preds != ignore_index
                 agree += (s_preds == t_preds)[valid].sum().item()
                 total += valid.sum().item()
+            elif regression:
+                # No discrete label: argmax over a 1-channel map is always 0 and
+                # would report 100% agreement regardless of the predictions.
+                sp, tp = student_logits, teacher_logits
+                if sp.dim() == 4 and sp.shape[1] == 1: sp = sp.squeeze(1)
+                if tp.dim() == 4 and tp.shape[1] == 1: tp = tp.squeeze(1)
+                agree += ((sp - tp) ** 2).sum().item()   # squared-error accumulator
+                total += tp.numel()
             else:
                 s_preds = student_logits.argmax(dim=1)
                 t_preds = teacher_logits.argmax(dim=1)
                 agree += (s_preds == t_preds).sum().item()
                 total += s_preds.size(0)
 
+    if regression:
+        # Negative RMSE so that "higher is better" still holds.
+        return -((agree / max(1, total)) ** 0.5)
     return 100.0 * agree / max(1, total)
 
 
@@ -1785,7 +1950,7 @@ def compute_miou(preds: torch.Tensor, labels: torch.Tensor, num_classes: int, ig
 
 def distillation_loss(student_logits, teacher_logits, temperature=2.0,
                       ignore_index=None, labels=None, kl_type="kd",
-                      task_type="classification"):
+                      task_type="classification", regression_loss_scale=1.0):
     """
     Distillation loss between student and teacher logits.
 
@@ -1793,12 +1958,18 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0,
         'classification' — softmax KL divergence [B, C]
         'multilabel'     — per-class BCE against sigmoid teacher probs [B, C]
         'segmentation'   — softmax KL divergence on [B, C, H, W]; pass labels+ignore_index to mask void pixels
+        'regression'     — MSE between student and teacher predictions [B, 1, H, W].
+                           There is no distribution to soften, so temperature and
+                           kl_type do not apply. Mirrors shot.py's distillation_loss.
 
     kl_type choices (classification/segmentation only):
         'kd'   — standard KD (temperature-scaled softmax, multiplied by T²)
         'ttm'  — teacher-temp only (teacher scaled, student not)
         'wttm' — weighted TTM (weight by teacher confidence)
     """
+    if task_type == "regression":
+        sc = regression_loss_scale or 1.0
+        return F.mse_loss(student_logits / sc, teacher_logits / sc)
     if task_type == "segmentation" and student_logits.dim() == 4:
         C = student_logits.shape[1]
         student_logits = student_logits.permute(0, 2, 3, 1).reshape(-1, C)

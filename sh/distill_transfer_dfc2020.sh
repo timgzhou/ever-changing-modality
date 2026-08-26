@@ -28,6 +28,11 @@ LRS="${LRS:-0.0005 0.0001}"
 #   ttm — transformed teacher matching: teacher scaled, student NOT, no T^2
 KL_TYPES="${KL_TYPES:-kd ttm}"
 SUBMIT="${SUBMIT:-0}"
+# INIT_FROM_TEACHER=1 initialises the student from the teacher's backbone instead
+# of random init. Until now the teacher-init arm silently built a LINEAR head
+# (init_student_from_teacher did not forward --decoder_type), so "random beats
+# teacher init" was confounded with "upernet beats linear". Now matched.
+INIT_FROM_TEACHER="${INIT_FROM_TEACHER:-0}"
 TEACHERS_JSON="artifacts/sft_teachers.json"
 
 # teacher:new — the same six directions as the delulu runs
@@ -43,10 +48,12 @@ for P in ${PAIRS}; do
     for LR in ${LRS}; do
       for KL in ${KL_TYPES}; do
         TAG="distill_transfer_${KL}_${START}_to_${NEW}_lr${LR}"
+        [ "$INIT_FROM_TEACHER" = "1" ] && TAG="${TAG}_initteacher"
         ARGS="baseline/baseline_distillation.py --dataset dfc2020 --modalities ${NEW}"
         ARGS="${ARGS} --teacher_checkpoint ${TEACHER} --decoder_type ${DECODER} --model ${MODEL}"
         ARGS="${ARGS} --epochs ${EPOCHS} --lr ${LR} --kl_type ${KL}"
         ARGS="${ARGS} --results_csv res/baselines/dfc2020_cobench_distill_transfer_${DECODER}.csv"
+        [ "$INIT_FROM_TEACHER" = "1" ] && ARGS="${ARGS} --init_from_teacher"
         if [ "$SUBMIT" = "1" ]; then
             sbatch --export=ALL,BASELINE_ARGS="${ARGS}",RUN_TAG="${TAG}",DECODER="${DECODER}" \
                 sh/baselines_dfc2020_job.sh >/dev/null

@@ -604,6 +604,7 @@ def _run_periodic_eval(
     best_checkpoints, latent_projectors,
     use_mask_token=False, agree_ref='teacher',
     regression_scale=1.0, regression_mask_above=None,
+    minival_loader=None,
 ):
     """Run periodic eval, update checkpoints. Returns updated state."""
     if task_type == "regression":
@@ -682,6 +683,37 @@ def _run_periodic_eval(
         )['peeking_acc']
         val_metrics['peeking'] = peeking_acc
         print(f"  Val peeking {metric_label}: {peeking_acc:.2f}%")
+
+    # ---- labeled mini-val on val2 (optional) --------------------------------
+    # transfer_score / addition_score are proxies: peeking x agreement / 100.
+    # They rank well for transfer but poorly for addition -- measured over 96
+    # sweep trials, best-by-val addition lands at the 38-52nd percentile of
+    # trials, leaving 0.9-1.9 mIoU on the table, because agreement with the
+    # peeking path is not accuracy.
+    #
+    # A small LABELED slice of val2 scores the addition and transfer paths
+    # directly. It is deliberately tiny: too small to train on, but per-tile
+    # mIoU std on DFC2020 is ~27, so k must be large enough that the standard
+    # error (27/sqrt(k)) is below the trial-to-trial spread of a few mIoU --
+    # k=10 gives SE 8.5 (too noisy), k=50 gives 3.8, k=100 gives 2.7.
+    if minival_loader is not None:
+        mv = evaluate_multimodal(
+            model=model, loader=minival_loader, device=device,
+            modality_bands_dict=modality_bands_dict,
+            starting_modality=starting_modality,
+            newmod_modalities=newmod_list,
+            all_modalities=all_modalities,
+            with_labels=True, task_type=task_type, label_key=label_key,
+            num_classes=num_classes, ignore_index=ignore_index,
+            use_mask_token=use_mask_token,
+            regression_scale=regression_scale, regression_mask_above=regression_mask_above,
+        )
+        val_metrics['minival_addition'] = mv['addition_acc']
+        val_metrics['minival_transfer'] = mv['transfer_acc']
+        val_metrics['minival_peeking'] = mv['peeking_acc']
+        print(f"  Val mini-val (labeled, n={len(minival_loader.dataset)}): "
+              f"addition {mv['addition_acc']:.2f} · transfer {mv['transfer_acc']:.2f} "
+              f"· peeking {mv['peeking_acc']:.2f}")
 
     if agree_ref == 'peeking':
         # The peeking * agreement / 100 composition assumes agreement is a [0,100]
