@@ -1,0 +1,9 @@
+model_type,modality,train_mode,learning_rate,weight_decay,trainable_params,epochs,K,temperature,alpha,lambda_u,mixmatch_warmup_epochs,metric_name,test_metric,best_val_metric,best_val_test_metric,saved_checkpoint,global_rep,use_dino_weights
+evan_base,s1,fft,0.0001,0.0001,125204481,64,2,0.5,0.75,1.0,4,RMSE,57.59,56.06,57.31,checkpoints/evan_mixmatch_biomassters_s1_20260826_121524.pt,clstoken,True
+evan_base,s1,fft,0.0001,0.0001,125204481,64,2,0.5,0.75,0.5,4,RMSE,56.43,54.94,56.43,checkpoints/evan_mixmatch_biomassters_s1_20260826_121524.pt,clstoken,True
+evan_base,s1,fft,0.0005,0.0001,125204481,64,2,0.5,0.75,0.5,4,RMSE,59.04,57.60,58.90,checkpoints/evan_mixmatch_biomassters_s1_20260826_121500.pt,clstoken,True
+evan_base,s1,fft,0.0005,0.0001,125204481,64,2,0.5,0.75,1.0,4,RMSE,58.34,56.96,58.29,checkpoints/evan_mixmatch_biomassters_s1_20260826_121501.pt,clstoken,True
+evan_base,s2,fft,0.0001,0.0001,126384129,64,2,0.5,0.75,1.0,4,RMSE,61.42,58.05,58.90,checkpoints/evan_mixmatch_biomassters_s2_20260826_121444.pt,clstoken,True
+evan_base,s2,fft,0.0001,0.0001,126384129,64,2,0.5,0.75,0.5,4,RMSE,59.83,56.15,56.92,checkpoints/evan_mixmatch_biomassters_s2_20260826_121444.pt,clstoken,True
+evan_base,s2,fft,0.0005,0.0001,126384129,64,2,0.5,0.75,1.0,4,RMSE,60.05,56.82,57.77,checkpoints/evan_mixmatch_biomassters_s2_20260826_121444.pt,clstoken,True
+evan_base,s2,fft,0.0005,0.0001,126384129,64,2,0.5,0.75,0.5,4,RMSE,57.76,55.72,56.58,checkpoints/evan_mixmatch_biomassters_s2_20260826_121403.pt,clstoken,True

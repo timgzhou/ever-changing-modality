@@ -14,7 +14,6 @@ from datetime import datetime
 import wandb
 import csv
 from tqdm import tqdm
-
 from delulunet_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
 from train_utils import _compute_map, compute_miou, evaluate

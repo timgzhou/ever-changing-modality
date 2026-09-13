@@ -24,9 +24,9 @@ mkdir -p logs/shot_ete_dfc2020 checkpoints res/delulu
 # SHOT hyperparameters from the biomassters s1->s2 best config (untuned here).
 LR="${LR:-0.0001569391767106977}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-3.351617951860976e-05}"
-MODALITY_DROPOUT="0.3"
-MODALITY_DROPOUT_STARTMOD="0.33189226742900324"
-MODALITY_DROPOUT_NEWMOD="0.17068517311514753"
+MODALITY_DROPOUT="${MODALITY_DROPOUT:-0.3}"
+MODALITY_DROPOUT_STARTMOD="${MODALITY_DROPOUT_STARTMOD:-0.33189226742900324}"
+MODALITY_DROPOUT_NEWMOD="${MODALITY_DROPOUT_NEWMOD:-0.17068517311514753}"
 LABELED_FREQUENCY="0.23002477810989655"
 LABELED_START_FRACTION="0"
 # NOTE: the latent loss was inflated by embed_dim (768) until 2026-08-20 --
@@ -37,7 +37,7 @@ LABELED_START_FRACTION="0"
 LAMBDA_LATENT="${LAMBDA_LATENT:-0.3613664751387723}"
 LAMBDA_PREFUSION="0.6430194633931678"
 LAMBDA_DISTILL="0.15374988356364516"
-TOKEN_MASK_RATIO="0.40414477259411485"
+TOKEN_MASK_RATIO="${TOKEN_MASK_RATIO:-0.40414477259411485}"
 PROTECT_LRM="0.0"
 SEED="${SEED:-0}"
 # teacher (default) | random. NOTE: the distillation baseline's apparent
@@ -65,12 +65,16 @@ ACTIVE_LOSSES="${ACTIVE_LOSSES:-latent prefusion distill ce}"
 if [ "${DISTILL_ONLY:-0}" = "1" ]; then
     ACTIVE_LOSSES="distill"
     LABELED_FREQUENCY="0"        # no labeled batch mixing -> no CE path at all
-    LAMBDA_DISTILL="1.0"
+    LAMBDA_DISTILL="${LAMBDA_DISTILL_OVERRIDE:-1.0}"
     # modality_dropout / token_mask_ratio intentionally left at their defaults
+    # (they are ${VAR:-default} above, so a sweep can still override them)
 fi
 
 RUN_TAG="${START}_to_${NEW}_${DECODER}_ll${LAMBDA_LATENT}_init${STUDENT_INIT}_seed${SEED}"
 [ "${DISTILL_ONLY:-0}" = "1" ] && RUN_TAG="${START}_to_${NEW}_${DECODER}_distillonly_init${STUDENT_INIT}_seed${SEED}"
+# A sweep sets TRIAL_TAG so each trial gets its own checkpoint + CSV row.
+# Without it every trial writes the SAME checkpoint path and clobbers the others.
+[ -n "${TRIAL_TAG:-}" ] && RUN_TAG="${RUN_TAG}_${TRIAL_TAG}"
 
 echo "=== shot_ete | dfc2020 (cobench) ${START} -> +${NEW} | decoder=${DECODER} ==="
 echo "    teacher: ${TEACHER}"
@@ -103,5 +107,5 @@ python -u shot_ete.py \
     --save_checkpoint \
     --checkpoint_dir checkpoints \
     --checkpoint_name "delulunet_dfc2020_${RUN_TAG}" \
-    --results_csv "res/delulu/dfc2020_cobench_${DECODER}.csv" \
+    --results_csv "${RESULTS_CSV:-res/delulu/dfc2020_cobench_${DECODER}.csv}" \
     --wandb_project "delulu-dfc2020-cobench"
