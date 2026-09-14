@@ -21,6 +21,13 @@
 # Usage:  bash sh/train_delulu_crossconfig.sh
 #         DRYRUN=1 bash sh/train_delulu_crossconfig.sh
 #         DATASETS="dfc2020" bash sh/train_delulu_crossconfig.sh
+#         WALLTIME=23:59:00 DATASETS=biomassters bash sh/train_delulu_crossconfig.sh
+#
+# WALLTIME overrides the job script's #SBATCH --time. biomassters measured
+# 9.4-10.9 min/epoch in practice (not the 9.9 projected), so 64 epochs lands at
+# 10.0-11.6h against an 11:59 limit. A job killed at the wall writes NO results
+# row -- train_delulu.py appends only after the final epoch -- so a retry should
+# use WALLTIME=23:59:00.
 set -uo pipefail
 
 TEACHERS_JSON="artifacts/sft_teachers.json"
@@ -69,7 +76,9 @@ for DATASET in ${DATASETS}; do
                 if [ "${DRYRUN:-0}" = "1" ]; then
                     echo "[$n] ${DATASET} ${START}->+${NEW}  cfg=${FAM}/${SEL}"
                 else
-                    jid=$(sbatch --parsable --export="${EX}" sh/train_delulu_job.sh)
+                    TIME_ARG=""
+                    [ -n "${WALLTIME:-}" ] && TIME_ARG="--time=${WALLTIME}"
+                    jid=$(sbatch --parsable ${TIME_ARG} --export="${EX}" sh/train_delulu_job.sh)
                     printf '%s\t%s\n' "${jid}" "${TAG}" >> "${LEDGER}"
                     echo "[$n] ${jid}  ${DATASET} ${START}->+${NEW}  cfg=${FAM}/${SEL}"
                 fi
