@@ -1,0 +1,174 @@
+{
+  "dfc2020_s1_to_s2norgb": {
+    "n_trials": 128,
+    "teacher_test": "49.05",
+    "weight_decay_pinned": "2e-4",
+    "epochs": "128",
+    "batch_size": null,
+    "transfer": {
+      "hparams": {
+        "lr": "0.00040501517730354863",
+        "lambda_latent": "4.961765007115481",
+        "lambda_prefusion": "0.13275370738804138",
+        "lambda_distill": "0.8369287246181186",
+        "modality_dropout_startmod": "0.32321866905787167",
+        "modality_dropout_newmod": "0.2443850117203585",
+        "labeled_frequency": "0.06082127813301613",
+        "mae_mask_ratio": "0.6448170007324399"
+      },
+      "val": 85.19,
+      "test": 50.45,
+      "wandb_run_id": "8ebt1o4e",
+      "test_all": {
+        "transfer": 50.45,
+        "peeking": 48.1,
+        "addition": 51.9
+      }
+    },
+    "peeking": {
+      "hparams": {
+        "lr": "2.772299470566019e-05",
+        "lambda_latent": "0.513624371369526",
+        "lambda_prefusion": "0.6964960626741188",
+        "lambda_distill": "0.23428736523557417",
+        "modality_dropout_startmod": "0.10431748058147255",
+        "modality_dropout_newmod": "0.44645466915571386",
+        "labeled_frequency": "0.08458629625101954",
+        "mae_mask_ratio": "0.5441254268098721"
+      },
+      "val": 49.26,
+      "test": 49.62,
+      "wandb_run_id": "mp60sbsv",
+      "test_all": {
+        "transfer": 45.99,
+        "peeking": 49.62,
+        "addition": 48.85
+      }
+    },
+    "addition": {
+      "hparams": {
+        "lr": "9.773872199975506e-05",
+        "lambda_latent": "2.1365588372995683",
+        "lambda_prefusion": "0.9688211858670964",
+        "lambda_distill": "0.7330845202244791",
+        "modality_dropout_startmod": "0.12005781600667144",
+        "modality_dropout_newmod": "0.4563441859183578",
+        "labeled_frequency": "0.06029760750515353",
+        "mae_mask_ratio": "0.5652296073666779"
+      },
+      "val": 91.48,
+      "test": 50.75,
+      "wandb_run_id": "k4cfwtng",
+      "test_all": {
+        "transfer": 50.3,
+        "peeking": 48.32,
+        "addition": 50.75
+      }
+    },
+    "balanced": {
+      "hparams": {
+        "lr": "0.0002910710477795832",
+        "lambda_latent": "4.152114011905626",
+        "lambda_prefusion": "0.17640830215915726",
+        "lambda_distill": "0.6253797250386903",
+        "modality_dropout_startmod": "0.4735746773635642",
+        "modality_dropout_newmod": "0.4719776580902562",
+        "labeled_frequency": "0.10007460541448844",
+        "mae_mask_ratio": "0.44612984698661584"
+      },
+      "wandb_run_id": "dsd0v01i",
+      "test_all": {
+        "transfer": 50.58,
+        "peeking": 49.04,
+        "addition": 51.88
+      },
+      "note": "highest mean rank across the three val objectives"
+    }
+  },
+  "benv2_s2rgb_to_s2norgb": {
+    "n_trials": 114,
+    "teacher_test": "63.43",
+    "weight_decay_pinned": "2e-4",
+    "epochs": "64",
+    "batch_size": null,
+    "transfer": {
+      "hparams": {
+        "lr": "0.0005217872680432315",
+        "lambda_latent": "2.207825784745205",
+        "lambda_prefusion": "0.2334707840238891",
+        "lambda_distill": "0.7029482002970043",
+        "modality_dropout_startmod": "0.4962593964366522",
+        "modality_dropout_newmod": "0.17473438663869603",
+        "labeled_frequency": "0.12547452812704218",
+        "mae_mask_ratio": "0.7390832696189394"
+      },
+      "val": 79.05,
+      "test": 62.15,
+      "wandb_run_id": "e1djlaa0",
+      "test_all": {
+        "transfer": 62.15,
+        "peeking": 62.59,
+        "addition": 63.79
+      }
+    },
+    "peeking": {
+      "hparams": {
+        "lr": "0.0003860399742021293",
+        "lambda_latent": "3.5466283896993387",
+        "lambda_prefusion": "0.1084318963041062",
+        "lambda_distill": "0.149070948559887",
+        "modality_dropout_startmod": "0.30845712778638923",
+        "modality_dropout_newmod": "0.4420113792072863",
+        "labeled_frequency": "0.08658832965970353",
+        "mae_mask_ratio": "0.19819195164073455"
+      },
+      "val": 71.22,
+      "test": 64.9,
+      "wandb_run_id": "gr3dy0u8",
+      "test_all": {
+        "transfer": 62.86,
+        "peeking": 64.9,
+        "addition": 65.25
+      }
+    },
+    "addition": {
+      "hparams": {
+        "lr": "1.063786533294883e-05",
+        "lambda_latent": "4.965477702593613",
+        "lambda_prefusion": "0.977788371387982",
+        "lambda_distill": "0.9790024746877884",
+        "modality_dropout_startmod": "0.19204151411631665",
+        "modality_dropout_newmod": "0.2962762513283972",
+        "labeled_frequency": "0.13716154562150765",
+        "mae_mask_ratio": "0.42219102378847606"
+      },
+      "val": 84.3,
+      "test": 63.94,
+      "wandb_run_id": "skc9yzb6",
+      "test_all": {
+        "transfer": 53.85,
+        "peeking": 63.89,
+        "addition": 63.94
+      }
+    },
+    "balanced": {
+      "hparams": {
+        "lr": "0.0002491014399598437",
+        "lambda_latent": "3.817214982242079",
+        "lambda_prefusion": "0.2573036700557009",
+        "lambda_distill": "0.6735744500812484",
+        "modality_dropout_startmod": "0.26650153427706513",
+        "modality_dropout_newmod": "0.3726207412498378",
+        "labeled_frequency": "0.08738207774508344",
+        "mae_mask_ratio": "0.4129356443531873"
+      },
+      "wandb_run_id": "vsuj23y5",
+      "test_all": {
+        "transfer": 62.58,
+        "peeking": 64.91,
+        "addition": 64.77
+      },
+      "note": "highest mean rank across the three val objectives"
+    }
+  }
+}
