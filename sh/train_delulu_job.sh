@@ -97,6 +97,11 @@ SAVE_CKPT_FLAG="--save_checkpoint"
 if [ "${SAVE_CHECKPOINT:-1}" = "0" ]; then
     SAVE_CKPT_FLAG=""
 fi
+# Provenance columns: which tuned config produced this row. Without these every
+# cross-config row looks identical apart from its hyperparameters.
+PROV_ARGS=""
+[ -n "${CONFIG_LABEL:-}" ] && PROV_ARGS="${PROV_ARGS} --config_label ${CONFIG_LABEL}"
+[ -n "${SELECT_BY:-}" ]    && PROV_ARGS="${PROV_ARGS} --select_by ${SELECT_BY}"
 EPOCHS="${EPOCHS:-64}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 RESULTS_CSV="${RESULTS_CSV:-res/delulu/${DATASET}_unimodal_pairs.csv}"
@@ -135,6 +140,7 @@ python -u train_delulu.py \
     --protect_lrm "${PROTECT_LRM}" \
     --latent_masked_only \
     ${SELF_DISTILL_FLAG} \
+    ${PROV_ARGS} \
     --student_init "${STUDENT_INIT}" \
     --seed "${SEED}" \
     ${SAVE_CKPT_FLAG} \
