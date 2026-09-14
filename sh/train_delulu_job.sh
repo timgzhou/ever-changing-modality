@@ -20,6 +20,10 @@
 #                             Values loaded this way are overridden by any
 #                             matching env var already set, so a launcher can
 #                             still pin one parameter explicitly.
+#   PROJ_LAYERS=<n>           depth of the cross-modal (masking) projector:
+#                             (n-1) self-attention blocks + 1 cross-attention
+#                             block. Default 2. Not a results-CSV column, so
+#                             encode it in CONFIG_LABEL when sweeping depth.
 #   SAVE_CHECKPOINT=0         skip writing the final .pt (scratch is quota-bound;
 #                             ablations that only need the metrics should set this)
 #   SELF_DISTILL_ADDITION=1   opt-in: distil the new-modality heads against the
@@ -101,6 +105,7 @@ fi
 # cross-config row looks identical apart from its hyperparameters.
 PROV_ARGS=""
 [ -n "${CONFIG_LABEL:-}" ] && PROV_ARGS="${PROV_ARGS} --config_label ${CONFIG_LABEL}"
+[ -n "${PROJ_LAYERS:-}" ] && PROV_ARGS="${PROV_ARGS} --intermediate_projector_num_layers ${PROJ_LAYERS}"
 [ -n "${SELECT_BY:-}" ]    && PROV_ARGS="${PROV_ARGS} --select_by ${SELECT_BY}"
 EPOCHS="${EPOCHS:-64}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
