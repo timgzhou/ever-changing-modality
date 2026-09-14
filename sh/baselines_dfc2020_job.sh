@@ -15,7 +15,6 @@ source sh/env.sh
 export TQDM_DISABLE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Must match the split the teachers were trained on.
-export DFC2020_SPLIT=cobench
 
 mkdir -p logs/baselines_dfc2020 res/baselines checkpoints
 

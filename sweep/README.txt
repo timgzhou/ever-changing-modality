@@ -1,4 +1,4 @@
-Final BEN-v2 SHOT Sweep
+Final BEN-v2 Delulu Sweep
 =======================
 
 4 configs × 2 directions (s2→s1, s1→s2) = 8 sweeps × 32 runs = 256 jobs total.
@@ -40,7 +40,7 @@ Output
 Files
 -----
   create_sweep_final.py         register sweeps
-  sweep_shot.py                 W&B agent runner (one trial per job)
+  sweep_delulu.py                 W&B agent runner (one trial per job)
   run_sweep.sh                  SBATCH wrapper (l40s, 8 CPUs, 64 GB, 3h)
   sweep_yaml/base.yaml          shared lr + weight_decay ranges
   sweep_yaml/sweep_benv2_final.yaml  continuous HP space + command template

@@ -9,7 +9,7 @@ from datetime import datetime
 import wandb
 import csv
 
-from delulunet_main import evan_small, evan_base, evan_large, evan_small_s2, BENV2_BAND_INDICES, PASTIS_BAND_INDICES, EVANClassifier, EvanSegmenter
+from delulunet_main import evan_small, evan_base, evan_large, evan_small_s2, BENV2_BAND_INDICES, EVANClassifier, EvanSegmenter
 from train_utils import (single_modality_training_loop, make_weak_augmentation,
                          make_strong_augmentation)
 
@@ -17,10 +17,8 @@ logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(mes
 
 EUROSAT_MODALITIES    = ['rgb', 'vre', 'nir', 'swir', 'aw', 's2']
 BENV2_MODALITIES      = ['s2', 's1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
-BENV2FULL_MODALITIES  = ['s2', 's1', 's2_rgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
-PASTIS_MODALITIES     = ['s2', 's1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir']
 DFC2020_MODALITIES    = ['s2', 's1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw']
-BIOMASSTERS_MODALITIES = ['s2', 's1', 's2_rgb']
+BIOMASSTERS_MODALITIES = ['s2', 's1', 's2_rgb', 's2_norgb']
 
 
 def get_task_config_and_loaders(dataset, modalities, batch_size, num_workers, data_normalizer=None, num_time_steps=10, data_root=None):
@@ -75,7 +73,7 @@ def _n_chans(entry) -> int:
 def main():
     parser = argparse.ArgumentParser(description='Train EVAN on a single modality (using train1 split)')
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=['eurosat', 'benv2', 'benv2full', 'pastis', 'dfc2020', 'biomassters'],
+                        choices=['eurosat', 'benv2', 'dfc2020', 'biomassters'],
                         help='Dataset to train on')
     parser.add_argument('--modalities', type=str, nargs='+', required=True,
                         help='Modalities to train on (first is primary). '
@@ -93,10 +91,6 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--tz_fusion_time', type=int, default=3,
                         help='n modality-independent layers before fusion')
-    parser.add_argument('--tz_lora_rank', type=int, default=32,
-                        help='rank of lora adaptors')
-    parser.add_argument('--tz_modality_specific_layer_augmenter', type=str, default='fft',
-                        choices=['fft'])
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--wandb_project', type=str, default=None)
     parser.add_argument('--global_rep', type=str, default='clstoken', choices=['clstoken', 'mean_patch'])
@@ -114,7 +108,7 @@ def main():
                         help='Clamp regression output at 0 with ReLU (as PANGAEA RegUPerNet does). '
                              'Valid for non-negative targets such as raw AGB in t/ha.')
     parser.add_argument('--num_time_steps', type=int, default=12,
-                        help='Number of timestamps to sample per PASTIS image before temporal aggregation.')
+                        help='Number of timestamps to load per BioMassters image before temporal mean-pooling.')
     parser.add_argument('--val_per_epoch', type=int, default=1,
                         help='Run validation every N epochs (and always on the last epoch).')
     parser.add_argument('--warmup_epochs', type=int, default=3,
@@ -145,8 +139,6 @@ def main():
     valid_modalities = {
         'eurosat':   EUROSAT_MODALITIES,
         'benv2':     BENV2_MODALITIES,
-        'benv2full': BENV2FULL_MODALITIES,
-        'pastis':    PASTIS_MODALITIES,
         'dfc2020':   DFC2020_MODALITIES,
         'biomassters': BIOMASSTERS_MODALITIES,
     }[args.dataset]
@@ -186,8 +178,6 @@ def main():
     all_n_chans = [_n_chans(modality_bands_dict[m]) for m in args.modalities]
     common_kwargs = dict(
         tz_fusion_time=args.tz_fusion_time,
-        tz_lora_rank=args.tz_lora_rank,
-        tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
         n_storage_tokens=4,
         starting_modality=args.modalities,
         starting_n_chans=all_n_chans,
@@ -202,7 +192,7 @@ def main():
         if args.dataset == 'eurosat':
             parser.error('--use_s2dino_weights is not compatible with --dataset eurosat')
         from torchgeo.models import ViTSmall16_Weights
-        band_indices = {'benv2': BENV2_BAND_INDICES, 'pastis': PASTIS_BAND_INDICES}.get(args.dataset)
+        band_indices = {'benv2': BENV2_BAND_INDICES}.get(args.dataset)
         evan = evan_small_s2(
             weights=ViTSmall16_Weights.SENTINEL2_ALL_DINO,
             band_indices=band_indices,
@@ -213,13 +203,10 @@ def main():
         # copied into the correct channels of the s2 patch embedder.
         # EuroSAT s2 (13ch): B04=3, B03=2, B02=1
         # BEN-v2  s2 (12ch): same positions (B10 dropped at idx10, doesn't shift rgb)
-        # PASTIS  s2 (10ch): B04=2, B03=1, B02=0 (B01/B09/B10 removed)
         _S2_RGB_INDICES = {
             'eurosat':   [3, 2, 1],
             'benv2':     [3, 2, 1],
-            'benv2full': [3, 2, 1],
             'dfc2020':   [3, 2, 1],
-            'pastis':    [2, 1, 0],
             # BioMassters s2 order B02,B03,B04,...: B04=2, B03=1, B02=0
             'biomassters': [2, 1, 0],
         }
@@ -374,7 +361,7 @@ def main():
         train_aug=train_aug,
     )
 
-    # Patch normalization into checkpoint config so shot_ete.py can read it back
+    # Patch normalization into checkpoint config so train_delulu.py can read it back
     if not args.skipsave:
         ckpt = torch.load(checkpoint_path, map_location='cpu')
         ckpt['config']['normalization'] = normalization
@@ -386,20 +373,15 @@ def main():
     if best_val_metric is not None:
         print(f"  Best val {metric_name}: {best_val_metric:.2f}% — checkpoint: {checkpoint_path}")
 
-    # CSV logging. DFC2020 has two incompatible split definitions (ROI-disjoint
-    # 10-class vs Copernicus-Bench 8-class); their rows must never share a file,
-    # since the launcher's dedup would treat one as satisfying the other.
-    _suffix = ""
-    if args.dataset == "dfc2020":
-        _sp = os.environ.get("DFC2020_SPLIT", "roi").lower()
-        if _sp != "roi":
-            _suffix = f"_{_sp}"
+    # CSV logging. DFC2020 rows keep the historical "_cobench" filename: the
+    # removed ROI-disjoint split wrote res/train_sft/dfc2020.csv with a 10-class
+    # head, and the two must never share a file.
+    _suffix = "_cobench" if args.dataset == "dfc2020" else ""
     filename = f"res/train_sft/{args.dataset}{_suffix}.csv"
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "dataset", "model_type", "modality", "train_mode",
-        "tz_lora_rank", "tz_modality_specific_layer_augmenter",
         "learning_rate", "weight_decay", "trainable_params", "epoch",
         "test_metric", "val_metric", "metric_name", "saved_checkpoint", "global_rep",
         "dino_init", "num_time_steps", "decoder", "train_aug", "train_split",
@@ -412,7 +394,6 @@ def main():
             writer.writerow(fieldnames)
         writer.writerow([
             args.dataset, args.model, '+'.join(args.modalities), args.train_mode,
-            args.tz_lora_rank, args.tz_modality_specific_layer_augmenter,
             args.lr, args.weight_decay, trainable_params, args.epochs,
             f"{best_val_test_metric:.2f}" if best_val_test_metric is not None else "",
             f"{best_val_metric:.2f}" if best_val_metric is not None else "",

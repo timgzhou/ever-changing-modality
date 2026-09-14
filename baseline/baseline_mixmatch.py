@@ -21,14 +21,13 @@ import csv
 from tqdm import tqdm
 import kornia.augmentation as K
 
-from delulunet_main import evan_small, evan_base, evan_large, evan_small_s2, BENV2_BAND_INDICES, PASTIS_BAND_INDICES, EVANClassifier, EvanSegmenter
+from delulunet_main import evan_small, evan_base, evan_large, evan_small_s2, BENV2_BAND_INDICES, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
 from train_utils import evaluate
 
 VALID_MODALITIES = {
     'eurosat': ['rgb', 'vre', 'nir', 'swir'],
     'benv2':   ['s1', 's2', 's2_rgb'],
-    'pastis':  ['s1', 's2', 'rgb'],
     'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
     'biomassters': ['s1', 's2'],
 }
@@ -75,7 +74,7 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
 def main():
     parser = argparse.ArgumentParser(description='MixMatch Semi-Supervised Baseline')
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020', 'biomassters'])
+                        choices=['eurosat', 'benv2', 'dfc2020', 'biomassters'])
     parser.add_argument('--modality', type=str, required=True,
                         help='Modality to train on (single modality)')
     parser.add_argument('--model', type=str, default='evan_base',
@@ -88,11 +87,8 @@ def main():
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--num_time_steps', type=int, default=10,
-                        help='Timestamps per PASTIS image (default: 10)')
+                        help='Timestamps per BioMassters image (default: 10)')
     parser.add_argument('--tz_fusion_time', type=int, default=3)
-    parser.add_argument('--tz_lora_rank', type=int, default=0)
-    parser.add_argument('--tz_modality_specific_layer_augmenter', type=str, default='fft',
-                        choices=['fft'])
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--wandb_project', type=str, default='mixmatch')
     parser.add_argument('--global_rep', type=str, default='clstoken',
@@ -165,8 +161,6 @@ def main():
     print("\n=== Creating EVAN model ===")
     common_kwargs = dict(
         tz_fusion_time=args.tz_fusion_time,
-        tz_lora_rank=args.tz_lora_rank,
-        tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
         n_storage_tokens=4,
         starting_modality=args.modality,
         starting_n_chans=num_chans,
@@ -179,7 +173,6 @@ def main():
         'eurosat': [3, 2, 1],   # B04, B03, B02 at indices 3, 2, 1
         'benv2':   [3, 2, 1],
         'dfc2020': [3, 2, 1],
-        'pastis':  [2, 1, 0],   # B04, B03, B02 at indices 2, 1, 0 (B01/B09/B10 removed)
     }
     rgb_in_s2_indices = (
         _S2_RGB_INDICES.get(args.dataset)
@@ -215,7 +208,7 @@ def main():
         print("Mode=fft: training full backbone layers + head.")
     elif args.train_mode == 'adaptor':
         model.set_requires_grad(args.modality, patch_embedders=True, clsreg=True,
-                                msla=True, mfla=True, head=True)
+                                msla=True, head=True)
         print("Mode=adaptor: training embedder, adaptors and head.")
     elif args.train_mode == 'probe':
         model.set_requires_grad('all', head=True)

@@ -9,7 +9,7 @@
 #SBATCH --mem=64G
 
 # End-to-end: train an S2 ViT-base (EVAN-base) on BioMassters via SFT,
-# then SHOT-adapt it to take S1 input.
+# then Delulu-adapt it to take S1 input.
 #
 # Usage:  sbatch sh/biomassters_s2_to_s1.sh
 #
@@ -17,7 +17,7 @@
 #   MODEL          (default evan_base)
 #   LR / WD        stage-0 SFT lr / weight decay (default 0.0005 / 0.01)
 #   NUM_TIME_STEPS temporal pooling window, <=12 (default 12)
-#   SELECT_BY      SHOT hparam bucket in the sweep json (default addition)
+#   SELECT_BY      Delulu hparam bucket in the sweep json (default addition)
 
 set -euo pipefail
 
@@ -64,8 +64,8 @@ fi
 echo "=== [stage 0] done — teacher: ${TEACHER} ==="
 
 # =========================================================================
-# Stage 1 — SHOT-adapt the S2 teacher to S1 input (shot_ete)
-# Hparams pulled from the tuned sweep json (same source as shot_ete_sweep_job.sh)
+# Stage 1 — Delulu-adapt the S2 teacher to S1 input (train_delulu)
+# Hparams pulled from the tuned sweep json (same source as train_delulu_sweep_job.sh)
 # =========================================================================
 SWEEP_JSON="res/delulu-sweep/best_masking.json"
 RESULTS_CSV="res/delulu/biomassters_s2_to_s1.csv"
@@ -102,10 +102,10 @@ UNPROTECT_FLAG=""
 
 WANDB_PROJECT="delulu-${DATASET}-${STARTING_MOD}-${NEW_MOD}"
 
-echo "=== [stage 1] SHOT ${DATASET} | ${MODEL} | ${STARTING_MOD} -> ${NEW_MOD} | select_by=${SELECT_BY} ==="
+echo "=== [stage 1] Delulu ${DATASET} | ${MODEL} | ${STARTING_MOD} -> ${NEW_MOD} | select_by=${SELECT_BY} ==="
 echo "    lr=${S_LR} wd=${S_WD} epochs=${S_EPOCHS} md=${MD} lf=${LF} ls=${LS}"
 
-python -u shot_ete.py \
+python -u train_delulu.py \
     --dataset "${DATASET}" \
     --new_mod_group "${NEW_MOD}" \
     --stage0_checkpoint "${TEACHER}" \

@@ -1,5 +1,5 @@
 """
-Register W&B sweeps for BioMassters SHOT: 2 modality directions (s2->s1, s1->s2).
+Register W&B sweeps for BioMassters Delulu: 2 modality directions (s2->s1, s1->s2).
 
 Each sweep fixes the discrete config and searches the continuous HP space in
 sweep_yaml/sweep_biomassters.yaml (+ base.yaml). Mirrors create_sweep_final.py

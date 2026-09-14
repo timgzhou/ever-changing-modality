@@ -271,7 +271,7 @@ print(f'Saved to {out2}')
 
 # ---------------------------------------------------------------------------
 # Best hyperparams — write artifacts/sweep_best.json
-# Select best delulu run per eval type by val score; output shot_ete.py args.
+# Select best delulu run per eval type by val score; output train_delulu.py args.
 # ---------------------------------------------------------------------------
 
 import json

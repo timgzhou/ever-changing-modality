@@ -9,8 +9,11 @@ import pandas as pd
 csvs = {
     "eurosat": "res/train_sft/eurosat.csv",
     "benv2":   "res/train_sft/benv2.csv",
-    "dfc2020": "res/train_sft/dfc2020.csv",
+    # dfc2020.csv is the removed ROI-disjoint split (loader deleted 2026-09-13);
+    # its rows are kept on disk as a record but are no longer reproducible, so it
+    # is not registered as a teacher source.
     "dfc2020_cobench": "res/train_sft/dfc2020_cobench.csv",
+    "biomassters": "res/train_sft/biomassters.csv",
 }
 
 frames = []
@@ -30,7 +33,7 @@ df = pd.concat(frames, ignore_index=True)
 
 # decoder is part of the identity: an upernet teacher and a linear teacher are
 # different models and are not interchangeable (different head, ~10 mIoU apart).
-# train_split is part of the identity. Stage-1 methods (shot_ete, distillation,
+# train_split is part of the identity. Stage-1 methods (train_delulu, distillation,
 # MKE) use train2 as their UNLABELED pool, so a `full` teacher -- supervised on
 # train1+train2 -- has already seen that pool with labels and leaks. Those
 # methods must take a split1 teacher; `full` is only valid for the supervised

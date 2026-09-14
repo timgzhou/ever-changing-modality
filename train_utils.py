@@ -233,7 +233,7 @@ class Trainer:
     """
     Thin state container for training. Holds model, optimizer, device, and
     task-level config. Provides concrete training methods for the four training
-    modes: supervised, distillation, LP (linear probe), and future semi-supervised/SHOT.
+    modes: supervised, distillation, LP (linear probe), and future semi-supervised/Delulu.
 
     The old standalone functions (single_modality_training_loop,
     distillation_training_loop, train_classifier_with_frozen_backbone) remain
@@ -1528,7 +1528,7 @@ class Trainer:
 
         return train_metric, test_metric, best_val_metric, best_val_test_metric
 
-    def train_shot(self, *args, **kwargs):
+    def train_delulu_model(self, *args, **kwargs):
         raise NotImplementedError
 
 
@@ -1709,9 +1709,9 @@ def evaluate(model, dataloader, criterion, device, modality_bands_dict,
         intermediate_projectors: Required if pseudo_modalities is provided
         multilabel: If True, report mAP instead of top-1 accuracy (for BEN-v2 etc.)
         label_key: Key for labels in batch dict ('label' or 'mask')
-        segmentation: If True, compute mIoU over [B,H,W] predictions (for PASTIS etc.)
+        segmentation: If True, compute mIoU over [B,H,W] predictions (for DFC2020 etc.)
         num_classes: Required when segmentation=True.
-        ignore_index: Label value excluded from mIoU (e.g. 19 for PASTIS void_label).
+        ignore_index: Label value excluded from mIoU (e.g. 255 for DFC2020).
     """
     model.eval()
     if intermediate_projectors is not None:
@@ -1960,7 +1960,7 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0,
         'segmentation'   — softmax KL divergence on [B, C, H, W]; pass labels+ignore_index to mask void pixels
         'regression'     — MSE between student and teacher predictions [B, 1, H, W].
                            There is no distribution to soften, so temperature and
-                           kl_type do not apply. Mirrors shot.py's distillation_loss.
+                           kl_type do not apply. Mirrors delulu.py's distillation_loss.
 
     kl_type choices (classification/segmentation only):
         'kd'   — standard KD (temperature-scaled softmax, multiplied by T²)

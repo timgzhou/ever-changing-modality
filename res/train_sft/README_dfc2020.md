@@ -13,27 +13,38 @@ half-downloaded (4617 metadata rows, 2308 files on disk).
 Everything from that era was **deleted on 2026-08-20**: the results CSV, the
 31 checkpoints (8-class heads, Aug-12 timestamps), `dfc2020_data_utils.py`,
 `old_code_dfc2020_modis/`, the extracted `datasets/GFM-Bench/` tree, and
-`DFC2020.zip`. `sh/shot_ete_dfc2020_best.sh` pointed at a MODIS teacher and
+`DFC2020.zip`. `sh/train_delulu_dfc2020_best.sh` pointed at a MODIS teacher and
 went with them.
 
-`viz_dfc2020_labels.py` still documents the bug as a figure — it reads `lc_`
+`viz/viz_dfc2020_labels.py` still documents the bug as a figure — it reads `lc_`
 and `dfc_` side by side from the *official* release, so it needs nothing from
 GFM-Bench.
 
 ## Current results
 
-- `dfc2020.csv` — ROI-disjoint split via `dfc2020_official_data_utils.py`,
+- `dfc2020.csv` — ROI-disjoint split (loader removed 2026-09-13),
   10 classes, real labels. Honest generalization, but val is one ROI
   (Chabarovsk, 63% Wetlands vs 1% of train) so val is a weak selector
   (test-vs-val Spearman rho 0.53).
 - `dfc2020_cobench.csv` — Copernicus-Bench official 3156/986/986 split via
-  `dfc2020_cobench_data_utils.py`, 8 classes (their cls_mapping ignores
+  `dfc2020_data_utils.py`, 8 classes (their cls_mapping ignores
   Background/Savanna/Snow-Ice). Comparable to published baselines
   (DFC2020-S2 mIoU: supervised ViT-B/16 66.2, random init 62.3) and val is
   reliable here (rho 0.99).
 
 The two are **not** comparable to each other and their checkpoints have
 different head sizes (10 vs 8).
+
+## ROI-split removal (2026-09-13)
+
+`dfc2020_official_data_utils.py` and `dfc2020_cobench_data_utils.py` were merged
+into a single `dfc2020_data_utils.py` that only builds the Copernicus-Bench
+split, and the `DFC2020_SPLIT` env var was dropped. Every job script already
+exported `DFC2020_SPLIT=cobench` and every method result (delulu, baselines,
+ablations, sweeps) is on that split; the ROI split was only ever the *code*
+default and produced nothing but the stage-0 rows in `dfc2020.csv`. Those rows
+stay on disk as a record but are no longer reproducible from the current code.
+Stage-0 DFC2020 runs now always write `dfc2020_cobench.csv`.
 
 ## Bimodal training bug (fixed 2026-08-20)
 
@@ -62,7 +73,7 @@ the bug and should be re-run before use.
 
 ## Teacher train_split leak (found 2026-08-21)
 
-Stage-1 methods — `shot_ete.py` (delulu), `baseline_distillation.py`,
+Stage-1 methods — `train_delulu.py` (delulu), `baseline_distillation.py`,
 `baseline_mke.py` — use **train2 as the unlabeled/adaptation pool** while
 train1 is the labeled set. A teacher trained with `--train_split=full` was
 supervised on train1+train2, so it has already seen the "unlabeled" pool with

@@ -84,26 +84,28 @@ class SelfAttention(nn.Module):
         k = k.to(dtype=k_dtype)
         return q, k
 
-    def forward(self, x: Tensor, attn_bias=None, rope: Tensor = None) -> Tensor:
+    def forward(self, x: Tensor, attn_bias=None, rope: Tensor = None, attn_mask: Tensor | None = None) -> Tensor:
         qkv = self.qkv(x)
-        attn_v = self.compute_attention(qkv=qkv, attn_bias=attn_bias, rope=rope)
+        attn_v = self.compute_attention(qkv=qkv, attn_bias=attn_bias, rope=rope, attn_mask=attn_mask)
         x = self.proj(attn_v)
         x = self.proj_drop(x)
         return x
 
-    def forward_list(self, x_list, attn_bias=None, rope_list=None) -> List[Tensor]:
+    def forward_list(self, x_list, attn_bias=None, rope_list=None, attn_mask_list=None) -> List[Tensor]:
         assert len(x_list) == len(rope_list)  # should be enforced by the Block
+        if attn_mask_list is None:
+            attn_mask_list = [None] * len(x_list)
         x_flat, shapes, num_tokens = cat_keep_shapes(x_list)
         qkv_flat = self.qkv(x_flat)
         qkv_list = uncat_with_shapes(qkv_flat, shapes, num_tokens)
         att_out = []
-        for _, (qkv, _, rope) in enumerate(zip(qkv_list, shapes, rope_list)):
-            att_out.append(self.compute_attention(qkv, attn_bias=attn_bias, rope=rope))
+        for _, (qkv, _, rope, a_mask) in enumerate(zip(qkv_list, shapes, rope_list, attn_mask_list)):
+            att_out.append(self.compute_attention(qkv, attn_bias=attn_bias, rope=rope, attn_mask=a_mask))
         x_flat, shapes, num_tokens = cat_keep_shapes(att_out)
         x_flat = self.proj(x_flat)
         return uncat_with_shapes(x_flat, shapes, num_tokens)
 
-    def compute_attention(self, qkv: Tensor, attn_bias=None, rope=None) -> Tensor:
+    def compute_attention(self, qkv: Tensor, attn_bias=None, rope=None, attn_mask: Tensor | None = None) -> Tensor:
         assert attn_bias is None
         B, N, _ = qkv.shape
         C = self.qkv.in_features
@@ -113,7 +115,9 @@ class SelfAttention(nn.Module):
         q, k, v = [t.transpose(1, 2) for t in [q, k, v]]
         if rope is not None:
             q, k = self.apply_rope(q, k, rope)
-        x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        if attn_mask is not None:
+            attn_mask = attn_mask.to(dtype=q.dtype)
+        x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         x = x.transpose(1, 2)
         return x.reshape([B, N, C])
 

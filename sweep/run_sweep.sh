@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=shot-sweep
+#SBATCH --job-name=delulu-sweep
 #SBATCH --exclude=kn101
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --ntasks=1
@@ -25,7 +25,6 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # DFC2020 has two incompatible splits. The cobench teachers have 8-class heads;
 # the default 'roi' loader is 10-class, so an unset value silently mismatches
 # the head and the label mapping. Harmless for other datasets.
-export DFC2020_SPLIT="${DFC2020_SPLIT:-cobench}"
 mkdir -p "$WANDB_DIR"
 
 echo "Starting sweep agent: $SWEEP_ID"

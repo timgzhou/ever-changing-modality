@@ -2,7 +2,7 @@
 Unified data utilities: TaskConfig, create_multimodal_batch, and get_loaders.
 
 This module is the single entry point for dataset loading across train_stage0.py,
-shot_ete.py, and baseline scripts. The individual dataset files
+train_delulu.py, and baseline scripts. The individual dataset files
 (eurosat_data_utils.py, geobench_data_utils.py) handle dataset-specific logic;
 this module provides the dispatch layer and shared types.
 """
@@ -21,7 +21,7 @@ import torch
 @dataclass
 class TaskConfig:
     """Dataset/task descriptor passed through the training pipeline."""
-    dataset_name: str           # 'eurosat', 'benv2', 'pastis', 'dfc2020'
+    dataset_name: str           # 'eurosat', 'benv2', 'biomassters', 'dfc2020'
     task_type: str              # 'classification', 'multilabel', 'segmentation'
     modality_a: str             # starting modality key, e.g. 's2'
     modality_b: str | None      # new modality key, e.g. 's1'; None = stage-0 only
@@ -127,17 +127,17 @@ def get_loaders(
     Return the standard 5-loader tuple plus TaskConfig for a given dataset.
 
     Args:
-        dataset: One of 'eurosat', 'benv2', 'pastis', 'dfc2020'.
+        dataset: One of 'eurosat', 'benv2', 'biomassters', 'dfc2020'.
         starting_modality: Modality available at stage 0.
             EuroSAT: 'rgb' | 'vre' | 'nir' | 'swir' | 'aw'
             BEN-v2:  's2' | 's1'
-            PASTIS:  's2' | 's1' | 'rgb'
+            DFC2020: 's2' | 's1' | 's2_rgb' | 's2_norgb'
         batch_size: DataLoader batch size.
         num_workers: DataLoader worker count.
-        data_normalizer: Optional normalizer override (e.g. div10000 for PASTIS+DINO).
-        num_time_steps: PASTIS only — timestamps to sample before temporal aggregation.
+        data_normalizer: Optional normalizer override.
+        num_time_steps: BioMassters only — timestamps to load before temporal mean-pooling.
         new_modality: Optional override for the new modality. If None, inferred as the
-            "other" modality for two-modality datasets (BEN-v2, PASTIS) or must be
+            "other" modality for two-modality datasets (BEN-v2, DFC2020, BioMassters) or must be
             provided for EuroSAT.
 
     Returns:
@@ -168,47 +168,19 @@ def get_loaders(
         if data_normalizer is not None and data_normalizer is not False:
             kwargs['data_normalizer'] = data_normalizer
         return get_biomassters_loaders(**kwargs)
-    elif dataset == 'benv2full':
-        raise NotImplementedError("No support for benv2full yet")
-    elif dataset == 'pastis':
-        raise NotImplementedError("No support for PASTIS yet")
     elif dataset == 'dfc2020':
-        # Official IEEE DataPort DFC2020 (10 m human-annotated `dfc_` labels,
-        # 10 classes, ROI-disjoint splits). NOT dfc2020_data_utils, which reads
-        # the HuggingFace GFM-Bench packaging -- that ships the SEN12MS MODIS
-        # `lc` product instead of the contest ground truth (blocky ~16-region
-        # tiles vs ~1200 for the real labels; a majority-class predictor scores
-        # 56.8% pixel acc there). Any number from the old loader measures MODIS
-        # prediction, not the DFC2020 benchmark. The old module is kept for
-        # reproducing pre-2026-08-19 results only.
-        # Which split: DFC2020_SPLIT=roi (default) or cobench.
-        #   roi     -> dfc2020_official_data_utils, ROI-disjoint, 10 classes.
-        #              Honest generalization; val is one ROI (Chabarovsk) whose
-        #              class mix is unrepresentative, so val is weak for model
-        #              selection (test-vs-val Spearman rho was 0.53).
-        #   cobench -> dfc2020_cobench_data_utils, the Copernicus-Bench official
-        #              3156/986/986 random split over the same imagery, 8 classes
-        #              (Savanna/Snow-Ice/Background ignored, per their
-        #              cls_mapping). Comparable to published baselines
-        #              (DFC2020-S2 mIoU: supervised ViT-B/16 66.2, random 62.3).
-        # The two are NOT comparable to each other and their checkpoints have
-        # different head sizes (10 vs 8), so they cannot be interchanged.
-        import os
-        _split = os.environ.get('DFC2020_SPLIT', 'roi').lower()
-        if _split == 'cobench':
-            from dfc2020_cobench_data_utils import get_dfc2020_loaders
-        elif _split == 'roi':
-            from dfc2020_official_data_utils import get_dfc2020_loaders
-        else:
-            raise ValueError(
-                f"DFC2020_SPLIT must be 'roi' or 'cobench', got {_split!r}")
+        # Official IEEE DataPort DFC2020 (10 m human-annotated `dfc_` labels) on the
+        # Copernicus-Bench 3156/986/986 split, 8 classes. See dfc2020_data_utils for
+        # the two superseded variants (MODIS labels; ROI-disjoint split) and why
+        # neither is reachable any more.
+        from dfc2020_data_utils import get_dfc2020_loaders
         kwargs = dict(batch_size=batch_size, num_workers=num_workers,
                       starting_modality=starting_modality, new_modality=new_modality)
         if data_normalizer is False:
             kwargs['normalize'] = False  # raw pixels for OlmoEarth
         return get_dfc2020_loaders(**kwargs)
     else:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Valid: 'eurosat', 'benv2', 'biomassters', 'benv2full', 'pastis', 'dfc2020'")
+        raise ValueError(f"Unknown dataset: {dataset!r}. Valid: 'eurosat', 'benv2', 'biomassters', 'dfc2020'")
 
 
 def _get_eurosat_loaders(starting_modality, new_modality, batch_size, num_workers, data_normalizer=None):

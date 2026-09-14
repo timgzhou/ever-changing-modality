@@ -19,7 +19,7 @@ WDS=('0.01' '0.0')
 
 # Temporal pooling window (<=12). BioMassters mean-pools features over this many
 # most-recent timesteps inside the model. Full-year signal (12) matches the
-# published protocol; keep in sync with the shot_ete / e2e scripts.
+# published protocol; keep in sync with the train_delulu / e2e scripts.
 NUM_TIME_STEPS="${NUM_TIME_STEPS:-12}"
 
 RESULTS_CSV="res/train_sft/${DATASET}.csv"

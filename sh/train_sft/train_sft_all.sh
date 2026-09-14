@@ -90,8 +90,8 @@ for DATASET in "${DATASETS[@]}"; do
                         # Mirror train_sft_job.sh: dfc2020's two split
                         # definitions keep separate results files.
                         CSV_SUFFIX=""
-                        if [ "${DATASET}" = "dfc2020" ] && [ -n "${DFC2020_SPLIT}" ] && [ "${DFC2020_SPLIT}" != "roi" ]; then
-                            CSV_SUFFIX="_${DFC2020_SPLIT}"
+                        if [ "${DATASET}" = "dfc2020" ]; then
+                            CSV_SUFFIX="_cobench"
                         fi
                         RESULTS_CSV="res/train_sft/${DATASET}${CSV_SUFFIX}.csv"
                         # dino_init is followed by num_time_steps,decoder,train_aug,train_split.

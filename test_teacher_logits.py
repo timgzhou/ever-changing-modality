@@ -1,23 +1,29 @@
 """
-Compare teacher logits between baseline_distillation and SHOT's _unlabeled_batch_step path.
+Compare teacher logits between baseline_distillation and Delulu's _unlabeled_batch_step path.
 
 Baseline distillation:
     teacher_logits = teacher_model({s2: batch_s2})
 
-SHOT unlabeled step (teacher_is_peeking=False):
+Delulu unlabeled step (teacher_is_peeking=False):
     teacher_out = teacher_classifier.evan.forward_features({s2: batch_s2})  # unused
     teacher_logits = teacher_classifier({s2: batch_s2})
 
 These should be identical. This script verifies that.
 """
 
+import os
 import torch
 import torch.nn.functional as F
 from data_utils import get_loaders, create_multimodal_batch
 from delulunet_main import EVANClassifier
 import copy
 
-STAGE0_CKPT = "checkpoints/sft_evan_base_benv2_s2_fft_lr0.0001_20260414_020254.pt"
+# Best-by-val evan_base / lr1e-4 BEN-v2 s2 stage-0 run (val mAP 64.60, test 59.04).
+# The original 20260414 checkpoint was deleted; this is the same config, retrained.
+STAGE0_CKPT = os.environ.get(
+    "STAGE0_CKPT",
+    "checkpoints/sft_evan_base_benv2_s2_fft_lr0.0001_20260727_064834.pt",
+)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 4
 
@@ -59,17 +65,17 @@ print(f"\nBaseline teacher logits shape: {baseline_teacher_logits.shape}")
 print(f"Baseline teacher logits (first sample, first 5 classes):\n  {baseline_teacher_logits[0, :5].cpu().tolist()}")
 
 # ============================================================
-# SHOT unlabeled step teacher path (teacher_is_peeking=False):
+# Delulu unlabeled step teacher path (teacher_is_peeking=False):
 #   teacher_out = teacher_classifier.evan.forward_features(teacher_input)  # unused
 #   _teacher_input = {teacher_modality: full_multimodal_input[teacher_modality]}
 #   teacher_logits = teacher_classifier(_teacher_input)
 # ============================================================
 
-# Simulate what train_shot does: deepcopy model, then switch student to ensemble
+# Simulate what train_delulu_model does: deepcopy model, then switch student to ensemble
 # (teacher is deepcopied BEFORE switch_strategy in the current code)
-shot_teacher = copy.deepcopy(model)
-shot_teacher.freeze_all()
-shot_teacher.eval()
+delulu_teacher = copy.deepcopy(model)
+delulu_teacher.freeze_all()
+delulu_teacher.eval()
 
 # Now simulate what happens in _unlabeled_batch_step
 full_multimodal_input = create_multimodal_batch(
@@ -83,21 +89,21 @@ with torch.no_grad():
     teacher_input = {m: full_multimodal_input[m] for m in latent_reconstruct_modalities}
 
     # Line 903: forward_features — result is NOT used downstream (dead code)
-    teacher_out_unused = shot_teacher.evan.forward_features(teacher_input)
+    teacher_out_unused = delulu_teacher.evan.forward_features(teacher_input)
 
     # Line 904-906: actual teacher logits
-    teacher_modality = shot_teacher.evan.starting_modality
+    teacher_modality = delulu_teacher.evan.starting_modality
     _teacher_input = {teacher_modality: full_multimodal_input[teacher_modality]}
-    shot_teacher_logits = shot_teacher(_teacher_input)
+    delulu_teacher_logits = delulu_teacher(_teacher_input)
 
-print(f"\nSHOT teacher logits shape: {shot_teacher_logits.shape}")
-print(f"SHOT teacher logits (first sample, first 5 classes):\n  {shot_teacher_logits[0, :5].cpu().tolist()}")
+print(f"\nDelulu teacher logits shape: {delulu_teacher_logits.shape}")
+print(f"Delulu teacher logits (first sample, first 5 classes):\n  {delulu_teacher_logits[0, :5].cpu().tolist()}")
 
 # ============================================================
 # Compare
 # ============================================================
-max_diff = (baseline_teacher_logits - shot_teacher_logits).abs().max().item()
-are_equal = torch.allclose(baseline_teacher_logits, shot_teacher_logits, atol=1e-5)
+max_diff = (baseline_teacher_logits - delulu_teacher_logits).abs().max().item()
+are_equal = torch.allclose(baseline_teacher_logits, delulu_teacher_logits, atol=1e-5)
 
 print(f"\n{'='*50}")
 print(f"Max absolute difference: {max_diff:.2e}")
@@ -107,7 +113,7 @@ if not are_equal:
     print("\nDIFFERENCE DETECTED — teacher logits are NOT the same!")
     print("Diff per sample (max across classes):")
     for i in range(BATCH_SIZE):
-        d = (baseline_teacher_logits[i] - shot_teacher_logits[i]).abs().max().item()
+        d = (baseline_teacher_logits[i] - delulu_teacher_logits[i]).abs().max().item()
         print(f"  sample {i}: {d:.4e}")
 else:
     print("\nOK — teacher logits are identical between both paths.")
@@ -115,45 +121,45 @@ else:
 # ============================================================
 # Also compare the distillation_loss functions
 # baseline uses train_utils.distillation_loss (with kl_type param)
-# SHOT uses shot.distillation_loss (no kl_type param, always KD)
+# Delulu uses delulu.distillation_loss (no kl_type param, always KD)
 # ============================================================
 print(f"\n{'='*50}")
 print("Comparing distillation_loss implementations...")
 
-from shot import distillation_loss as shot_distill_loss
+from delulu import distillation_loss as delulu_distill_loss
 from train_utils import distillation_loss as baseline_distill_loss
 
 # Make a fake student logits tensor (random, simulating a partially-trained s1 head)
 torch.manual_seed(42)
 fake_student_logits = torch.randn(BATCH_SIZE, 19, device=DEVICE)
 
-shot_loss = shot_distill_loss(fake_student_logits, baseline_teacher_logits, temperature=1.0)
+delulu_loss = delulu_distill_loss(fake_student_logits, baseline_teacher_logits, temperature=1.0, task_type='multilabel')
 baseline_loss_kd = baseline_distill_loss(fake_student_logits, baseline_teacher_logits, temperature=1.0, kl_type='kd')
 baseline_loss_ttm = baseline_distill_loss(fake_student_logits, baseline_teacher_logits, temperature=1.0, kl_type='ttm')
 
-print(f"SHOT distill_loss (temp=1.0):           {shot_loss.item():.6f}")
+print(f"Delulu distill_loss (temp=1.0):           {delulu_loss.item():.6f}")
 print(f"Baseline distill_loss kd (temp=1.0):    {baseline_loss_kd.item():.6f}")
 print(f"Baseline distill_loss ttm (temp=1.0):   {baseline_loss_ttm.item():.6f}")
 
-shot_loss2 = shot_distill_loss(fake_student_logits, baseline_teacher_logits, temperature=2.0)
+delulu_loss2 = delulu_distill_loss(fake_student_logits, baseline_teacher_logits, temperature=2.0, task_type='multilabel')
 baseline_loss2 = baseline_distill_loss(fake_student_logits, baseline_teacher_logits, temperature=2.0, kl_type='kd')
-print(f"SHOT distill_loss (temp=2.0):           {shot_loss2.item():.6f}")
+print(f"Delulu distill_loss (temp=2.0):           {delulu_loss2.item():.6f}")
 print(f"Baseline distill_loss kd (temp=2.0):    {baseline_loss2.item():.6f}")
 
-losses_match_kd = torch.allclose(shot_loss, baseline_loss_kd, atol=1e-5)
-print(f"\nSHOT loss == Baseline KD loss: {losses_match_kd}")
+losses_match_kd = torch.allclose(delulu_loss, baseline_loss_kd, atol=1e-5)
+print(f"\nDelulu loss == Baseline KD loss: {losses_match_kd}")
 
 # ============================================================
 # Verify student initialization: which param groups are trainable
 # and whether newly-added s1 components are actually in the optimizer.
-# Reproduces the exact setup in train_shot().
+# Reproduces the exact setup in train_delulu_model().
 # ============================================================
 print(f"\n{'='*50}")
 print("Verifying student initialization and optimizer param groups...")
 
 import sys
 sys.path.insert(0, '.')
-from shot import train_shot
+from delulu import train_delulu_model
 from delulunet_main import EVANClassifier
 import copy, types, argparse
 
@@ -161,7 +167,7 @@ import copy, types, argparse
 student = EVANClassifier.from_checkpoint(STAGE0_CKPT, DEVICE).to(DEVICE)
 evan = student.evan
 
-# Replicate shot_ete.py: create s1 components on evan
+# Replicate train_delulu.py: create s1 components on evan
 from data_utils import get_loaders
 task_config2 = task_config  # reuse from above
 from delulunet_main import EVAN
@@ -172,7 +178,7 @@ if not hasattr(evan, 'projector_queries'):
 evan.create_modality_components('s1', 2)
 student = student.to(DEVICE)
 
-# Replicate train_shot setup (lines 1216-1277 of shot.py)
+# Replicate train_delulu_model setup (lines 1216-1277 of delulu.py)
 import torch.nn as nn
 
 teacher = copy.deepcopy(student)
@@ -188,24 +194,20 @@ for mod in all_modalities:
         student.instantiate_modality_classifier(mod)
 
 student.freeze_all()
-student.set_requires_grad("all", clsreg=True, modality_encoders=True, mfla=False, msla=True, patch_embedders=True, head=True)
+student.set_requires_grad("all", clsreg=True, modality_encoders=True, msla=True, patch_embedders=True, head=True)
 student.set_requires_grad("backbone", blocks=True, norm=True)
 
-from shot import create_mae_decoders, create_latent_decoders
+from delulu import create_latent_decoders
 embed_dim = evan.embed_dim
-patch_size = evan.patch_size
-modality_bands_dict2 = task_config.modality_bands_dict
-mae_modalities = ['s2', 's1']
 latent_reconstruct_modalities = ['s2']
 active_losses = ['distill', 'ce']  # mimicking user's test run
 
-mae_decoders = create_mae_decoders(embed_dim, patch_size, modality_bands_dict2, mae_modalities, DEVICE)
+# The MAE loss (and create_mae_decoders) was removed from the method; the
+# remaining loss terms are latent / prefusion / distill / ce.
 latent_projectors = create_latent_decoders(embed_dim, latent_reconstruct_modalities, DEVICE)
 evan.set_requires_grad("all", intermediate_projectors=True)
 
 params = list(filter(lambda p: p.requires_grad, student.parameters()))
-if 'mae' in active_losses:
-    params += list(mae_decoders.parameters())
 if 'latent' in active_losses:
     params += list(latent_projectors.parameters())
 
@@ -234,5 +236,4 @@ check_group("shared backbone blocks",   evan.blocks.parameters())
 check_group("shared backbone norm",     evan.norm.parameters())
 check_group("s2 classifier head",       student.modality_classifiers['s2'].parameters())
 check_group("s1 classifier head",       student.modality_classifiers['s1'].parameters())
-check_group("mae_decoders (s2+s1)",     mae_decoders.parameters())
 check_group("latent_projectors (s2)",   latent_projectors.parameters())

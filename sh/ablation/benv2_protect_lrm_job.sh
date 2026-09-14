@@ -21,7 +21,7 @@ export TQDM_DISABLE=1
 SWEEP_JSON="artifacts/sweep_best.json"
 RESULTS_CSV="res/ablation/benv2_protect_lrm.csv"
 
-mkdir -p res/ablation logs/shot_ete_ablate_protect_lrm
+mkdir -p res/ablation logs/train_delulu_ablate_protect_lrm
 
 row_exists() {
     local csv="$1" dataset="$2" start_mod="$3" new_mod="$4"
@@ -70,7 +70,7 @@ for IDX in $(seq 0 $((N_CONFIGS - 1))); do
 
     echo "  rank=${RANK} teacher=${TEACHER} protect_lrm=true"
 
-    python -u shot_ete.py \
+    python -u train_delulu.py \
         --dataset "$DATASET" \
         --new_mod_group "$NEW_MOD" \
         --stage0_checkpoint "$TEACHER" \

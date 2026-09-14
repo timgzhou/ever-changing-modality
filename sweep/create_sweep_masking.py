@@ -50,7 +50,7 @@ def _build_sweep(base_config: dict) -> tuple[dict, str]:
     for k, v in FIXED.items():
         extra_args.extend([f'--{k}', v])
 
-    # active_losses requires repeated flags (action='append' in sweep_shot.py)
+    # active_losses requires repeated flags (action='append' in sweep_delulu.py)
     extra_args += [
         '--active_losses', 'latent',
         '--active_losses', 'prefusion',

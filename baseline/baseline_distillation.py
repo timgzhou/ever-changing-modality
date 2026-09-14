@@ -60,7 +60,6 @@ def _copy_evan_backbone_and_modality(teacher_state_dict, evan_config, student_mo
     # --- modality-specific weights (teacher_modality -> student_modality) ---
     modality_components = [
         'modality_specific_layer_adaptors',
-        'modality_fusion_lora_adaptors',
         'cls_tokens',
         'storage_tokens',
         'modality_encoders',
@@ -96,7 +95,7 @@ def init_student_from_teacher(
 ):
     """
     Create a monomodal student (EVANClassifier or EvanSegmenter) initialised from a
-    teacher checkpoint.  Backbone and modality-specific LoRA/FFT weights are copied;
+    teacher checkpoint.  Backbone and modality-specific block weights are copied;
     the patch embedder is randomly initialised.  The head is copied for classifiers and
     left at random init for segmenters (different spatial output shape).
 
@@ -433,7 +432,7 @@ def distillation_training_loop(
 def main():
     parser = argparse.ArgumentParser(description='Baseline Distillation: Train student using teacher soft labels')
     parser.add_argument('--dataset', type=str, default='eurosat',
-                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020', 'biomassters'],
+                        choices=['eurosat', 'benv2', 'dfc2020', 'biomassters'],
                         help='Dataset to train on (default: eurosat)')
     parser.add_argument('--teacher_checkpoint', type=str, required=True,
                         help='Path to teacher checkpoint file')
@@ -453,12 +452,9 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of dataloader workers (default: 4)')
     parser.add_argument('--num_time_steps', type=int, default=10,
-                        help='Timestamps to sample per PASTIS image before temporal aggregation (default: 10)')
+                        help='Timestamps to load per BioMassters image before temporal mean-pooling (default: 10)')
     parser.add_argument('--tz_fusion_time', type=int, default=3,
                         help='n modality-independent layers before fusion')
-    parser.add_argument('--tz_lora_rank', type=int, default=0,
-                        help='rank of lora adaptors')
-    parser.add_argument('--tz_modality_specific_layer_augmenter', type=str, default='fft', choices=['lora', 'fft'])
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help='Directory to save checkpoints')
     parser.add_argument('--wandb_project', type=str, default='evan-distillation',
@@ -656,8 +652,6 @@ def main():
         model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
         evan_model = model_fn(
             tz_fusion_time=args.tz_fusion_time,
-            tz_lora_rank=args.tz_lora_rank,
-            tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
             n_storage_tokens=4,
             starting_modality=list(student_modalities),
             starting_n_chans=all_student_n_chans,
@@ -688,7 +682,7 @@ def main():
         student_model.set_requires_grad('all', patch_embedders=True, clsreg=True, msla=True, modality_encoders=True, head=True)
         print(f"Mode=fft: training full backbone layers + head.")
     elif args.train_mode == 'adaptor':
-        student_model.set_requires_grad('all', patch_embedders=True, clsreg=True, msla=True, mfla=True, head=True)
+        student_model.set_requires_grad('all', patch_embedders=True, clsreg=True, msla=True, head=True)
         print(f"Mode=adaptor: training embedder, adaptors and classifier.")
     elif args.train_mode == 'probe':
         student_model.set_requires_grad('all', head=True)
@@ -795,8 +789,8 @@ def main():
     filename = args.results_csv
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
-    fieldnames = ["model_type", "teacher_modality", "student_modality", "train_mode", "tz_lora_rank",
-                  "tz_modality_specific_layer_augmenter", "learning_rate", "weight_decay", "trainable_params",
+    fieldnames = ["model_type", "teacher_modality", "student_modality", "train_mode",
+                  "learning_rate", "weight_decay", "trainable_params",
                   "epoch", "temperature", "alpha", "distillation_mode", "kl_type",
                   "metric_name", "teacher_test_metric", "test_metric", "best_test_metric(oracle)", "best_epoch",
                   "best_val_agreement",
@@ -808,8 +802,8 @@ def main():
         if not file_exists:
             writer.writerow(fieldnames)
         writer.writerow([
-            args.model, teacher_modality, student_label, args.train_mode, args.tz_lora_rank,
-            args.tz_modality_specific_layer_augmenter, args.lr, args.weight_decay, trainable_params,
+            args.model, teacher_modality, student_label, args.train_mode,
+            args.lr, args.weight_decay, trainable_params,
             num_epochs, args.temperature, args.alpha, args.distillation_mode, args.kl_type, metric_name,
             f"{teacher_test_metric:.2f}", f"{test_metric:.2f}", f"{best_test_metric:.2f}", best_epoch,
             f"{best_agreement:.2f}" if best_agreement >= 0 else "",

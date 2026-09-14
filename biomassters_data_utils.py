@@ -16,7 +16,7 @@ modalities on the channel axis, producing a single image tensor:
 Downstream, create_multimodal_batch slices the channel axis (dim 1 after batching)
 and leaves T intact; the model's temporal shim folds T into the batch dimension,
 runs the non-temporal backbone per timestep, and mean-pools features over T. So the
-backbone, classifier/segmenter heads, and all SHOT loss paths stay non-temporal.
+backbone, classifier/segmenter heads, and all Delulu loss paths stay non-temporal.
 
 The task is regression: label_key='mask', task_type='regression', num_classes=1.
 
@@ -222,10 +222,16 @@ def get_biomassters_loaders(
     Returns:
         train1, val1, train2, val2, test loaders + TaskConfig.
     """
-    assert starting_modality in ('s1', 's2'), \
-        f"starting_modality must be 's1' or 's2', got {starting_modality!r}"
-    assert new_modality in (None, 's1', 's2'), \
-        f"new_modality must be 's1', 's2', or None, got {new_modality!r}"
+    # 's1'/'s2' are the two sensors; 's2_rgb'/'s2_norgb' are sub-groups of the
+    # S2 stack (see modality_slices below). Data loading is identical for all of
+    # them -- both sensors are always read and stacked -- and the modality key
+    # only selects which channels a model slices out, so sub-groups are accepted
+    # here as well.
+    _VALID_MODS = ('s1', 's2', 's2_rgb', 's2_norgb')
+    assert starting_modality in _VALID_MODS, \
+        f"starting_modality must be one of {_VALID_MODS}, got {starting_modality!r}"
+    assert new_modality in (None,) + _VALID_MODS, \
+        f"new_modality must be one of {_VALID_MODS} or None, got {new_modality!r}"
 
     root = Path(data_root)
 
@@ -286,6 +292,11 @@ def get_biomassters_loaders(
     }
     # S2 RGB sub-group (B04, B03, B02 -> indices 2,1,0 within the s2 slice).
     modality_slices['s2_rgb'] = [2, 1, 0]
+    # S2 minus RGB: the remaining 7 bands (B05..B12), i.e. the complement of
+    # s2_rgb within the 10-band S2 stack. Indices are into the full stacked
+    # channel axis, which for s2 starts at 0, so they coincide with the S2
+    # band positions: B05=3, B06=4, B07=5, B08=6, B8A=7, B11=8, B12=9.
+    modality_slices['s2_norgb'] = [3, 4, 5, 6, 7, 8, 9]
 
     assert starting_modality in modality_slices
     assert new_modality is None or new_modality in modality_slices

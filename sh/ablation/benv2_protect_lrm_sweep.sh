@@ -7,7 +7,7 @@ DATASET="benv2"
 MODEL="evan_base"
 TEACHERS_JSON="artifacts/sft_teachers.json"
 
-mkdir -p logs/shot_ete_ablate_protect_lrm res/ablation
+mkdir -p logs/train_delulu_ablate_protect_lrm res/ablation
 
 for STARTING_MOD in s2 s1; do
     if [ "$STARTING_MOD" = "s2" ]; then NEW_MOD="s1"; else NEW_MOD="s2"; fi

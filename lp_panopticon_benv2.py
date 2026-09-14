@@ -411,7 +411,7 @@ def main():
 
 
 class PanopticonTeacher(nn.Module):
-    """Frozen Panopticon ViT-B/14 + trained LP head, implementing the teacher interface for shot.py.
+    """Frozen Panopticon ViT-B/14 + trained LP head, implementing the teacher interface for delulu.py.
 
     Exposes:
       - __call__(input_dict)                   → logits [B, num_classes]   (distill loss)
@@ -419,17 +419,17 @@ class PanopticonTeacher(nn.Module):
       - .evan.starting_modality                (string)
       - .freeze_all()                          (freezes all parameters)
 
-    `input_dict` format (same as what shot.py passes): {mod_name: tensor [B, C, H, W]}
+    `input_dict` format (same as what delulu.py passes): {mod_name: tensor [B, C, H, W]}
     where the tensor is GEO-Bench z-score normalised (consistent with LP training).
 
     Note on shapes (for latent loss):
       Panopticon patch_size=14, so for 128×128 input: N_patches = floor(128/14)^2 = 81.
       EVAN student has patch_size=16, N_patches = 64. The latent projectors handle
-      this mismatch when train_shot is called with teacher_latent_dim=768, teacher_n_patches=81.
+      this mismatch when train_delulu_model is called with teacher_latent_dim=768, teacher_n_patches=81.
     """
 
     class _EvanStub:
-        """Minimal stub satisfying the .evan interface used by shot.py."""
+        """Minimal stub satisfying the .evan interface used by delulu.py."""
 
         def __init__(self, starting_modality: str, backbone: nn.Module, chn_ids: torch.Tensor):
             self.starting_modality = starting_modality

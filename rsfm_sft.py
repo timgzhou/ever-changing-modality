@@ -26,7 +26,7 @@ IMPORTANT: Model Input Format & Wrappers
 Supports:
   - Classification (EuroSAT, BEN-v2)
   - Multilabel (BEN-v2)
-  - Segmentation (PASTIS)
+  - Segmentation (DFC2020)
 
 Architecture:
   - create_classification_head(): BatchNorm1d + Linear (follows EVANClassifier)
@@ -75,9 +75,6 @@ MODALITY_CONFIGS = {
                 'swir+nir', 'swir+rgb', 'swir+vre', 'vre+nir', 'vre+rgb'],
     'benv2': ['s2', 's1', 's2s1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw',
               's2_rgb+s1', 's2_rgb+s2_norgb', 's1+s2', 's2+s1'],
-    'benv2full': ['s2', 's1', 's2s1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw',
-                  's2_rgb+s1', 's2_rgb+s2_norgb', 's1+s2', 's2+s1'],
-    'pastis': ['s2', 's1', 's2s1', 'rgb', 's2_rgb', 's2_vre', 's2_nir', 's2_swir'],
     'dfc2020': ['s2', 's1', 's2s1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw',
                 's2_rgb+s1', 's2_rgb+s2_norgb', 's1+s2', 's2+s1'],
 }
@@ -176,7 +173,7 @@ class OlmoEarthWrapper(ModelWrapper):
         s1_cfg = norm_cfg['sentinel1']
 
         # Build per-channel [lo, hi] for clip normalization: (x - lo) / (hi - lo)
-        # s2 — 12-band order (benv2/pastis)
+        # s2 — 12-band order (benv2/dfc2020)
         lo12 = [s2_cfg[b]['mean'] - std_mult * s2_cfg[b]['std'] for b in self.S2_BAND_ORDER_12]
         hi12 = [s2_cfg[b]['mean'] + std_mult * s2_cfg[b]['std'] for b in self.S2_BAND_ORDER_12]
         self.register_buffer('s2_lo12', torch.tensor(lo12, dtype=torch.float32).view(1, -1, 1, 1))
@@ -213,7 +210,7 @@ class OlmoEarthWrapper(ModelWrapper):
         Build MaskedOlmoEarthSample from [B, C, H, W] raw-DN tensor.
 
         Uses self.modality to know exactly which bands are present:
-          - 's2':    12-band S2 (benv2/pastis layout)
+          - 's2':    12-band S2 (benv2/dfc2020 layout)
           - 's2' on dfc2020: 13-band S2
           - 's1':    2-band S1 only (VV, VH)
           - 's2s1':  S2 + S1 concatenated
@@ -427,7 +424,6 @@ PANOPTICON_CHANNEL_IDS = {
     ('dfc2020', 's1'):       (-1, -2),
     ('dfc2020', 's2_rgb'):   ('B04','B03','B02'),
     ('dfc2020', 's2_norgb'): ('B01','B05','B06','B07','B08','B8A','B09','B10','B11','B12'),
-    # PASTIS: not yet implemented — will raise at construction time
 }
 
 
@@ -1097,7 +1093,7 @@ def main():
     parser.add_argument('--model', type=str, required=True,
                         help='HuggingFace model name (e.g., allenai/OlmoEarth-v1-Base)')
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=['eurosat', 'benv2', 'benv2full', 'pastis', 'dfc2020'],
+                        choices=['eurosat', 'benv2', 'dfc2020', 'biomassters'],
                         help='Dataset to train on')
     parser.add_argument('--modality', type=str, required=True,
                         help='Modality to use (e.g., s2, s1, rgb)')
@@ -1128,7 +1124,7 @@ def main():
 
     is_olmoearth = 'olmoearth' in args.model.lower()
     is_dino = args.model in DINO_MODELS
-    # DINO on GeoBench datasets (benv2, dfc2020, pastis): use loader z-score normalization,
+    # DINO on GeoBench datasets (benv2, dfc2020): use loader z-score normalization,
     # consistent with train_sft. DINO on EuroSAT: raw pixels, normalize inside DinoWrapper.
     dino_raw_pixels = is_dino and args.dataset == 'eurosat'
 

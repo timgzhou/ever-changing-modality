@@ -4,7 +4,7 @@
 
 TEACHERS_JSON="artifacts/sft_teachers.json"
 
-# Same pairs as sh/shot_ete_sweep.sh
+# Same pairs as sh/train_delulu_sweep.sh
 PAIRS=(
     "benv2   s2_rgb  s2_norgb"
     "benv2   s2_rgb  s1"

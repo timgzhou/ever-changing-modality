@@ -3,7 +3,7 @@ Automatic loss balancing for DeluluNet's multi-term objective.
 
 Motivation
 ----------
-SHOT optimizes four terms (latent, prefusion, distill, ce) whose raw scales
+Delulu optimizes four terms (latent, prefusion, distill, ce) whose raw scales
 differ and, more importantly, whose DECAY RATES differ: over a 128-epoch run
 prefusion falls ~15x while ce falls only ~3x, so a fixed lambda that balances
 the terms at step 0 no longer balances them at step 50k. Hand-tuning three
@@ -45,9 +45,9 @@ import torch.nn as nn
 
 # Terms the balancer may learn weights for.
 #
-# CE is deliberately EXCLUDED. SHOT alternates batch types: a labeled step
+# CE is deliberately EXCLUDED. Delulu alternates batch types: a labeled step
 # produces only ce, an unlabeled step produces only latent/prefusion/distill
-# (see _labeled_batch_step / _unlabeled_batch_step in shot.py). Uncertainty
+# (see _labeled_batch_step / _unlabeled_batch_step in delulu.py). Uncertainty
 # weighting assumes every task contributes to every step, so that the learned
 # precisions are tied together by a shared gradient. Here s_ce would be
 # estimated from a disjoint ~23% of steps with no competing pressure from the

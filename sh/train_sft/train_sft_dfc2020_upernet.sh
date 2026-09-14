@@ -15,7 +15,6 @@
 #
 # Usage: bash sh/train_sft/train_sft_dfc2020_upernet.sh
 
-export DFC2020_SPLIT=cobench
 export DECODER=upernet
 
 DATASET=dfc2020
@@ -23,7 +22,7 @@ MODEL=evan_base
 TRAIN_MODE=fft
 LR=0.0005
 # split1 = train1 only. REQUIRED for any teacher used by stage-1 methods
-# (shot_ete, distillation, MKE): they treat train2 as the UNLABELED pool, so a
+# (train_delulu, distillation, MKE): they treat train2 as the UNLABELED pool, so a
 # `full` teacher has already been supervised on that pool and the comparison
 # leaks. Override with TRAIN_SPLIT=full for the supervised upper bound.
 TRAIN_SPLIT="${TRAIN_SPLIT:-split1}"
@@ -38,7 +37,7 @@ n=0
 for MODALITY_ENTRY in ${MODALITIES}; do
     for WD in ${WDS}; do
         echo "Submitting: upernet ${MODALITY_ENTRY} lr=${LR} wd=${WD} split=${TRAIN_SPLIT}"
-        sbatch --export=ALL,DATASET="${DATASET}",MODEL="${MODEL}",TRAIN_MODE="${TRAIN_MODE}",MODALITY_ENTRY="${MODALITY_ENTRY}",LR="${LR}",WD="${WD}",TRAIN_AUG="${TRAIN_AUG}",TRAIN_SPLIT="${TRAIN_SPLIT}",DFC2020_SPLIT="${DFC2020_SPLIT}",DECODER="${DECODER}" \
+        sbatch --export=ALL,DATASET="${DATASET}",MODEL="${MODEL}",TRAIN_MODE="${TRAIN_MODE}",MODALITY_ENTRY="${MODALITY_ENTRY}",LR="${LR}",WD="${WD}",TRAIN_AUG="${TRAIN_AUG}",TRAIN_SPLIT="${TRAIN_SPLIT}",DECODER="${DECODER}" \
             sh/train_sft/train_sft_job.sh
         n=$((n+1))
     done

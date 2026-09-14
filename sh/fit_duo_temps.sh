@@ -14,7 +14,6 @@
 source sh/env.sh
 export TQDM_DISABLE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export DFC2020_SPLIT=cobench
 mkdir -p logs/duo_temps res/delulu
 
 OUT="res/delulu/duo_temps.csv"
@@ -35,7 +34,7 @@ for P in s1:s2_norgb s1:s2_rgb s2_norgb:s1 s2_norgb:s2_rgb s2_rgb:s1 s2_rgb:s2_n
             CKPT="checkpoints/delulunet_dfc2020_${START}_to_${NEW}_upernet_distillonly_initteacher_seed0.pt"
         fi
         [ -f "${CKPT}" ] || { echo "[skip] missing ${CKPT}"; continue; }
-        python -u fit_duo_temps.py \
+        python -u analysis/fit_duo_temps.py \
             --checkpoint "${CKPT}" --teacher_checkpoint "${TEACHER}" \
             --start_mod "${START}" --new_mod "${NEW}" --variant "${V}" \
             --dataset dfc2020 --batch_size 8 --out_csv "${OUT}"

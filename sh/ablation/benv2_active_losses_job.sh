@@ -76,7 +76,7 @@ for IDX in $(seq 0 $((N_CONFIGS - 1))); do
 
     echo "  rank=${RANK} teacher=${TEACHER} losses=${LOSSES_TAG}"
 
-    python -u shot_ete.py \
+    python -u train_delulu.py \
         --dataset "$DATASET" \
         --new_mod_group "$NEW_MOD" \
         --stage0_checkpoint "$TEACHER" \

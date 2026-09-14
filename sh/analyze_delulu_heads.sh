@@ -14,7 +14,6 @@ source sh/env.sh
 export TQDM_DISABLE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # MUST match the split the teachers were trained on (8 classes, not the ROI 10).
-export DFC2020_SPLIT=cobench
 mkdir -p logs/head_analysis res/delulu
 
 OUT="res/delulu/head_analysis.csv"
@@ -31,7 +30,7 @@ for P in s1:s2_norgb s1:s2_rgb s2_norgb:s1 s2_norgb:s2_rgb s2_rgb:s1 s2_rgb:s2_n
         if [ ! -f "${CKPT}" ]; then
             echo "[skip] missing ${CKPT}"; continue
         fi
-        python -u analyze_delulu_heads.py \
+        python -u analysis/analyze_delulu_heads.py \
             --checkpoint "${CKPT}" --start_mod "${START}" --new_mod "${NEW}" \
             --variant "${V}" --dataset dfc2020 --batch_size 8 --out_csv "${OUT}"
     done

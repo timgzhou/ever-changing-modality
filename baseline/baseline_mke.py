@@ -161,7 +161,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='MKE Baseline: multimodal student trained on teacher pseudo-labels')
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=['eurosat', 'benv2', 'pastis', 'dfc2020', 'biomassters'])
+                        choices=['eurosat', 'benv2', 'dfc2020', 'biomassters'])
     parser.add_argument('--modalities', type=str, nargs='+', required=True,
                         help='Student modalities (must include teacher modality). '
                              'Example: --modalities s2 s1')
@@ -177,11 +177,8 @@ def main():
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--num_time_steps', type=int, default=10,
-                        help='Timestamps per PASTIS image (default: 10)')
+                        help='Timestamps per BioMassters image (default: 10)')
     parser.add_argument('--tz_fusion_time', type=int, default=3)
-    parser.add_argument('--tz_lora_rank', type=int, default=0)
-    parser.add_argument('--tz_modality_specific_layer_augmenter', type=str, default='fft',
-                        choices=['fft'])
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--checkpoint_name', type=str, default=None)
     parser.add_argument('--wandb_project', type=str, default=None)
@@ -335,7 +332,6 @@ def main():
         'eurosat': [3, 2, 1],
         'benv2':   [3, 2, 1],
         'dfc2020': [3, 2, 1],
-        'pastis':  [2, 1, 0],
     }
     primary_modality = student_modalities[0]
     rgb_in_s2_indices = (
@@ -347,8 +343,6 @@ def main():
     model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
     evan_model = model_fn(
         tz_fusion_time=args.tz_fusion_time,
-        tz_lora_rank=args.tz_lora_rank,
-        tz_modality_specific_layer_augmenter=args.tz_modality_specific_layer_augmenter,
         n_storage_tokens=4,
         starting_modality=student_modalities,
         starting_n_chans=all_n_chans,
@@ -378,13 +372,12 @@ def main():
     if args.train_mode == 'fft':
         student_model.set_requires_grad('backbone', blocks=True, norm=True)
         for mod in student_modalities:
-            student_model.set_requires_grad(mod, msla=True, mfla=False,
-                                            patch_embedders=True, clsreg=True, head=True)
+            student_model.set_requires_grad(mod, msla=True, patch_embedders=True, clsreg=True, head=True)
         print("Mode=fft: training full backbone layers + head.")
     elif args.train_mode == 'adaptor':
         for mod in student_modalities:
             student_model.set_requires_grad(mod, patch_embedders=True, clsreg=True,
-                                            msla=True, mfla=True, head=True)
+                                            msla=True, head=True)
         print("Mode=adaptor: training embedder, adaptors and head.")
     elif args.train_mode == 'probe':
         student_model.set_requires_grad('all', head=True)
@@ -552,7 +545,7 @@ def main():
                 if is_regression:
                     # l_cls -> MSE against the teacher's continuous output.
                     # Scaled by regression_loss_scale so the loss is O(1) in
-                    # normalised units rather than raw t/ha (see shot.py).
+                    # normalised units rather than raw t/ha (see delulu.py).
                     _sc = getattr(task_config, 'regression_loss_scale', 1.0) or 1.0
                     loss = F.mse_loss(student_logits / _sc, pseudo_labels_aug / _sc)
                 else:
@@ -652,7 +645,6 @@ def main():
     file_exists = os.path.isfile(filename)
     fieldnames = [
         "model_type", "teacher_modality", "student_modalities", "train_mode",
-        "tz_lora_rank", "tz_modality_specific_layer_augmenter",
         "learning_rate", "weight_decay", "trainable_params", "epochs",
         "use_dino_weights", "metric_name",
         "teacher_train1_metric", "teacher_train2_metric", "teacher_test_metric",
@@ -666,7 +658,6 @@ def main():
             writer.writerow(fieldnames)
         writer.writerow([
             args.model, teacher_modality, '+'.join(student_modalities), args.train_mode,
-            args.tz_lora_rank, args.tz_modality_specific_layer_augmenter,
             args.lr, args.weight_decay, trainable_params, args.epochs,
             args.use_dino_weights, metric_name,
             f"{teacher_train1_metric:.2f}", f"{teacher_train2_metric:.2f}", f"{teacher_test_metric:.2f}",

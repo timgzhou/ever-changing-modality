@@ -123,7 +123,7 @@ class SelfAttentionBlock(nn.Module):
 
         return x_ffn
 
-    def _forward_list(self, x_list: List[Tensor], rope_list=None) -> List[Tensor]:
+    def _forward_list(self, x_list: List[Tensor], rope_list=None, attn_mask_list=None) -> List[Tensor]:
         """
         This list operator concatenates the tokens from the list of inputs together to save
         on the elementwise operations. Torch-compile memory-planning allows hiding the overhead
@@ -134,6 +134,14 @@ class SelfAttentionBlock(nn.Module):
         residual_scale_factors = [b / sample_subset_size for b, sample_subset_size in zip(b_list, sample_subset_sizes)]
 
         if self.training and self.sample_drop_ratio > 0.0:
+            # The sample-drop path indexes into the batch, which would desynchronise a
+            # per-sample attention mask. Callers that need masking (the cross-modal
+            # projector) construct these blocks with drop_path=0.0.
+            if attn_mask_list is not None and any(m is not None for m in attn_mask_list):
+                raise NotImplementedError(
+                    "SelfAttentionBlock: attn_mask is not supported together with "
+                    "sample_drop_ratio > 0.0 (drop_path); build the block with drop_path=0.0."
+                )
             indices_1_list = [
                 (torch.randperm(b, device=x.device))[:sample_subset_size]
                 for x, b, sample_subset_size in zip(x_list, b_list, sample_subset_sizes)
@@ -188,26 +196,32 @@ class SelfAttentionBlock(nn.Module):
                 )
             ]
         else:
+            if attn_mask_list is None:
+                attn_mask_list = [None] * len(x_list)
             x_out = []
-            for x, rope in zip(x_list, rope_list):
-                x_attn = x + self.ls1(self.attn(self.norm1(x), rope=rope))
+            for x, rope, a_mask in zip(x_list, rope_list, attn_mask_list):
+                x_attn = x + self.ls1(self.attn(self.norm1(x), rope=rope, attn_mask=a_mask))
                 x_ffn = x_attn + self.ls2(self.mlp(self.norm2(x_attn)))
                 x_out.append(x_ffn)
             x_ffn = x_out
 
         return x_ffn
 
-    def forward(self, x_or_x_list, rope_or_rope_list=None) -> List[Tensor]:
+    def forward(self, x_or_x_list, rope_or_rope_list=None, attn_mask=None) -> List[Tensor]:
         if isinstance(x_or_x_list, Tensor):
             # for reference:
             # return self._forward(x_or_x_list, rope=rope_or_rope_list)
             # in order to match implementations we call the list op:
-            return self._forward_list([x_or_x_list], rope_list=[rope_or_rope_list])[0]
+            return self._forward_list(
+                [x_or_x_list], rope_list=[rope_or_rope_list], attn_mask_list=[attn_mask]
+            )[0]
         elif isinstance(x_or_x_list, list):
             if rope_or_rope_list is None:
                 rope_or_rope_list = [None for x in x_or_x_list]
             # return [self._forward(x, rope=rope) for x, rope in zip(x_or_x_list, rope_or_rope_list)]
-            return self._forward_list(x_or_x_list, rope_list=rope_or_rope_list)
+            return self._forward_list(
+                x_or_x_list, rope_list=rope_or_rope_list, attn_mask_list=attn_mask
+            )
         else:
             raise AssertionError
 

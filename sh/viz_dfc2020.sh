@@ -16,11 +16,10 @@ source sh/env.sh
 export TQDM_DISABLE=1
 mkdir -p logs/viz_dfc2020 figs
 
-# Data comes from the official IEEE DataPort release via get_loaders(); the
-# split is selected by DFC2020_SPLIT (roi | cobench). The old GFM-Bench
-# extraction was removed on 2026-08-20 -- that packaging shipped MODIS `lc`
-# rasters instead of the contest ground truth.
-export DFC2020_SPLIT="${DFC2020_SPLIT:-cobench}"
+# Data comes from the official IEEE DataPort release via get_loaders(), always
+# on the Copernicus-Bench split (8 classes). The old GFM-Bench extraction was
+# removed on 2026-08-20 -- that packaging shipped MODIS `lc` rasters instead of
+# the contest ground truth -- and the ROI-disjoint split was removed 2026-09-13.
 if [ ! -d "datasets/DFC2020_official/DFC_Public_Dataset" ]; then
     echo "[error] official DFC2020 not found at datasets/DFC2020_official/DFC_Public_Dataset"
     exit 1
@@ -31,7 +30,7 @@ fi
 # claiming s2_rgb->s2_norgb point at models for entirely different pairs (the
 # previously-chosen 0420_1027 is really an s1->s2 evan_large model). The
 # checkpoints below were verified by reading evan_config.supported_modalities
-# out of the weights. Of the 68 dfc2020 SHOT checkpoints on disk, exactly 8
+# out of the weights. Of the 68 dfc2020 Delulu checkpoints on disk, exactly 8
 # genuinely carry {s2_rgb, s2_norgb}, and all 8 are evan_base.
 #
 # Best mean-val across the three paths among those 8:
@@ -39,7 +38,7 @@ fi
 #   test                          = 48.90 / 44.67 / 49.78
 DELULU="${DELULU:-checkpoints/delulu-checkpoints/delulunet_dfc2020_0420_0752.pt}"
 
-# Stage-0 SFT baselines, evan_base to match the SHOT model's arch.
+# Stage-0 SFT baselines, evan_base to match the Delulu model's arch.
 # s2_rgb:   val 55.71 / test 48.76
 # s2_norgb: val 56.22 / test 43.73 — picked over the 56.90-val run, whose test
 #           mIoU drops to 39.87 and would understate the baseline in a figure.
@@ -62,7 +61,7 @@ echo "    sft_new:   ${SFT_NEW}"
 # (savanna), but tiles with NO masking are uniform single-class ones where every
 # model scores mIoU 100. Selection therefore requires class diversity too.
 # Set INDICES="0 1 2 3" to force specific tiles.
-python -u viz_dfc2020.py \
+python -u viz/viz_dfc2020.py \
     --delulu      "${DELULU}" \
     --sft_start   "${SFT_START}" \
     --sft_new     "${SFT_NEW}" \

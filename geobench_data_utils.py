@@ -1,8 +1,8 @@
 """
 GeoBench-v2 data utilities for multimodal loading.
 
-Provides dataloaders for BEN-v2 and PASTIS that match the 5-loader interface
-expected by shot_ete.py:
+Provides dataloaders for BEN-v2 (BigEarthNet-v2) matching the 5-loader interface
+expected by train_delulu.py:
     train1_loader, val1_loader, train2_loader, val2_loader, test_loader
 
 Batches are normalized within the dataset and stacked into a single 'image'
@@ -26,8 +26,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'GEO-Bench-2'))
 import h5py
 
 from geobench_v2.datasets.benv2 import GeoBenchBENV2
-from geobench_v2.datasets.pastis import GeoBenchPASTIS
 from geobench_v2.datasets.normalization import ZScoreNormalizer
+
+# TaskConfig lives in data_utils to avoid circular imports; re-export for
+# callers that import it directly from here.
+from data_utils import TaskConfig  # noqa: F401
 
 
 class IdentityNormalizer:
@@ -35,52 +38,6 @@ class IdentityNormalizer:
     def __call__(self, data):
         return data
 
-
-class GeoBenchPASTISRandom(GeoBenchPASTIS):
-    """GeoBenchPASTIS with random temporal subsampling instead of uniform."""
-
-    def _load_image(self, path):
-        with h5py.File(self._return_byte_stream(path), "r") as f:
-            tensor = torch.from_numpy(f["data"][:]).float()
-
-        T = tensor.shape[0]
-        if T < self.num_time_steps:
-            padding = torch.zeros(self.num_time_steps - T, *tensor.shape[1:])
-            tensor = torch.cat((padding, tensor), dim=0)
-        else:
-            indexes = sorted(random.sample(range(T), self.num_time_steps))
-            tensor = tensor[indexes]
-
-        if self.temporal_aggregation is not None:
-            if self.temporal_aggregation == "mean":
-                tensor = torch.mean(tensor, 0)
-            if self.temporal_aggregation == "median":
-                tensor = torch.median(tensor, 0).values
-
-        if self.num_time_steps == 1:
-            tensor = tensor.squeeze(0)
-
-        return tensor.float()
-
-
-class GeoBenchPASTISMedianAll(GeoBenchPASTIS):
-    """GeoBenchPASTIS that aggregates over ALL timestamps (no subsampling).
-
-    Used for val/test to get a deterministic, maximally-informed median.
-    """
-
-    def _load_image(self, path):
-        with h5py.File(self._return_byte_stream(path), "r") as f:
-            tensor = torch.from_numpy(f["data"][:]).float()
-
-        # Always use all T timestamps — no subsampling
-        tensor = torch.median(tensor, 0).values  # (C, H, W)
-        return tensor.float()
-
-
-# TaskConfig lives in data_utils to avoid circular imports; re-export for
-# callers that import it directly from here.
-from data_utils import TaskConfig  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # StackedModalityDataset
@@ -264,7 +221,7 @@ def get_benv2_loaders(
     data_normalizer=ZScoreNormalizer,
 ) -> tuple:
     """
-    Create 5 dataloaders for BEN-v2 matching the SHOT interface.
+    Create 5 dataloaders for BEN-v2 matching the Delulu interface.
 
     All loaders expose the full S2+S1 stacked image tensor. Modality selection
     is done at training time via create_multimodal_batch() using modality_slices,
@@ -383,10 +340,14 @@ def get_benv2_loaders(
 
 
 # ---------------------------------------------------------------------------
-# PASTIS loaders
+# DINO-style normalization helper
 # ---------------------------------------------------------------------------
+# Band names below describe the PASTIS layout. PASTIS itself is no longer a
+# supported dataset, but make_div10000_normalizer() is still used by the
+# distillation / MKE / FreeMatch baselines whenever a teacher checkpoint records
+# normalization='div10000', so the band lists are retained for it.
 
-# PASTIS S2 bands (10 bands)
+# S2 bands (10 bands)
 PASTIS_S2_BANDS = ('B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B11', 'B12')
 PASTIS_S2_RGB_BANDS = ('B04', 'B03', 'B02')
 # PASTIS S1: asc + desc, each 3 channels — merged into single 's1' (6ch)
@@ -394,7 +355,7 @@ PASTIS_S1_ASC_BANDS = ('VV_asc', 'VH_asc', 'VV/VH_asc')
 PASTIS_S1_DESC_BANDS = ('VV_desc', 'VH_desc', 'VV/VH_desc')
 
 def make_div10000_normalizer():
-    """Return a ZScoreNormalizer instance with mean=0, std=10000 for all PASTIS bands.
+    """Return a ZScoreNormalizer instance with mean=0, std=10000 for all bands.
     This matches the torchgeo DINO pretraining normalization (divide by 10000).
     Passed as a pre-initialized instance so GeoBench uses it directly.
     """
@@ -412,166 +373,5 @@ def make_div10000_normalizer():
     }
     return ZScoreNormalizer(stats=stats, band_order=full_band_order)
 
-
-def get_pastis_loaders(
-    batch_size: int = 32,
-    num_workers: int = 8,
-    data_root: str = 'datasets/geoben2/pastis',
-    seed: int = 42,
-    temporal_aggregation: str = 'median',
-    num_time_steps: int = 10,
-    starting_modality: str = 's2',
-    new_modality: str | None = 's1',
-    data_normalizer=None,
-) -> tuple:
-    """
-    Create 5 dataloaders for PASTIS (semantic segmentation) matching the SHOT interface.
-
-    S1 ascending + descending passes are concatenated into a single 's1' modality
-    (6 channels: VV_asc, VH_asc, VV/VH_asc, VV_desc, VH_desc, VV/VH_desc).
-
-    Args:
-        temporal_aggregation: How to collapse time dimension. 'mean' or 'median'.
-        num_time_steps: Number of timestamps to sample before aggregation. Train uses
-            random sampling; val/test use uniform sampling.
-        starting_modality: Which modality is available at stage 0 ('s2', 's1', or 'rgb').
-            'rgb' uses B04/B03/B02 channels from the S2 stack (3ch), useful for initializing
-            from DINOv2 weights. train1/val1 will contain only this modality; train2/val2/test
-            contain both.
-
-    Returns:
-        train1_loader: starting_modality-only, with semantic segmentation masks
-        val1_loader:   starting_modality-only, with masks
-        train2_loader: S2+S1, with masks
-        val2_loader:   S2+S1, with masks
-        test_loader:   S2+S1, with masks
-        task_config:   TaskConfig describing this dataset/task
-    """
-    assert starting_modality in ('s2', 's1', 'rgb'), f"starting_modality must be 's2', 's1', or 'rgb', got {starting_modality!r}"
-    root = Path(data_root)
-
-    n_s1 = len(PASTIS_S1_ASC_BANDS) + len(PASTIS_S1_DESC_BANDS)
-    s1_merge = {'s1': ['s1_asc', 's1_desc']}
-    full_stack_order = ['s2', 's1_asc', 's1_desc']
-    full_band_order = {
-        's2':      list(PASTIS_S2_BANDS),
-        's1_asc':  list(PASTIS_S1_ASC_BANDS),
-        's1_desc': list(PASTIS_S1_DESC_BANDS),
-    }
-
-    train_kwargs = dict(
-        temporal_aggregation=temporal_aggregation,
-        num_time_steps=num_time_steps,
-        label_type='semantic_seg',
-        data_normalizer=data_normalizer or ZScoreNormalizer,
-    )
-    eval_kwargs = dict(
-        label_type='semantic_seg',
-        data_normalizer=data_normalizer or ZScoreNormalizer,
-    )
-
-    # Train: random temporal subsampling → aggregation
-    # Val/test: median over ALL timestamps (deterministic, no subsampling)
-    train_full = GeoBenchPASTISRandom(root=root, split='train', band_order=full_band_order, **train_kwargs)
-    val_full   = GeoBenchPASTISMedianAll(root=root, split='val',  band_order=full_band_order, **eval_kwargs)
-    test_full  = GeoBenchPASTISMedianAll(root=root, split='test', band_order=full_band_order, **eval_kwargs)
-
-    test_ds = StackedModalityDataset(test_full, modality_stack_order=full_stack_order, merge_modalities=s1_merge)
-
-    # Split train and val 50/50 (no overlap, deterministic)
-    rng = random.Random(seed)
-
-    train_indices = list(range(len(train_full)))
-    rng.shuffle(train_indices)
-    train1_indices = train_indices[:len(train_indices) // 2]
-    train2_indices = train_indices[len(train_indices) // 2:]
-
-    val_indices = list(range(len(val_full)))
-    rng.shuffle(val_indices)
-    val1_indices = val_indices[:len(val_indices) // 2]
-    val2_indices = val_indices[len(val_indices) // 2:]
-
-    train1_ds = StackedModalityDataset(
-        Subset(train_full, train1_indices), modality_stack_order=full_stack_order, merge_modalities=s1_merge,
-    )
-    train2_ds = StackedModalityDataset(
-        Subset(train_full, train2_indices), modality_stack_order=full_stack_order, merge_modalities=s1_merge,
-    )
-    val1_ds = StackedModalityDataset(
-        Subset(val_full, val1_indices), modality_stack_order=full_stack_order, merge_modalities=s1_merge,
-    )
-    val2_ds = StackedModalityDataset(
-        Subset(val_full, val2_indices), modality_stack_order=full_stack_order, merge_modalities=s1_merge,
-    )
-
-    print(f"PASTIS — Train1: {len(train1_ds)}, Train2: {len(train2_ds)}, Test: {len(test_ds)} (S2+S1)")
-    print(f"PASTIS — Val1: {len(val1_ds)} (S2+S1), Val2: {len(val2_ds)} (S2+S1)")
-
-    train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=True, timeout=120)
-    val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    train2_loader = DataLoader(train2_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=True, timeout=120)
-    val2_loader   = DataLoader(val2_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    test_loader   = DataLoader(test_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-
-    # Build modality_slices from a sample (trigger lazy init)
-    _ = train1_ds[0]
-    modality_slices = train1_ds.modality_slices  # {'s2': slice(0,10), 's1': slice(10,16)}
-
-    # Diagnostics: check normalization of first batch
-    sample = train1_ds[0]
-    img = sample['image']  # [C, H, W]
-    print(f"\nPASTIS normalization diagnostics (single sample, image shape={tuple(img.shape)}):")
-    for mod, sl in modality_slices.items():
-        x = img[sl]  # [C_mod, H, W]
-        print(f"  {mod}: mean={x.mean():.3f}  std={x.std():.3f}  min={x.min():.3f}  max={x.max():.3f}")
-    if 'mask' in sample:
-        mask = sample['mask']
-        unique = mask.unique().tolist()
-        print(f"  mask: shape={tuple(mask.shape)}  dtype={mask.dtype}  unique classes={unique[:20]}{'...' if len(unique)>20 else ''}")
-
-    # Add 'rgb' as a virtual modality: B04, B03, B02 are at positions 2, 1, 0 in the S2 block
-    if 'rgb' not in modality_slices:
-        modality_slices['rgb'] = [2, 1, 0]  # absolute indices into stacked image
-
-    # Add S2 sub-band groups (match EuroSAT rgb/vre/nir/swir groupings)
-    # PASTIS S2 order: B02,B03,B04,B05,B06,B07,B08,B8A,B11,B12 (idx 0-9 within s2 slice)
-    # Absolute indices in stacked tensor (s2 starts at 0):
-    modality_slices['s2_rgb']   = [2, 1, 0]         # B04, B03, B02 (same as 'rgb')
-    modality_slices['s2_norgb'] = [3, 4, 5, 6, 7, 8, 9]  # B05-B8A, B11, B12 (7 bands)
-    modality_slices['s2_vre']   = slice(3, 6)       # B05, B06, B07
-    modality_slices['s2_nir']   = slice(6, 8)       # B08, B8A
-    modality_slices['s2_swir']  = slice(8, 10)      # B11, B12 (no B10 in PASTIS)
-    # no s2_aw: B01/B09 not in PASTIS S2
-
-    assert starting_modality in modality_slices, \
-        f"starting_modality must be one of {list(modality_slices)}, got {starting_modality!r}"
-    assert new_modality is None or new_modality in modality_slices, \
-        f"new_modality must be one of {list(modality_slices)} or None, got {new_modality!r}"
-
-    def _bands_len(spec, total_ch):
-        if isinstance(spec, slice):
-            return len(range(*spec.indices(total_ch)))
-        return len(spec)
-
-    total_ch = train1_ds[0]['image'].shape[0]
-    start_channels = _bands_len(modality_slices[starting_modality], total_ch)
-    new_channels   = _bands_len(modality_slices[new_modality], total_ch) if new_modality is not None else 0
-
-    task_config = TaskConfig(
-        dataset_name='pastis',
-        task_type='segmentation',
-        modality_a=starting_modality,
-        modality_b=new_modality,
-        modality_a_channels=start_channels,
-        modality_b_channels=new_channels,
-        num_classes=GeoBenchPASTIS.num_classes,
-        multilabel=False,
-        label_key='mask',
-        modality_bands_dict=modality_slices,
-        img_size=128,
-        ignore_index=19,  # void_label: parcels mostly outside their patch
-    )
-
-    return train1_loader, val1_loader, train2_loader, val2_loader, test_loader, task_config
 
 # python -u finetune_geotorch_model.py --train_mode fft --epochs 10 --batch_size 16 --num_workers 4 --checkpoint_name pastis_geotorch_fft

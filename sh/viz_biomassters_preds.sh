@@ -21,16 +21,16 @@ export TQDM_DISABLE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p logs/viz_biomassters_preds figs
 
-# Both directions share one stage-0 teacher per modality — every SHOT run in
+# Both directions share one stage-0 teacher per modality — every Delulu run in
 # each family records the same stage0_checkpoint. Each SFT_* below is the exact
-# teacher its SHOT runs were distilled from, so the peeking/transfer columns are
+# teacher its Delulu runs were distilled from, so the peeking/transfer columns are
 # compared against the model they actually started from.
 # NOTE: a better S2 teacher exists (…065543, test RMSE 42.91 vs …075836's ~47.7),
-# but swapping it in would misrepresent the SHOT runs' starting point.
+# but swapping it in would misrepresent the Delulu runs' starting point.
 SFT_S2="${SFT_S2:-checkpoints/sft_evan_base_biomassters_s2_fft_lr0.0005_20260725_075836.pt}"
 SFT_S1="${SFT_S1:-checkpoints/sft_evan_base_biomassters_s1_fft_lr0.0005_20260725_075947.pt}"
 
-# SHOT checkpoints, both evan_base / T=12 / upernet+relu, modality pairs verified
+# Delulu checkpoints, both evan_base / T=12 / upernet+relu, modality pairs verified
 # by reading supported_modalities out of the weights.
 #   s2s1: best all-round of 18 runs — best val peeking (-43.13), addition -11.40
 #   s1s2: best all-round of 17 runs — best val addition (-8.71), transfer -22.30
@@ -57,7 +57,7 @@ run_direction() {
     echo "    sft_start: ${sft_start}"
     echo "    sft_new:   ${sft_new}"
 
-    python -u viz_biomassters_preds.py \
+    python -u viz/viz_biomassters_preds.py \
         --starting_modality "${start}" \
         --new_modality      "${new}" \
         --delulu            "${delulu}" \

@@ -62,7 +62,7 @@ MODALITY_DROPOUT_STARTMOD="${MDS}",MODALITY_DROPOUT_NEWMOD="${MDN}",\
 TOKEN_MASK_RATIO="${TMR}",LR="${LR}",WEIGHT_DECAY="${WD}",\
 TRIAL_TAG="${TRIAL_TAG}",SEED=0,\
 RESULTS_CSV="res/delulu/dfc2020_cobench_distillonly_sweep_${DECODER}.csv" \
-                sh/shot_ete_dfc2020_job.sh >/dev/null
+                sh/train_delulu_dfc2020_job.sh >/dev/null
         fi
         n=$((n+1))
         [ "$t" -lt 2 ] && echo "  [$n] ${START}->+${NEW} ${TRIAL_TAG}: mds=${MDS} mdn=${MDN} tmr=${TMR} lr=${LR} wd=${WD}"

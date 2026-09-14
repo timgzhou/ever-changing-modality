@@ -22,7 +22,7 @@ export TQDM_DISABLE=1
 SWEEP_JSON="res/delulu-sweep/best_masking.json"
 RESULTS_CSV="res/ablation/benv2_fusion_time.csv"
 
-mkdir -p res/ablation logs/shot_ete_ablate_fusion_time
+mkdir -p res/ablation logs/train_delulu_ablate_fusion_time
 
 HPARAMS=$(jq -c ".\"${SELECT_BY}\".hparams" "$SWEEP_JSON")
 
@@ -57,7 +57,7 @@ BOOL_FLAGS=""
 
 echo "  fusion_time=${FUSION_TIME} select_by=${SELECT_BY} teacher=${TEACHER}"
 
-python -u shot_ete.py \
+python -u train_delulu.py \
     --dataset "$DATASET" \
     --new_mod_group "$NEW_MOD" \
     --stage0_checkpoint "$TEACHER" \

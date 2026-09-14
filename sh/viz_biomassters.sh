@@ -14,7 +14,7 @@
 source sh/env.sh
 mkdir -p logs/viz_biomassters figs
 
-python -u viz_biomassters.py \
+python -u viz/viz_biomassters.py \
     --num_time_steps "${NUM_TIME_STEPS:-12}" \
     --index "${INDEX:-0}" \
     --out figs/biomassters

@@ -20,8 +20,8 @@ MODALITY_KEY="${MODALITY_ENTRY}"
 # cobench = Copernicus-Bench 3156/986/986 8-class). Keep their results in
 # separate files so the dedup below never treats one as satisfying the other.
 CSV_SUFFIX=""
-if [ "${DATASET}" = "dfc2020" ] && [ -n "${DFC2020_SPLIT}" ] && [ "${DFC2020_SPLIT}" != "roi" ]; then
-    CSV_SUFFIX="_${DFC2020_SPLIT}"
+if [ "${DATASET}" = "dfc2020" ]; then
+    CSV_SUFFIX="_cobench"
 fi
 RESULTS_CSV="res/train_sft/${DATASET}${CSV_SUFFIX}.csv"
 
@@ -76,7 +76,11 @@ for USE_DINO in 1 0; do
     # Every row carries train_split since the migration, so it is required (not
     # optional like the legacy trailing columns).
     TRAIN_AUG="${TRAIN_AUG:-none}"
-    if grep -qP "^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},[^,]+,[^,]+,${LR},${WD},([^,]+,){7}${DINO_VAL},${T},\Q${DECODER_TAG}\E,${TRAIN_AUG},${TRAIN_SPLIT}\r?$" "${RESULTS_CSV}" 2>/dev/null; then
+    # Historical rows carry two extra columns (tz_lora_rank,
+    # tz_modality_specific_layer_augmenter) that were dropped when LoRA was
+    # removed; the optional group matches both the old and new schema so
+    # completed runs are still recognised and not re-submitted.
+    if grep -qP "^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},([^,]*,[^,]*,)?${LR},${WD},([^,]+,){7}${DINO_VAL},${T},\Q${DECODER_TAG}\E,${TRAIN_AUG},${TRAIN_SPLIT}\r?$" "${RESULTS_CSV}" 2>/dev/null; then
         echo "  → dino_init=${DINO_VAL} train_split=${TRAIN_SPLIT} already in results, skipping"
         continue
     fi

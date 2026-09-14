@@ -33,7 +33,7 @@ DIRECTIONS = [
 ]
 
 # Each config: fixed CLI args appended to the sweep command.
-# Keys map directly to sweep_shot.py argparse arguments.
+# Keys map directly to sweep_delulu.py argparse arguments.
 CONFIGS = [
     {
         'name': 'delulu',

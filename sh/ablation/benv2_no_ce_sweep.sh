@@ -16,7 +16,7 @@ if [ -z "$STARTING_MOD" ] || [ -z "$NEW_MOD" ]; then
     exit 1
 fi
 
-mkdir -p logs/shot_ete res/ablation
+mkdir -p logs/train_delulu res/ablation
 
 TEACHER_KEY="${DATASET}/${STARTING_MOD}/${MODEL}"
 TEACHER=$(jq -r ".\"${TEACHER_KEY}\".checkpoint // empty" "$TEACHERS_JSON")

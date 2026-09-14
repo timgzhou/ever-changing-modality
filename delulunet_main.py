@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
-from delulunet.layers import CrossAttentionBlock, LoRALayer, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
+from delulunet.layers import CrossAttentionBlock, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
 from functools import partial
 
 logger = logging.getLogger("evan")
@@ -81,10 +81,27 @@ class CrossSequenceProjector(nn.Module):
         else:
             rope_memory = None
 
-        # Self-attention on source tokens with RoPE
+        # Build the self-attention mask BEFORE the self-attention layers. Without this
+        # the (unmasked) self-attention blends masked source patches into the visible
+        # ones, so the -inf mask on the cross-attention below no longer blocks them:
+        # the information has already moved. Masked patches are blocked as keys/values
+        # only; the CLS/storage prefix stays visible to everything.
+        self_attn_mask = None
+        if src_patch_mask is not None:
+            Nsrc = x.shape[1]
+            key_blocked = torch.zeros(B, Nsrc, device=x.device, dtype=torch.bool)
+            key_blocked[:, src_n_prefix:] = src_patch_mask
+            self_attn_mask = torch.zeros(B, 1, Nsrc, Nsrc, device=x.device, dtype=x.dtype)
+            self_attn_mask.masked_fill_(key_blocked[:, None, None, :], float('-inf'))
+            # A fully-masked row would make softmax produce NaN. Masked query rows only
+            # feed positions the cross-attention discards, so let them attend to the
+            # prefix (always visible) to keep the row finite.
+            self_attn_mask[:, :, :, :src_n_prefix] = 0.0
+
+        # Self-attention on source tokens with RoPE (masked source patches blocked)
         if self.self_attn_layers is not None:
             for blk in self.self_attn_layers:
-                x = blk(x, rope_memory)
+                x = blk(x, rope_memory, attn_mask=self_attn_mask)
 
         # Prepare queries: 1 CLS query + patch prototype broadcast to n_patches
         q_cls = queries[:, :1, :].expand(B, -1, -1)                      # [B, 1, D]
@@ -145,10 +162,7 @@ class EVAN(nn.Module):
         mask_k_bias: bool = False,
         untie_cls_and_patch_norms: bool = False,
         device: Any | None = None,
-        tz_modality_specific_layer_augmenter: Literal["lora", "fft"] = "lora",
-        tz_modality_fusion_layer_augmenter: Literal["lora","none"] = "none",
         tz_fusion_time: int = 3,
-        tz_lora_rank: int=0,
         starting_modality: 'str | list[str]' = 'rgb',
         starting_n_chans: 'int | list[int]' = 3,
         intermediate_projector_type: Literal["self", "cross"] = "self",
@@ -169,9 +183,6 @@ class EVAN(nn.Module):
         self.img_size = img_size
         self.device = device
         self.tz_fusion_time = tz_fusion_time
-        self.tz_lora_rank = tz_lora_rank
-        self.tz_modality_specific_layer_augmenter = tz_modality_specific_layer_augmenter
-        self.tz_modality_fusion_layer_augmenter = tz_modality_fusion_layer_augmenter
         # Normalize starting_modality/starting_n_chans to lists; first element is primary.
         if isinstance(starting_modality, str):
             starting_modality = [starting_modality]
@@ -218,8 +229,6 @@ class EVAN(nn.Module):
         self.storage_tokens = nn.ParameterDict()
         self.modality_specific_layer_adaptors = nn.ModuleDict() # shortened as "msla" as followed
         self.modality_encodings = nn.ParameterDict()
-        if self.tz_modality_fusion_layer_augmenter!="none":
-            self.modality_fusion_lora_adaptors = nn.ModuleDict()
         self.intermediate_projectors = nn.ModuleDict()
         if self.intermediate_projector_type == "cross":
             self.projector_queries = nn.ParameterDict()
@@ -230,8 +239,6 @@ class EVAN(nn.Module):
         if self.n_storage_tokens > 0: self.add_new_storage_tokens(starting_modality[0])
         self.add_new_msla(starting_modality[0])
         self.add_modality_encoding(starting_modality[0])
-        if self.tz_modality_fusion_layer_augmenter!="none":
-            self.add_new_mfla(starting_modality[0])
         self.add_new_intermediate_projectors(starting_modality[0])
         print(f"Initialized primary modality: '{starting_modality[0]}' ({starting_n_chans[0]} channels)")
 
@@ -256,12 +263,9 @@ class EVAN(nn.Module):
         )
     def initialize_blocks(self):
         logger.info(f"using {self.ffn_layer} layer as FFN")
-        # In FFT-MSLA mode the first tz_fusion_time blocks are fully replaced by
-        # per-modality adaptors and are never called in the forward pass.
-        if self.tz_modality_specific_layer_augmenter == "fft":
-            blocks_list = self.create_transformer_blocks(self.n_blocks - self.tz_fusion_time)
-        else:
-            blocks_list = self.create_transformer_blocks(self.n_blocks)
+        # The first tz_fusion_time blocks are per-modality (see add_new_msla) and are
+        # never called in the forward pass, so only the shared fusion blocks live here.
+        blocks_list = self.create_transformer_blocks(self.n_blocks - self.tz_fusion_time)
         self.chunked_blocks = False
         self.blocks = nn.ModuleList(blocks_list)
     def add_new_patch_embedders(self,modality_name,in_chans):
@@ -288,53 +292,29 @@ class EVAN(nn.Module):
         self.storage_tokens[modality_name] = param
     def add_new_msla(self, modality, init="backbone"):
         """
-        Add modality-specific layer adaptors.
+        Add modality-specific layer adaptors: a full transformer block per
+        modality for each of the first tz_fusion_time layers.
 
         Args:
             modality: Name of the modality
             init: Weight initialization. "backbone" copies from self.blocks,
                   a modality name copies from that modality, None for random init.
         """
-        if self.tz_modality_specific_layer_augmenter == "lora":
-            self.modality_specific_layer_adaptors[modality] = self.create_lora_list(self.tz_fusion_time)
-        elif self.tz_modality_specific_layer_augmenter == "fft":
-            self.modality_specific_layer_adaptors[modality] = self.create_transformer_blocks(self.tz_fusion_time)
-            # backbone blocks 0..tz_fusion_time-1 are not allocated (initialize_blocks skips them),
-            # so weight init from backbone is deferred to the pretrained weight loaders.
-        else:
-            raise RuntimeError(f"unrecognized {self.tz_modality_specific_layer_augmenter=}")
+        self.modality_specific_layer_adaptors[modality] = self.create_transformer_blocks(self.tz_fusion_time)
+        # backbone blocks 0..tz_fusion_time-1 are not allocated (initialize_blocks skips them),
+        # so weight init from backbone is deferred to the pretrained weight loaders.
     def add_modality_encoding(self,modality_name):
         self.modality_encodings[modality_name]=nn.Parameter(
             torch.zeros(1, 1, self.embed_dim, device=self.device)
         )
-    def add_new_mfla(self, modality):
-        """
-        Add modality fusion layer adaptors.
-
-        Args:
-            modality: Name of the modality
-        """
-        num_fusion_blocks = self.n_blocks - self.tz_fusion_time
-        if self.tz_modality_fusion_layer_augmenter == "lora":
-            self.modality_fusion_lora_adaptors[modality] = self.create_lora_list(num_fusion_blocks)
     def rewire_fusion_time(self, new_ft: int) -> None:
         """
         Override tz_fusion_time after loading a checkpoint by moving blocks across the
         MSLA / fusion boundary. Weights are preserved — no blocks are re-created.
 
-        Only supported in FFT mode with MFLA disabled and exactly one modality registered.
-        Raises NotImplementedError / ValueError rather than silently defaulting.
+        Only supported with exactly one modality registered.
+        Raises ValueError rather than silently defaulting.
         """
-        if self.tz_modality_specific_layer_augmenter != "fft":
-            raise NotImplementedError(
-                f"rewire_fusion_time only supported for tz_modality_specific_layer_augmenter='fft', "
-                f"got {self.tz_modality_specific_layer_augmenter!r}"
-            )
-        if self.tz_modality_fusion_layer_augmenter != "none":
-            raise NotImplementedError(
-                f"rewire_fusion_time does not support MFLA "
-                f"(tz_modality_fusion_layer_augmenter={self.tz_modality_fusion_layer_augmenter!r})"
-            )
         if len(self.supported_modalities) != 1:
             raise ValueError(
                 f"rewire_fusion_time must be called before adding new modalities; "
@@ -408,10 +388,6 @@ class EVAN(nn.Module):
                     nn.init.trunc_normal_(param, std=0.02)
                     self.projector_queries[mod] = param
 
-    def create_lora_list(self,length):
-        return nn.ModuleList([
-            LoRALayer(self.embed_dim, rank=self.tz_lora_rank, device=self.device) for _ in range(length)
-        ])
     def create_transformer_blocks(self,length):
         ffn_layer_cls = ffn_layer_dict[self.ffn_layer]
         return nn.ModuleList([
@@ -550,25 +526,24 @@ class EVAN(nn.Module):
         print(f"    - From HuggingFace checkpoint: {checkpoint_params:,}")
         print(f"    - Created (K bias zeros): {created_params:,}")
 
-        # For FFT mode: Copy first tz_fusion_time blocks to modality-specific layers
-        if self.tz_modality_specific_layer_augmenter == "fft":
-            print(f"\n  FFT mode: Copying first {self.tz_fusion_time} DINO blocks to {self.starting_modality} modality-specific layers...")
-            fft_params_copied = 0
-            for i in range(self.tz_fusion_time):
-                for key, value in list(checkpoint.items()):
-                    if key.startswith(f'blocks.{i}.'):
-                        msla_key = key.replace(f'blocks.{i}.', f'modality_specific_layer_adaptors.{self.starting_modality}.{i}.')
-                        checkpoint[msla_key] = value.clone()
-                        fft_params_copied += value.numel()
-            print(f"    Copied {fft_params_copied:,} parameters for {self.starting_modality} FFT blocks")
-            # Remap remaining blocks.{tz_fusion_time+j} → blocks.{j} so they land in the
-            # trimmed self.blocks (which starts at the first fusion block).
-            for j in range(self.n_blocks - self.tz_fusion_time):
-                src_idx = self.tz_fusion_time + j
-                for key in list(checkpoint.keys()):
-                    if key.startswith(f'blocks.{src_idx}.'):
-                        new_key = key.replace(f'blocks.{src_idx}.', f'blocks.{j}.')
-                        checkpoint[new_key] = checkpoint.pop(key)
+        # Copy the first tz_fusion_time blocks to the modality-specific layers
+        print(f"\n  Copying first {self.tz_fusion_time} DINO blocks to {self.starting_modality} modality-specific layers...")
+        msla_params_copied = 0
+        for i in range(self.tz_fusion_time):
+            for key, value in list(checkpoint.items()):
+                if key.startswith(f'blocks.{i}.'):
+                    msla_key = key.replace(f'blocks.{i}.', f'modality_specific_layer_adaptors.{self.starting_modality}.{i}.')
+                    checkpoint[msla_key] = value.clone()
+                    msla_params_copied += value.numel()
+        print(f"    Copied {msla_params_copied:,} parameters for {self.starting_modality} modality-specific blocks")
+        # Remap remaining blocks.{tz_fusion_time+j} → blocks.{j} so they land in the
+        # trimmed self.blocks (which starts at the first fusion block).
+        for j in range(self.n_blocks - self.tz_fusion_time):
+            src_idx = self.tz_fusion_time + j
+            for key in list(checkpoint.keys()):
+                if key.startswith(f'blocks.{src_idx}.'):
+                    new_key = key.replace(f'blocks.{src_idx}.', f'blocks.{j}.')
+                    checkpoint[new_key] = checkpoint.pop(key)
         
         result = self.load_state_dict(checkpoint, strict=False)
 
@@ -612,16 +587,12 @@ class EVAN(nn.Module):
             # so it won't appear in the checkpoint — expected missing.
             if primary == 's2' and key.startswith('patch_embedders.s2.'):
                 return True
-            if self.tz_modality_specific_layer_augmenter == "lora":
-                if 'modality_specific_layer_adaptors' in key:
+            # Extra modality MSLA blocks don't get DINO copies
+            if key.startswith('modality_specific_layer_adaptors.'):
+                mod = key[len('modality_specific_layer_adaptors.'):].split('.')[0]
+                if mod != primary:
                     return True
-            # FFT mode: extra modality MSLA blocks don't get DINO copies
-            if self.tz_modality_specific_layer_augmenter == "fft":
-                if key.startswith('modality_specific_layer_adaptors.'):
-                    mod = key[len('modality_specific_layer_adaptors.'):].split('.')[0]
-                    if mod != primary:
-                        return True
-            if any(pattern in key for pattern in ['modality_encodings', 'modality_fusion_lora_adaptors']):
+            if 'modality_encodings' in key:
                 return True
             if key.startswith('intermediate_projectors.') or key.startswith('projector_queries.'):
                 return True
@@ -726,21 +697,20 @@ class EVAN(nn.Module):
         print(f"  Transferred parameters: {transferred_params:,}")
         print(f"  Dropped (pos_embed, head): {dropped_params:,}")
 
-        # FFT mode: copy block weights into modality-specific / fusion adaptors
-        if self.tz_modality_specific_layer_augmenter == "fft":
-            print(f"\n  FFT mode: Copying first {self.tz_fusion_time} blocks to {self.starting_modality} modality-specific layers...")
-            for i in range(self.tz_fusion_time):
-                for key, value in list(checkpoint.items()):
-                    if key.startswith(f'blocks.{i}.'):
-                        mod_key = key.replace(f'blocks.{i}.', f'modality_specific_layer_adaptors.{self.starting_modality}.{i}.')
-                        checkpoint[mod_key] = value.clone()
-            # Remap remaining blocks.{tz_fusion_time+j} → blocks.{j} for trimmed self.blocks.
-            for j in range(self.n_blocks - self.tz_fusion_time):
-                src_idx = self.tz_fusion_time + j
-                for key in list(checkpoint.keys()):
-                    if key.startswith(f'blocks.{src_idx}.'):
-                        new_key = key.replace(f'blocks.{src_idx}.', f'blocks.{j}.')
-                        checkpoint[new_key] = checkpoint.pop(key)
+        # Copy block weights into the modality-specific adaptors
+        print(f"\n  Copying first {self.tz_fusion_time} blocks to {self.starting_modality} modality-specific layers...")
+        for i in range(self.tz_fusion_time):
+            for key, value in list(checkpoint.items()):
+                if key.startswith(f'blocks.{i}.'):
+                    mod_key = key.replace(f'blocks.{i}.', f'modality_specific_layer_adaptors.{self.starting_modality}.{i}.')
+                    checkpoint[mod_key] = value.clone()
+        # Remap remaining blocks.{tz_fusion_time+j} → blocks.{j} for trimmed self.blocks.
+        for j in range(self.n_blocks - self.tz_fusion_time):
+            src_idx = self.tz_fusion_time + j
+            for key in list(checkpoint.keys()):
+                if key.startswith(f'blocks.{src_idx}.'):
+                    new_key = key.replace(f'blocks.{src_idx}.', f'blocks.{j}.')
+                    checkpoint[new_key] = checkpoint.pop(key)
 
         result = self.load_state_dict(checkpoint, strict=False)
 
@@ -756,15 +726,11 @@ class EVAN(nn.Module):
                     mod = key[len(prefix):].split('.')[0]
                     if mod != primary:
                         return True
-            if self.tz_modality_specific_layer_augmenter == "lora":
-                if 'modality_specific_layer_adaptors' in key:
+            if key.startswith('modality_specific_layer_adaptors.'):
+                mod = key[len('modality_specific_layer_adaptors.'):].split('.')[0]
+                if mod != primary:
                     return True
-            if self.tz_modality_specific_layer_augmenter == "fft":
-                if key.startswith('modality_specific_layer_adaptors.'):
-                    mod = key[len('modality_specific_layer_adaptors.'):].split('.')[0]
-                    if mod != primary:
-                        return True
-            if any(p in key for p in ['modality_encodings', 'modality_fusion_lora_adaptors']):
+            if 'modality_encodings' in key:
                 return True
             if key.startswith('intermediate_projectors.') or key.startswith('projector_queries.'):
                 return True
@@ -803,8 +769,6 @@ class EVAN(nn.Module):
         params_before = sum(p.numel() for p in self.parameters())
         self.add_new_patch_embedders(modality_key, in_chans)
         self.add_new_msla(modality_key, init="backbone")
-        if self.tz_modality_fusion_layer_augmenter!="none":
-            self.add_new_mfla(modality_key)
         self.add_new_cls_token(modality_key)
         if self.n_storage_tokens > 0:
             self.add_new_storage_tokens(modality_key)
@@ -816,24 +780,17 @@ class EVAN(nn.Module):
         params_after = sum(p.numel() for p in self.parameters())
         new_params = params_after - params_before
 
-        num_fusion_blocks = self.n_blocks - self.tz_fusion_time
         embedder_params = sum(p.numel() for p in self.patch_embedders[modality_key].parameters())
         msla_params = sum(p.numel() for p in self.modality_specific_layer_adaptors[modality_key].parameters())
-        if self.tz_modality_fusion_layer_augmenter!="none": 
-            mfla_params = sum(p.numel() for p in self.modality_fusion_lora_adaptors[modality_key].parameters())
-        else: mfla_params=0
         cls_token_params = self.cls_tokens[modality_key].numel()
         storage_token_params = self.storage_tokens[modality_key].numel() if self.n_storage_tokens > 0 else 0
         encoding_params = self.modality_encodings[modality_key].numel()
 
         logger.info(f"Initialized new modality: '{modality_key}'")
         logger.info(f"   - Input channels: {in_chans}")
-        logger.info(f"   - Mod-spec Augmenter mode: {self.tz_modality_specific_layer_augmenter}")
-        logger.info(f"   - Mod-fuse Augmenter mode: {self.tz_modality_fusion_layer_augmenter}")
         logger.info(f"   - Components created:")
         logger.info(f"     • Patch embedder: {embedder_params:,} params")
-        logger.info(f"     • Modality-specific {self.tz_modality_specific_layer_augmenter} ({self.tz_fusion_time} blocks): {msla_params:,} params")
-        logger.info(f"     • Modality-fusion {self.tz_modality_fusion_layer_augmenter} ({num_fusion_blocks} blocks): {mfla_params:,} params")
+        logger.info(f"     • Modality-specific blocks ({self.tz_fusion_time}): {msla_params:,} params")
         logger.info(f"     • CLS token: {cls_token_params:,} params")
         logger.info(f"     • Storage tokens: {storage_token_params:,} params")
         logger.info(f"     • Modality encoding: {encoding_params:,} params")
@@ -907,7 +864,7 @@ class EVAN(nn.Module):
         Temporal inputs: if modality tensors have shape [B, C, T, H, W] (a time
         axis), the T dimension is folded into the batch, the non-temporal backbone
         runs per timestep, and the resulting modality token sequences are mean-pooled
-        over T before returning. Everything downstream (fusion, heads, SHOT losses)
+        over T before returning. Everything downstream (fusion, heads, Delulu losses)
         therefore sees ordinary [B, ...] features. Non-temporal [B, C, H, W] inputs
         are unaffected.
 
@@ -953,7 +910,7 @@ class EVAN(nn.Module):
             embedded_modalities[modality_key] = x_mod
             hw_tuples[modality_key] = (H, W)
 
-        # Step 2: Process each modality through first tz_fusion_time blocks with modality-specific LoRA
+        # Step 2: Process each modality through its own first tz_fusion_time blocks
         for modality_key, x_mod in embedded_modalities.items():
             H, W = hw_tuples[modality_key]
 
@@ -964,18 +921,9 @@ class EVAN(nn.Module):
                 else:
                     rope_sincos = None
 
-                # Apply modality-specific adaptation based on mode
-                if self.tz_modality_specific_layer_augmenter == "lora":
-                    # LoRA mode: shared block + additive LoRA adaptation
-                    x_mod = self.blocks[i](x_mod, rope_sincos)
-                    lora = self.modality_specific_layer_adaptors[modality_key][i]
-                    x_mod = x_mod + lora(x_mod)
-                elif self.tz_modality_specific_layer_augmenter == "fft":
-                    # FFT mode: replace with modality-specific full transformer block
-                    adaptor = self.modality_specific_layer_adaptors[modality_key][i]
-                    x_mod = adaptor(x_mod, rope_sincos)
-                else:
-                    raise ValueError(f"Unknown augmenter mode: {self.tz_modality_specific_layer_augmenter}")
+                # Modality-specific full transformer block
+                adaptor = self.modality_specific_layer_adaptors[modality_key][i]
+                x_mod = adaptor(x_mod, rope_sincos)
 
             embedded_modalities[modality_key] = x_mod
 
@@ -1190,7 +1138,6 @@ class EVAN(nn.Module):
         clsreg: bool = False,
         msla: bool = False,
         modality_encoders: bool = False,
-        mfla: bool = False,
         blocks: bool = False,
         norm: bool = False,
         intermediate_projectors: bool = False,
@@ -1203,9 +1150,8 @@ class EVAN(nn.Module):
                       Use 'all' to apply to all modalities.
             patch_embedders: Unfreeze patch embedders for this modality
             clsreg: Unfreeze CLS and storage (register) tokens for this modality
-            msla: Unfreeze modality-specific layer adaptors (LoRAs or FFT blocks)
+            msla: Unfreeze modality-specific transformer blocks
             modality_encoders: Unfreeze modality encodings
-            mfla: Unfreeze modality fusion LoRA adaptors
             blocks: Unfreeze shared transformer blocks (only when modality='backbone')
             norm: Unfreeze shared norm layers (only when modality='backbone')
             mask_token: Unfreeze mask token (only when modality='backbone')
@@ -1230,7 +1176,6 @@ class EVAN(nn.Module):
                     clsreg=clsreg,
                     msla=msla,
                     modality_encoders=modality_encoders,
-                    mfla=mfla,
                 )
             if intermediate_projectors:
                 for param in self.intermediate_projectors.parameters():
@@ -1253,9 +1198,6 @@ class EVAN(nn.Module):
                     param.requires_grad = True
             if modality_encoders and modality in self.modality_encodings:
                 self.modality_encodings[modality].requires_grad = True
-            if mfla and modality in self.modality_fusion_lora_adaptors:
-                for param in self.modality_fusion_lora_adaptors[modality].parameters():
-                    param.requires_grad = True
 
     def freeze_all(self):
         """Freeze all parameters in the model."""
@@ -1289,10 +1231,7 @@ class EVAN(nn.Module):
             'n_storage_tokens': self.n_storage_tokens,
             'mask_k_bias': self.mask_k_bias,
             'untie_cls_and_patch_norms': self.untie_cls_and_patch_norms,
-            'tz_modality_specific_layer_augmenter': self.tz_modality_specific_layer_augmenter,
-            'tz_modality_fusion_layer_augmenter': self.tz_modality_fusion_layer_augmenter,
             'tz_fusion_time': self.tz_fusion_time,
-            'tz_lora_rank': self.tz_lora_rank,
             'starting_modality': self.starting_modality,
             'starting_n_chans': self.supported_modalities_in_chans[0],
             'supported_modalities': self.supported_modalities.copy(),
@@ -1454,7 +1393,7 @@ def evan_small_s2(weights=None, load_weights: bool = True, band_indices: list | 
             Must match starting_n_chans if both are provided.
             BENV2_BAND_INDICES  = [0,1,2,3,4,5,6,7,8,9,11,12]   # drop B10
             PASTIS_BAND_INDICES = [1,2,3,4,5,6,7,8,11,12]        # drop B1,B9,B10
-        **kwargs: Forwarded to EVAN (device, tz_fusion_time, tz_lora_rank,
+        **kwargs: Forwarded to EVAN (device, tz_fusion_time,
                   starting_n_chans, etc.)
     """
     starting_n_chans = kwargs.pop('starting_n_chans', len(band_indices) if band_indices is not None else 13)
@@ -1544,7 +1483,6 @@ class EvanPredictor(nn.Module):
         clsreg: bool = False,
         msla: bool = False,
         modality_encoders: bool = False,
-        mfla: bool = False,
         blocks: bool = False,
         norm: bool = False,
         head: bool = False,
@@ -1558,9 +1496,8 @@ class EvanPredictor(nn.Module):
                       or 'all' to apply to all modalities.
             patch_embedders: Unfreeze patch embedders for this modality
             clsreg: Unfreeze CLS and storage (register) tokens for this modality
-            msla: Unfreeze modality-specific layer adaptors (LoRAs or FFT blocks)
+            msla: Unfreeze modality-specific transformer blocks
             modality_encoders: Unfreeze modality encodings
-            mfla: Unfreeze modality fusion LoRA adaptors
             blocks: Unfreeze shared transformer blocks (only when modality='backbone')
             norm: Unfreeze shared norm layers (only when modality='backbone')
             mask_token: Unfreeze mask token (only when modality='backbone')
@@ -1572,7 +1509,6 @@ class EvanPredictor(nn.Module):
             clsreg=clsreg,
             msla=msla,
             modality_encoders=modality_encoders,
-            mfla=mfla,
             blocks=blocks,
             norm=norm,
             intermediate_projectors=intermediate_projectors,
@@ -1709,7 +1645,7 @@ class EVANClassifier(EvanPredictor):
         self.modality_heads[modality_key] = classifier
         print(f"  Created new classifier for modality: {modality_key}")
 
-    # Keep old name as alias so external callers (shot.py) continue to work
+    # Keep old name as alias so external callers (delulu.py) continue to work
     def instantiate_modality_classifier(self, modality_key: str):
         return self.instantiate_modality_head(modality_key)
 
@@ -2038,7 +1974,7 @@ class EvanSegmenter(EvanPredictor):
     Segmentation head on top of EVAN.
 
     Mirrors EVANClassifier's interface so it can be used as a drop-in replacement
-    in shot_ete.py, shot.py, and train_stage0.py when task_type == 'segmentation'.
+    in train_delulu.py, delulu.py, and train_stage0.py when task_type == 'segmentation'.
 
     decoder_type='linear' (default): 1×1 Conv2d on patch tokens + bilinear upsample.
     decoder_type='upernet': UPerNet-style multi-scale decoder (see UPerNetDecoder).
@@ -2059,7 +1995,7 @@ class EvanSegmenter(EvanPredictor):
         """
         Args:
             evan_model: Pretrained EVAN backbone.
-            num_classes: Number of segmentation classes (e.g. 19 for PASTIS).
+            num_classes: Number of segmentation classes (e.g. 8 for DFC2020).
             decoder_strategy: 'mean' (shared decoder on averaged patch tokens) or
                               'ensemble' (per-modality decoders, average logits).
             decoder_type: 'linear' (1×1 Conv2d + bilinear upsample) or
@@ -2183,7 +2119,7 @@ class EvanSegmenter(EvanPredictor):
         embed_dim = self.evan.embed_dim
         self.modality_heads[modality_key] = self._make_decoder(embed_dim).to(self.device)
 
-    # Keep old name as alias so external callers (shot.py) continue to work
+    # Keep old name as alias so external callers (delulu.py) continue to work
     def instantiate_modality_decoder(self, modality_key: str):
         return self.instantiate_modality_head(modality_key)
 

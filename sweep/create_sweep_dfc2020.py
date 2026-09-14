@@ -1,5 +1,5 @@
 """
-Register W&B sweeps for DFC2020 SHOT on the Copernicus-Bench split.
+Register W&B sweeps for DFC2020 Delulu on the Copernicus-Bench split.
 
 Three directions, one per starting modality, each the best-performing addition
 from that teacher in the 128-epoch manual runs:

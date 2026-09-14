@@ -3,7 +3,7 @@
 # degraded to weak-equivalent (flips only).
 #
 # Motivation: FreeMatch's unsupervised signal is "weak-view prediction survives
-# strong corruption", whereas SHOT uses no augmentation at all. This ablation
+# strong corruption", whereas Delulu uses no augmentation at all. This ablation
 # measures how much of FreeMatch's benefit comes from augmentation strength
 # rather than from self-adaptive thresholding, which is the control needed to
 # compare the two families fairly.
