@@ -36,7 +36,10 @@ INIT_FROM_TEACHER="${INIT_FROM_TEACHER:-0}"
 TEACHERS_JSON="artifacts/sft_teachers.json"
 
 # teacher:new — the same six directions as the delulu runs
-PAIRS="s1:s2_rgb s1:s2_norgb s2_rgb:s1 s2_rgb:s2_norgb s2_norgb:s1 s2_norgb:s2_rgb"
+# s1:s2 / s2:s1 added 2026-09-14: the full-S2 teacher only exists since the
+# stage-0 rerun, and s1<->s2 plus s2_rgb<->s2_norgb are the two pairs the paper
+# reports. Override with PAIRS=... to run a subset.
+PAIRS="${PAIRS:-s1:s2 s2:s1 s1:s2_rgb s1:s2_norgb s2_rgb:s1 s2_rgb:s2_norgb s2_norgb:s1 s2_norgb:s2_rgb}"
 
 n=0
 for P in ${PAIRS}; do

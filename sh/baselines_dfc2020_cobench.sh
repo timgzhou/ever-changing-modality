@@ -28,9 +28,15 @@ SUBMIT="${SUBMIT:-0}"
 TEACHERS_JSON="artifacts/sft_teachers.json"
 TEACHER_SPLIT="${TEACHER_SPLIT:-split1}"
 
-SINGLES="s1 s2_rgb s2_norgb"
+# Single modalities for the semi-supervised baselines (freematch/mixmatch).
+# s1/s2_rgb/s2_norgb are already done; override to add only what is missing,
+# e.g. SINGLES="s2". Set SINGLES="" to skip them entirely.
+SINGLES="${SINGLES-s1 s2_rgb s2_norgb}"
 # teacher -> new modality, both orderings (the delulu directions)
-PAIRS="s1:s2_rgb s1:s2_norgb s2_rgb:s1 s2_rgb:s2_norgb s2_norgb:s1 s2_norgb:s2_rgb"
+# s1:s2 / s2:s1 added 2026-09-14: the full-S2 teacher only exists since the
+# stage-0 rerun, and s1<->s2 plus s2_rgb<->s2_norgb are the two pairs the paper
+# reports. Override with PAIRS=... to run a subset.
+PAIRS="${PAIRS:-s1:s2 s2:s1 s1:s2_rgb s1:s2_norgb s2_rgb:s1 s2_rgb:s2_norgb s2_norgb:s1 s2_norgb:s2_rgb}"
 
 n=0
 submit () {  # $1=name  $2...=args
