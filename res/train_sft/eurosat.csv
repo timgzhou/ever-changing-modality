@@ -210,3 +210,13 @@ eurosat,evan_base,vre+nir,fft,0.0005,0.01,107344138,24,91.96,91.33,Acc,checkpoin
 eurosat,evan_base,vre+nir,fft,0.0005,0.0,107344138,24,91.72,91.41,Acc,checkpoints/sft_evan_base_eurosat_vre+nir_fft_lr0.0005_20260727_072108.pt,clstoken,False,12,cls,strong,split1
 eurosat,evan_base,vre+nir,fft,0.0001,0.0,107344138,24,86.11,85.11,Acc,checkpoints/sft_evan_base_eurosat_vre+nir_fft_lr0.0001_20260727_072119.pt,clstoken,False,12,cls,strong,split1
 eurosat,evan_base,vre+nir,fft,0.0001,0.01,107344138,24,85.57,84.63,Acc,checkpoints/sft_evan_base_eurosat_vre+nir_fft_lr0.0001_20260727_072217.pt,clstoken,False,12,cls,strong,split1
+eurosat,evan_base,rgb,fft,0.0001,0.01,85677322,24,98.57,98.41,Acc,checkpoints/sft_evan_base_eurosat_rgb_fft_lr0.0001_20260913_195452.pt,clstoken,True,12,cls,none,split1
+eurosat,evan_base,vre,fft,0.0001,0.01,85677322,24,87.85,87.93,Acc,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0001_20260913_195708.pt,clstoken,True,12,cls,none,split1
+eurosat,evan_base,nir,fft,0.0001,0.01,85480714,24,78.93,78.74,Acc,checkpoints/sft_evan_base_eurosat_nir_fft_lr0.0001_20260913_195745.pt,clstoken,True,12,cls,none,split1
+eurosat,evan_base,swir,fft,0.0001,0.01,85677322,24,84.72,85.22,Acc,checkpoints/sft_evan_base_eurosat_swir_fft_lr0.0001_20260913_195819.pt,clstoken,True,12,cls,none,split1
+eurosat,evan_base,aw,fft,0.0001,0.01,85480714,24,58.65,59.52,Acc,checkpoints/sft_evan_base_eurosat_aw_fft_lr0.0001_20260913_195819.pt,clstoken,True,12,cls,none,split1
+eurosat,evan_base,nir,fft,0.0001,0.01,85480714,24,76.33,75.15,Acc,checkpoints/sft_evan_base_eurosat_nir_fft_lr0.0001_20260913_202017.pt,clstoken,False,12,cls,none,split1
+eurosat,evan_base,rgb,fft,0.0001,0.01,85677322,24,87.44,87.37,Acc,checkpoints/sft_evan_base_eurosat_rgb_fft_lr0.0001_20260913_201821.pt,clstoken,False,12,cls,none,split1
+eurosat,evan_base,aw,fft,0.0001,0.01,85480714,24,42.37,42.48,Acc,checkpoints/sft_evan_base_eurosat_aw_fft_lr0.0001_20260913_202203.pt,clstoken,False,12,cls,none,split1
+eurosat,evan_base,vre,fft,0.0001,0.01,85677322,24,88.46,87.70,Acc,checkpoints/sft_evan_base_eurosat_vre_fft_lr0.0001_20260913_201947.pt,clstoken,False,12,cls,none,split1
+eurosat,evan_base,swir,fft,0.0001,0.01,85677322,24,85.09,84.00,Acc,checkpoints/sft_evan_base_eurosat_swir_fft_lr0.0001_20260913_202048.pt,clstoken,False,12,cls,none,split1

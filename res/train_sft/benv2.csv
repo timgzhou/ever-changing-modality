@@ -254,3 +254,11 @@ benv2,evan_base,s2_rgb+s1,fft,0.0001,0.0,107351059,24,48.93,54.59,mAP,checkpoint
 benv2,evan_base,s2_rgb+s1,fft,0.0005,0.01,107351059,24,49.55,55.14,mAP,checkpoints/sft_evan_base_benv2_s2_rgb+s1_fft_lr0.0005_20260803_232844.pt,clstoken,False,12,cls,none,full
 benv2,evan_base,s2_rgb+s1,fft,0.0001,0.01,107351059,24,48.86,55.08,mAP,checkpoints/sft_evan_base_benv2_s2_rgb+s1_fft_lr0.0001_20260803_233026.pt,clstoken,False,12,cls,none,full
 benv2,evan_base,s2_rgb+s1,fft,0.0005,0.0,107351059,24,48.93,55.16,mAP,checkpoints/sft_evan_base_benv2_s2_rgb+s1_fft_lr0.0005_20260803_233104.pt,clstoken,False,12,cls,none,full
+benv2,evan_base,s2,fft,0.0001,0.01,87453715,24,57.93,62.28,mAP,checkpoints/sft_evan_base_benv2_s2_fft_lr0.0001_20260913_195852.pt,clstoken,True,12,cls,none,split1
+benv2,evan_base,s2_norgb,fft,0.0001,0.01,86863891,24,56.48,59.73,mAP,checkpoints/sft_evan_base_benv2_s2_norgb_fft_lr0.0001_20260913_200008.pt,clstoken,True,12,cls,none,split1
+benv2,evan_base,s1,fft,0.0001,0.01,85487635,24,44.43,46.90,mAP,checkpoints/sft_evan_base_benv2_s1_fft_lr0.0001_20260913_195956.pt,clstoken,True,12,cls,none,split1
+benv2,evan_base,s2_rgb,fft,0.0001,0.01,85684243,24,61.78,66.03,mAP,checkpoints/sft_evan_base_benv2_s2_rgb_fft_lr0.0001_20260913_195956.pt,clstoken,True,12,cls,none,split1
+benv2,evan_base,s2,fft,0.0001,0.01,87453715,24,55.10,59.57,mAP,checkpoints/sft_evan_base_benv2_s2_fft_lr0.0001_20260913_202241.pt,clstoken,False,12,cls,none,split1
+benv2,evan_base,s2_norgb,fft,0.0001,0.01,86863891,24,53.24,58.66,mAP,checkpoints/sft_evan_base_benv2_s2_norgb_fft_lr0.0001_20260913_202553.pt,clstoken,False,12,cls,none,split1
+benv2,evan_base,s1,fft,0.0001,0.01,85487635,24,42.14,41.84,mAP,checkpoints/sft_evan_base_benv2_s1_fft_lr0.0001_20260913_202633.pt,clstoken,False,12,cls,none,split1
+benv2,evan_base,s2_rgb,fft,0.0001,0.01,85684243,24,46.84,52.47,mAP,checkpoints/sft_evan_base_benv2_s2_rgb_fft_lr0.0001_20260913_202645.pt,clstoken,False,12,cls,none,split1

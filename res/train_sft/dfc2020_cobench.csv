@@ -131,3 +131,11 @@ dfc2020,evan_base,s2_rgb,fft,0.0005,0.01,125011464,24,56.78,56.58,mIoU,checkpoin
 dfc2020,evan_base,s2_norgb,fft,0.0005,0.0,126387720,24,63.45,64.08,mIoU,checkpoints/sft_evan_base_dfc2020_s2_norgb_fft_lr0.0005_20260821_194419.pt,clstoken,False,12,upernet,none,split1
 dfc2020,evan_base,s1,fft,0.0005,0.01,124814856,24,49.16,48.15,mIoU,checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260821_194458.pt,clstoken,False,12,upernet,none,split1
 dfc2020,evan_base,s1,fft,0.0005,0.0,124814856,24,49.05,48.27,mIoU,checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260821_194707.pt,clstoken,False,12,upernet,none,split1
+dfc2020,evan_base,s2,fft,0.0001,0.01,126977544,24,58.24,57.97,mIoU,checkpoints/sft_evan_base_dfc2020_s2_fft_lr0.0001_20260913_200110.pt,clstoken,True,12,upernet,none,split1
+dfc2020,evan_base,s1,fft,0.0001,0.01,124814856,24,46.11,45.14,mIoU,checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0001_20260913_200241.pt,clstoken,True,12,upernet,none,split1
+dfc2020,evan_base,s2_norgb,fft,0.0001,0.01,126387720,24,57.69,57.07,mIoU,checkpoints/sft_evan_base_dfc2020_s2_norgb_fft_lr0.0001_20260913_200241.pt,clstoken,True,12,upernet,none,split1
+dfc2020,evan_base,s2_rgb,fft,0.0001,0.01,125011464,24,58.08,58.32,mIoU,checkpoints/sft_evan_base_dfc2020_s2_rgb_fft_lr0.0001_20260913_200241.pt,clstoken,True,12,upernet,none,split1
+dfc2020,evan_base,s2,fft,0.0001,0.01,126977544,24,63.63,64.01,mIoU,checkpoints/sft_evan_base_dfc2020_s2_fft_lr0.0001_20260913_201635.pt,clstoken,False,12,upernet,none,split1
+dfc2020,evan_base,s1,fft,0.0001,0.01,124814856,24,46.14,45.73,mIoU,checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0001_20260913_201902.pt,clstoken,False,12,upernet,none,split1
+dfc2020,evan_base,s2_norgb,fft,0.0001,0.01,126387720,24,63.17,63.18,mIoU,checkpoints/sft_evan_base_dfc2020_s2_norgb_fft_lr0.0001_20260913_201922.pt,clstoken,False,12,upernet,none,split1
+dfc2020,evan_base,s2_rgb,fft,0.0001,0.01,125011464,24,54.91,54.70,mIoU,checkpoints/sft_evan_base_dfc2020_s2_rgb_fft_lr0.0001_20260913_201952.pt,clstoken,False,12,upernet,none,split1
