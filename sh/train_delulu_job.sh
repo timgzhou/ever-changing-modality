@@ -14,6 +14,12 @@
 # Expected env vars (set by sh/train_delulu_all.sh):
 #   DATASET, NEW, TEACHER            required
 #   EPOCHS, BATCH_SIZE, SEED, LAMBDA_LATENT, STUDENT_INIT, RESULTS_CSV   optional
+#   CONFIG=<yaml> SELECT_BY=<transfer|peeking|addition>
+#                             load tuned hyperparameters from a configs/*.yaml
+#                             (see configs/delulu_best_{dfc2020,benv2}.yaml).
+#                             Values loaded this way are overridden by any
+#                             matching env var already set, so a launcher can
+#                             still pin one parameter explicitly.
 #   SAVE_CHECKPOINT=0         skip writing the final .pt (scratch is quota-bound;
 #                             ablations that only need the metrics should set this)
 #   SELF_DISTILL_ADDITION=1   opt-in: distil the new-modality heads against the
@@ -33,6 +39,33 @@ mkdir -p logs/train_delulu checkpoints res/delulu
 : "${DATASET:?}"; : "${NEW:?}"; : "${TEACHER:?}"
 if [ ! -f "${TEACHER}" ]; then
     echo "[error] teacher checkpoint not found: ${TEACHER}"; exit 1
+fi
+
+# Optional: hydrate hyperparameters from a tuned config YAML. Emitted as shell
+# assignments and eval'd, using ${VAR:=value} so anything already exported by the
+# caller wins. `mae_mask_ratio` in the YAML maps to TOKEN_MASK_RATIO here.
+if [ -n "${CONFIG:-}" ]; then
+    : "${SELECT_BY:?CONFIG requires SELECT_BY=transfer|peeking|addition}"
+    eval "$(python3 - "$CONFIG" "$SELECT_BY" <<'PYEOF'
+import sys, yaml
+cfg, sel = sys.argv[1], sys.argv[2]
+d = yaml.safe_load(open(cfg))
+if sel not in d['configs']:
+    sys.exit(f"echo '[error] {sel} not in {cfg}'; exit 1")
+ENV = {'lr':'LR','lambda_latent':'LAMBDA_LATENT','lambda_prefusion':'LAMBDA_PREFUSION',
+       'lambda_distill':'LAMBDA_DISTILL','modality_dropout_startmod':'MODALITY_DROPOUT_STARTMOD',
+       'modality_dropout_newmod':'MODALITY_DROPOUT_NEWMOD','labeled_frequency':'LABELED_FREQUENCY',
+       'mae_mask_ratio':'TOKEN_MASK_RATIO'}
+for k, v in d['configs'][sel]['hparams'].items():
+    if k in ENV: print(f': "${{{ENV[k]}:={v}}}"')
+for k, v in (d.get('fixed') or {}).items():
+    if k == 'weight_decay':           print(f': "${{WEIGHT_DECAY:={v}}}"')
+    elif k == 'protect_lrm':          print(f': "${{PROTECT_LRM:={v}}}"')
+    elif k == 'labeled_start_fraction': print(f': "${{LABELED_START_FRACTION:={v}}}"')
+if d.get('epochs'): print(f': "${{EPOCHS:={d["epochs"]}}}"')
+PYEOF
+)"
+    echo "Loaded ${SELECT_BY} config from ${CONFIG}"
 fi
 
 # Delulu hyperparameters: the biomassters s1->s2 best config, carried over as a
