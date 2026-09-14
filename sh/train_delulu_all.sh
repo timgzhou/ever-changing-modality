@@ -50,7 +50,17 @@ mods_for () {
         *)       echo "s1 s2|s2_norgb s2_rgb" ;;   # '|' separates independent groups
     esac
 }
-batch_for () { [ "$1" = "dfc2020" ] && echo "8" || echo "32"; }
+# Per-dataset batch size. dfc2020 is 256x256 segmentation; biomassters is
+# temporal (T=12 frames per sample, so ~12x the activations of a still image)
+# and OOMs at 32 on an L40S (44 GB) -- sh/train_delulu_biomassters_best_job.sh
+# has always used 16.
+batch_for () {
+    case "$1" in
+        dfc2020)     echo "8"  ;;
+        biomassters) echo "16" ;;
+        *)           echo "32" ;;
+    esac
+}
 
 # Skip directions that are already finished (a row in the results CSV) or
 # already queued/running (the job echoes "<start> -> +<new>" into its log).
