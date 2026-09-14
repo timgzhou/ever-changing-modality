@@ -43,6 +43,28 @@ group_keys = ["dataset", "modality", "model_type", "train_mode", "dino_init",
 
 counts = df.groupby(group_keys).size().reset_index(name="n_runs")
 
+# Teacher pool: only runs whose checkpoint still exists on disk. Old .pt files
+# get deleted during cleanups while their CSV rows stay, so a best-by-val pick
+# can name a dead path -- every launcher resolving a teacher through
+# artifacts/sft_teachers.json then skips that direction for no visible reason.
+# This filter must run on the FULL dataframe, not on `best`: `best` is already
+# collapsed to one row per group, so filtering afterwards would drop the whole
+# group whenever its single winner happened to be the dead one, even when a
+# live runner-up exists. The `best` table printed below is deliberately NOT
+# filtered -- it is the results summary, and should still show those runs.
+_alive = df["saved_checkpoint"].map(
+    lambda c: isinstance(c, str) and c != "" and os.path.exists(c)
+)
+if (~_alive).any():
+    print(f"[warn] {(~_alive).sum()} run(s) have a missing checkpoint file and "
+          f"are excluded from teacher selection (still shown in the summary)")
+best_teacher_pool = (
+    df[_alive].sort_values("val_metric", ascending=False)
+    .groupby(group_keys, as_index=False)
+    .first()[group_keys + ["learning_rate", "metric_name", "val_metric",
+                           "test_metric", "saved_checkpoint"]]
+)
+
 best = (
     df.sort_values("val_metric", ascending=False)
     .groupby(group_keys, as_index=False)
@@ -64,7 +86,7 @@ for dataset, group in best.groupby("dataset"):
 # dino_init. Filtering to dino_init==True was right when DINO always won, but
 # with the upernet decoder the best s1 and s2_norgb teachers are dino_init=False.
 teachers = (
-    best.sort_values("val_metric", ascending=False)
+    best_teacher_pool.sort_values("val_metric", ascending=False)
         .groupby(["dataset", "modality", "model_type", "decoder", "train_split"],
                  as_index=False)
         .first()

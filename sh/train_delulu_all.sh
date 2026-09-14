@@ -52,7 +52,31 @@ mods_for () {
 }
 batch_for () { [ "$1" = "dfc2020" ] && echo "8" || echo "32"; }
 
-n=0; miss=0
+# Skip directions that are already finished (a row in the results CSV) or
+# already queued/running (the job echoes "<start> -> +<new>" into its log).
+# Without this, re-running the launcher -- which the chain job does once the
+# slower teachers land -- would submit a duplicate of every direction.
+# Submission ledger: "<jobid> <dataset> <start> <new>" appended at submit time.
+# A queued job has not written a log yet, so scraping logs misses exactly the
+# jobs we most need to detect. The ledger is filtered against squeue so entries
+# for finished/cancelled jobs do not block a legitimate resubmission.
+LEDGER="logs/train_delulu/submitted.tsv"
+mkdir -p logs/train_delulu; touch "${LEDGER}"
+INFLIGHT=""
+if [ -z "${SKIP_INFLIGHT_CHECK:-}" ] && command -v squeue >/dev/null 2>&1; then
+    ACTIVE=" $(squeue -u "$USER" -h -o '%i' 2>/dev/null | tr '\n' ' ') "
+    while read -r jid ds st nw; do
+        case "${ACTIVE}" in *" ${jid} "*) INFLIGHT="${INFLIGHT}${ds} ${st} ${nw}"$'\n' ;; esac
+    done < "${LEDGER}"
+fi
+already_done () {   # $1=dataset $2=start $3=new
+    local csv="res/delulu/$1_unimodal_pairs.csv"
+    [ -f "${csv}" ] && awk -F, -v s="$2" -v n="$3" 'NR>1 && $4==s && $5==n {found=1} END{exit !found}' "${csv}" && return 0
+    printf '%s' "${INFLIGHT}" | grep -qxF "$1 $2 $3" && return 0
+    return 1
+}
+
+n=0; miss=0; dup=0
 for DATASET in ${DATASETS}; do
     PREFIX=$(prefix_for "${DATASET}")
     DEC=$(decoder_for "${DATASET}")
@@ -74,16 +98,21 @@ for DATASET in ${DATASETS}; do
                     echo "  [skip] ${DATASET} ${START}->+${NEW}: no teacher for ${KEY}"
                     miss=$((miss+1)); continue
                 fi
+                if already_done "${DATASET}" "${START}" "${NEW}"; then
+                    echo "  [have] ${DATASET} ${START}->+${NEW}: finished or in flight, skipping"
+                    dup=$((dup+1)); continue
+                fi
                 n=$((n+1))
-                EXPORTS="ALL,DATASET=${DATASET},NEW=${NEW},TEACHER=${TEACHER},EPOCHS=${EPOCHS},BATCH_SIZE=${BS},RESULTS_CSV=res/delulu/${DATASET}_unimodal_pairs.csv"
+                EXPORTS="ALL,DATASET=${DATASET},START=${START},NEW=${NEW},TEACHER=${TEACHER},EPOCHS=${EPOCHS},BATCH_SIZE=${BS},RESULTS_CSV=res/delulu/${DATASET}_unimodal_pairs.csv"
                 if [ "${DRYRUN:-0}" = "1" ]; then
                     echo "[$n] ${DATASET}  ${START} -> +${NEW}   teacher=$(basename "${TEACHER}")"
                 else
                     jid=$(sbatch --parsable --export="${EXPORTS}" sh/train_delulu_job.sh)
+                    printf '%s\t%s\t%s\t%s\n' "${jid}" "${DATASET}" "${START}" "${NEW}" >> "${LEDGER}"
                     echo "[$n] submitted ${jid}  ${DATASET}  ${START} -> +${NEW}"
                 fi
             done
         done
     done
 done
-echo "total: ${n} train_delulu jobs; ${miss} skipped (teacher missing)"
+echo "total: ${n} train_delulu jobs; ${miss} skipped (teacher missing); ${dup} skipped (already done/in flight)"

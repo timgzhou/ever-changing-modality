@@ -60,7 +60,10 @@ if [ "${DATASET}" = "biomassters" ]; then
     EXTRA_ARGS="--num_time_steps ${NUM_TIME_STEPS:-12}"
 fi
 
-echo "=== ${DATASET} | ? -> +${NEW} | teacher=${TEACHER} ==="
+# START is informational only (train_delulu.py reads the real starting modality
+# out of the teacher checkpoint); it is echoed so the launcher's in-flight guard
+# can identify which direction a queued job is running.
+echo "=== ${DATASET} | ${START:-?} -> +${NEW} | teacher=${TEACHER} ==="
 echo "    lr=${LR} epochs=${EPOCHS} bs=${BATCH_SIZE} lambda_latent=${LAMBDA_LATENT} seed=${SEED}"
 
 python -u train_delulu.py \
