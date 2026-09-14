@@ -49,7 +49,10 @@ submit () {  # $1=tag  $2...=args
 }
 
 echo "=== teacher-based: distillation + mke (2 directions) ==="
-for P in s2:s1 s1:s2; do
+# Teacher-based directions. s1<->s2 are already done; override to add others or
+# set PAIRS="" to skip this block entirely (e.g. when only filling a mixmatch gap).
+PAIRS="${PAIRS-s2:s1 s1:s2}"
+for P in ${PAIRS}; do
     START="${P%%:*}"; NEW="${P##*:}"
     eval "TEACHER=\$TEACHER_${START}"
     if [ ! -f "${TEACHER}" ]; then
@@ -77,7 +80,11 @@ echo "=== semi-supervised: mixmatch (no teacher, single modality) ==="
 # a plain MSE/CE-scale term, so the paper value over-weights the unlabeled branch
 # by ~2.4x. Swept low, as on dfc2020 (where 75 collapsed to 5.3 mIoU vs 59.4 at 0.5).
 LAMBDA_US="${LAMBDA_US:-0.5 1.0}"
-for MOD in s2 s1; do
+# s2/s1 were the original pair; s2_rgb/s2_norgb became valid biomassters
+# modalities on 2026-09-13 (s2_norgb is the 7-band complement of s2_rgb within
+# the 10-band S2 stack). Override to launch a subset, e.g. SINGLES="s2_rgb s2_norgb".
+SINGLES="${SINGLES:-s2 s1 s2_rgb s2_norgb}"
+for MOD in ${SINGLES}; do
     for LR in ${LRS}; do
         for LU in ${LAMBDA_US}; do
             submit "bm_mixmatch_${MOD}_lr${LR}_lu${LU}" \

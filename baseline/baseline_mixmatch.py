@@ -27,9 +27,11 @@ from train_utils import evaluate
 
 VALID_MODALITIES = {
     'eurosat': ['rgb', 'vre', 'nir', 'swir'],
-    'benv2':   ['s1', 's2', 's2_rgb'],
+    'benv2':   ['s1', 's2', 's2_rgb', 's2_norgb'],
     'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
-    'biomassters': ['s1', 's2'],
+    # s2_rgb / s2_norgb became valid biomassters modalities on 2026-09-13:
+    # s2_norgb is the 7-band complement of s2_rgb within the 10-band S2 stack.
+    'biomassters': ['s1', 's2', 's2_rgb', 's2_norgb'],
 }
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')

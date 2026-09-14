@@ -34,8 +34,13 @@ from train_utils import evaluate
 
 VALID_MODALITIES = {
     'eurosat': ['rgb', 'vre', 'nir', 'swir'],
-    'benv2':   ['s1', 's2', 's2_rgb'],
+    'benv2':   ['s1', 's2', 's2_rgb', 's2_norgb'],
     'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
+    # biomassters is deliberately absent: FreeMatch thresholds hard pseudo-labels
+    # by per-class confidence (argmax + self-adaptive tau per class), which has no
+    # meaning for continuous AGB regression. Applying it would need a different
+    # confidence notion (e.g. predictive variance), i.e. a new method rather than
+    # a config change. main() raises a clear error instead of a KeyError.
 }
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
@@ -315,6 +320,11 @@ def main():
     args = parser.parse_args()
 
     # Validate modality
+    if args.dataset not in VALID_MODALITIES:
+        raise SystemExit(
+            f"FreeMatch does not support --dataset {args.dataset!r}. It relies on "
+            f"per-class confidence thresholding over hard pseudo-labels, which does "
+            f"not transfer to regression targets. Supported: {sorted(VALID_MODALITIES)}")
     valid_mods = VALID_MODALITIES[args.dataset]
     if args.modality not in valid_mods:
         parser.error(f"--modality {args.modality!r} not valid for {args.dataset}. "
