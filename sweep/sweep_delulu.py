@@ -78,8 +78,12 @@ def main():
 
     args = parser.parse_args()
 
-    # Provide defaults that train_delulu expects but sweep doesn't use
+    # Provide defaults that train_delulu expects but sweep doesn't use.
+    # NOTE: every attribute train_delulu.main() reads must be set here -- this
+    # namespace is built by our own parser, not train_delulu's, so a new flag
+    # added there raises AttributeError mid-trial until it is mirrored below.
     args.dyn_teacher = False
+    args.self_distill_addition = False
     args.checkpoint_name = None
     args.save_checkpoint = False
     args.select_by = None

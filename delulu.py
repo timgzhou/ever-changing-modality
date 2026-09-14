@@ -508,6 +508,7 @@ def _unlabeled_batch_step(
     latent_masked_only: bool = False,
     unprotect_starting_mod: bool = False,
     regression_loss_scale: float = 1.0,
+    self_distill_addition: bool = False,
 ):
     """Process one unlabeled (multimodal) batch. Returns (total_loss, loss_dict)."""
     evan = model.evan
@@ -560,7 +561,43 @@ def _unlabeled_batch_step(
         distill_loss = torch.tensor(0.0, device=device)
         distill_count = 0
 
-        if dyn_teacher:
+        if self_distill_addition and not any(modality_dropped.values()):
+            # ADDITION SELF-DISTILLATION (opt-in, --self_distill_addition).
+            #
+            # Only the frozen UNIMODAL teacher supplies a task-shaped target in
+            # this step, and it sees the starting modality alone. That target IS
+            # the peeking answer, so it pulls the fused two-modality prediction
+            # back toward the one-modality one: on a trained dfc2020 checkpoint,
+            # peeking agreed 100% with a start-only prediction while addition
+            # agreed 66%. Addition is therefore penalised exactly where it
+            # correctly disagrees with the teacher.
+            #
+            # Here the student's own addition path -- both modalities real, all
+            # tokens visible -- is used as the target instead. It is the best
+            # informed view available of this unlabeled sample, and uses no
+            # labels: the labeled pool stays unimodal, as the setting requires.
+            #
+            # Guarded to token-masking batches (no modality fully dropped). Under
+            # modality dropout one modality is entirely synthetic, so the
+            # "addition" view would be an addition in name only.
+            #
+            # The starting-modality head keeps the frozen teacher as its target:
+            # there the teacher has exactly the same information as the student,
+            # so it is a genuine anchor, and keeping it stops the self-distilled
+            # heads from drifting to a self-consistent but wrong consensus.
+            with torch.no_grad():
+                addition_logits = model.predict_from_real_modalities(
+                    prefusion_features, tuple(all_modalities), tuple(all_modalities),
+                )
+
+            for mod in student_fused.keys():
+                target = teacher_logits if mod == starting_modality else addition_logits
+                distill_loss = distill_loss + distillation_loss(
+                    model.get_modality_logits(student_fused, mod), target, distillation_temperature,
+                    task_type=task_type, regression_loss_scale=regression_loss_scale,
+                )
+                distill_count += 1
+        elif dyn_teacher:
             # Peeking uses unmasked prefusion_features — grounded in real starting_mod even when
             # starting_mod was dropped in this batch.
             with torch.no_grad():
@@ -841,6 +878,7 @@ def train_delulu_model(
     latent_masked_only: bool = False,
     unprotect_starting_mod: bool = False,
     agree_ref: str = 'teacher',              # 'teacher' (default) or 'peeking'
+    self_distill_addition: bool = False,
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -1124,6 +1162,7 @@ def train_delulu_model(
                     latent_masked_only=latent_masked_only,
                     unprotect_starting_mod=unprotect_starting_mod,
                     regression_loss_scale=regression_loss_scale,
+                    self_distill_addition=self_distill_addition,
                 )
                 unlabeled_count += 1
 

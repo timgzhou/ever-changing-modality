@@ -60,6 +60,16 @@ def _parse_args():
                         help='Fraction of training to protect LRM (startmod) encoder from prefusion loss '
                              'by detaching its features. 0.0=never protect (default), 1.0=always protect, '
                              '0.5=protect first half then release.')
+    parser.add_argument('--self_distill_addition', action='store_true',
+                        help='Experimental. On unlabeled token-masking batches (no modality '
+                             'fully dropped), distil the new-modality heads against the '
+                             "student's own ADDITION path (both modalities real, stop-grad) "
+                             'instead of the frozen unimodal teacher. The teacher only ever '
+                             'sees the starting modality, so its target IS the peeking answer '
+                             'and it penalises addition wherever addition correctly disagrees. '
+                             'The starting-modality head keeps the teacher as its anchor. Uses '
+                             'no labels: the labeled pool stays unimodal. Off by default; '
+                             'recorded in the checkpoint, not in the results CSV.')
     parser.add_argument('--latent_masked_only', action='store_true',
                         help='Only compute latent loss on masked patch positions (not unmasked ones).')
     parser.add_argument('--unprotect_starting_mod', action='store_true',
@@ -281,6 +291,7 @@ def main(args=None):
         use_mask_token=args.use_mask_token,
         protect_lrm=args.protect_lrm,
         latent_masked_only=args.latent_masked_only,
+        self_distill_addition=args.self_distill_addition,
         unprotect_starting_mod=args.unprotect_starting_mod,
         task_type=task_config.task_type,
         label_key=task_config.label_key,
@@ -334,6 +345,11 @@ def main(args=None):
             'num_time_steps': args.num_time_steps,
             'stage0_checkpoint': args.stage0_checkpoint,
             'epochs': args.epochs,
+            # Experimental loss-shaping flag. Deliberately NOT a results-CSV
+            # column: the CSV schema is shared with every historical row, and
+            # this may not pan out. The checkpoint is the record of how a given
+            # set of weights was produced.
+            'self_distill_addition': args.self_distill_addition,
             'best_checkpoints': best_checkpoints,
         }, ckpt_path)
         print(f"Checkpoint saved to: {ckpt_path}  (final epoch {args.epochs})")
