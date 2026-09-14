@@ -14,6 +14,11 @@
 # Expected env vars (set by sh/train_delulu_all.sh):
 #   DATASET, NEW, TEACHER            required
 #   EPOCHS, BATCH_SIZE, SEED, LAMBDA_LATENT, STUDENT_INIT, RESULTS_CSV   optional
+#   SAVE_CHECKPOINT=0         skip writing the final .pt (scratch is quota-bound;
+#                             ablations that only need the metrics should set this)
+#   SELF_DISTILL_ADDITION=1   opt-in: distil the new-modality heads against the
+#                             student's own addition path instead of the frozen
+#                             unimodal teacher (experimental, off by default)
 #
 # The STARTING modality is not passed: train_delulu.py reads it back out of the
 # teacher checkpoint's evan_config, so teacher and student can never disagree.
@@ -50,6 +55,15 @@ TOKEN_MASK_RATIO="${TOKEN_MASK_RATIO:-0.40414477259411485}"
 PROTECT_LRM="${PROTECT_LRM:-0.0}"
 SEED="${SEED:-0}"
 STUDENT_INIT="${STUDENT_INIT:-teacher}"
+SELF_DISTILL_FLAG=""
+if [ -n "${SELF_DISTILL_ADDITION:-}" ] && [ "${SELF_DISTILL_ADDITION}" != "0" ]; then
+    SELF_DISTILL_FLAG="--self_distill_addition"
+fi
+# Default keeps the historical behaviour (save). SAVE_CHECKPOINT=0 opts out.
+SAVE_CKPT_FLAG="--save_checkpoint"
+if [ "${SAVE_CHECKPOINT:-1}" = "0" ]; then
+    SAVE_CKPT_FLAG=""
+fi
 EPOCHS="${EPOCHS:-64}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 RESULTS_CSV="${RESULTS_CSV:-res/delulu/${DATASET}_unimodal_pairs.csv}"
@@ -87,8 +101,9 @@ python -u train_delulu.py \
     --token_mask_ratio "${TOKEN_MASK_RATIO}" \
     --protect_lrm "${PROTECT_LRM}" \
     --latent_masked_only \
+    ${SELF_DISTILL_FLAG} \
     --student_init "${STUDENT_INIT}" \
     --seed "${SEED}" \
-    --save_checkpoint \
+    ${SAVE_CKPT_FLAG} \
     --results_csv "${RESULTS_CSV}" \
     ${EXTRA_ARGS}
