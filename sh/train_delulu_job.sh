@@ -39,6 +39,8 @@
 #                             targets (a segmenter decoder never reads it)
 #   SAVE_CHECKPOINT=0         skip writing the final .pt (scratch is quota-bound;
 #                             ablations that only need the metrics should set this)
+#   CKPT_NAME=<name>          filename for the saved .pt (default: a timestamp,
+#                             which cannot be traced back to an ablation arm)
 #   SELF_DISTILL_ADDITION=1   opt-in: distil the new-modality heads against the
 #                             student's own addition path instead of the frozen
 #                             unimodal teacher (experimental, off by default)
@@ -114,6 +116,9 @@ SAVE_CKPT_FLAG="--save_checkpoint"
 if [ "${SAVE_CHECKPOINT:-1}" = "0" ]; then
     SAVE_CKPT_FLAG=""
 fi
+# CKPT_NAME gives the saved .pt a stable, arm-identifying filename. Without it
+# the name is a timestamp, which cannot be attributed back to an ablation arm.
+[ -n "${CKPT_NAME:-}" ] && SAVE_CKPT_FLAG="${SAVE_CKPT_FLAG} --checkpoint_name ${CKPT_NAME}"
 # Provenance columns: which tuned config produced this row. Without these every
 # cross-config row looks identical apart from its hyperparameters.
 RECON_ARGS=""
