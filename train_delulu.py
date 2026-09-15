@@ -60,14 +60,30 @@ def _parse_args():
                         help='Fraction of training to protect LRM (startmod) encoder from prefusion loss '
                              'by detaching its features. 0.0=never protect (default), 1.0=always protect, '
                              '0.5=protect first half then release.')
-    parser.add_argument('--recon_loss', type=str, default='mse', choices=['mse', 'mse_cos'],
+    parser.add_argument('--recon_loss', type=str, default='mse',
+                        choices=['mse', 'mse_cos', 'mse_ccos'],
                         help='Loss for the prefusion and latent feature-matching terms. '
                              "'mse' is the historical behaviour; 'mse_cos' adds a "
-                             '(1 - cosine) term. Measured on trained checkpoints the '
+                             "(1 - cosine) term; 'mse_ccos' adds that term on "
+                             'MEAN-CENTERED tokens. Measured on trained checkpoints the '
                              'projector is WORSE than a per-sample-mean predictor and keeps '
                              'only 3-27%% of the target across-patch variance, i.e. plain MSE '
-                             'is largely satisfied by regressing to the mean; cosine '
-                             'penalises that collapse.')
+                             'is largely satisfied by regressing to the mean. Raw cosine '
+                             'penalises that only weakly because a pure mean predictor '
+                             'already scores 0.87/0.71 cosine; centering removes the shared '
+                             'mean so collapse pays the full 1.0.')
+    parser.add_argument('--recon_cos_weight_prefusion', type=float, default=1.0,
+                        help='Weight on the cosine term in the PREFUSION reconstruction loss '
+                             '(--recon_loss mse_cos/mse_ccos only). Prefusion targets are raw '
+                             'mid-network activations with MSE ~0.009 (dfc2020) / ~0.040 '
+                             '(benv2), so the default 1.0 makes the cosine term 20-100x the '
+                             'MSE and effectively rescales the whole prefusion loss. Use ~0.01 '
+                             'to keep the two terms comparable and separate loss SHAPE from '
+                             'loss WEIGHT.')
+    parser.add_argument('--recon_cos_weight_latent', type=float, default=1.0,
+                        help='Weight on the cosine term in the LATENT reconstruction loss '
+                             '(--recon_loss mse_cos/mse_ccos only). Latent targets are '
+                             'post-LayerNorm so their MSE is already O(1) and 1.0 is sane.')
     parser.add_argument('--recon_drop_cls', action='store_true',
                         help='Drop the CLS token from the prefusion and latent '
                              'reconstruction targets. A segmenter decoder reads only '
@@ -307,6 +323,8 @@ def main(args=None):
         self_distill_addition=args.self_distill_addition,
         recon_mode=args.recon_loss,
         recon_include_cls=not args.recon_drop_cls,
+        recon_cos_weight_prefusion=args.recon_cos_weight_prefusion,
+        recon_cos_weight_latent=args.recon_cos_weight_latent,
         unprotect_starting_mod=args.unprotect_starting_mod,
         task_type=task_config.task_type,
         label_key=task_config.label_key,

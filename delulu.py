@@ -48,36 +48,98 @@ def distillation_loss(student_logits, teacher_logits, temperature, task_type,
 
 # ==================== Delulu TRAINING COMPONENT ====================
 
-def _recon_loss(pred, target, mode="mse", mask=None):
+def _centered_cos(pred, target, eps=1e-6):
+    """Per-token (1 - cosine) between per-sample-mean-centered tokens -> [B, N].
+
+    The plain cosine between raw tokens is dominated by the sample's mean patch
+    token, which a fully collapsed predictor already reproduces: measured on
+    trained checkpoints a "predict this sample's mean" baseline scores 0.865
+    (dfc2020) / 0.708 (benv2) cosine, so collapse costs only ~0.14-0.29 under
+    mode="mse_cos". Subtracting each side's own mean deletes that shared
+    component, leaving only the per-patch residual structure -- the 3-27% of
+    target variance the projector is actually losing. A collapsed predictor has
+    zero residual and so scores ~0 here, paying the full 1.0.
+
+    Each side is centered by its OWN mean: the mean is already well fit by the
+    MSE term, and coupling the two means would let a wrong predicted mean leak
+    into the residual comparison.
+
+    The mean is over ALL tokens even when only a subset is scored (see
+    latent_masked_only): it estimates the sample's common component, not the
+    scored subset, so restricting it would make it noisier and tie it to the
+    mask ratio.
+
+    Note this is scale-free in the residual as well as the mean -- a predictor
+    with the right residual direction but 10% of the magnitude still scores a
+    full cosine. That is deliberate: MSE controls magnitude, this term only
+    keeps the direction from collapsing.
+
+    Undefined for a length-1 sequence (centering gives exactly zero), so callers
+    must not pass CLS-only tensors; _recon_loss guards on pred.shape[1] > 1.
+    """
+    pc = pred - pred.mean(dim=1, keepdim=True)
+    tc = target - target.mean(dim=1, keepdim=True)
+    return 1.0 - F.cosine_similarity(pc, tc, dim=-1, eps=eps)
+
+
+def _recon_loss(pred, target, mode="mse", mask=None, cos_weight=1.0):
     """Reconstruction loss for the prefusion / latent feature-matching terms.
 
-    mode="mse"      plain F.mse_loss (historical behaviour).
-    mode="mse_cos"  MSE + (1 - cosine similarity) averaged over tokens.
+    mode="mse"       plain F.mse_loss (historical behaviour).
+    mode="mse_cos"   MSE + cos_weight * (1 - cosine) on the RAW tokens.
+    mode="mse_ccos"  MSE + cos_weight * (1 - cosine) on MEAN-CENTERED tokens.
 
-    Why the cosine term: measured on trained checkpoints, the cross-modal
+    Why a cosine term: measured on trained checkpoints, the cross-modal
     projector is WORSE than a trivial "predict this sample's mean patch token"
     baseline on both MSE and cosine, and retains only 3-27% of the target's
     across-patch variance -- i.e. plain MSE is largely satisfied by regressing
     toward the mean. Cosine penalises that directional collapse, which MSE does
     not. See the projector-mean-collapse analysis.
 
+    Why "ccos" on top of that: the RAW cosine is itself dominated by the sample
+    mean, which the collapsed solution already reproduces (0.865 / 0.708 cosine
+    for a pure mean predictor on dfc2020 / benv2), so "mse_cos" penalises
+    collapse by only ~0.14-0.29. Centering each side by its own mean removes the
+    shared component and charges the full 1.0. See _centered_cos.
+
+    cos_weight scales the cosine term only. It exists because the two call sites
+    have very different target scales: latent targets are post-LayerNorm so
+    their MSE is O(1), while prefusion targets are raw mid-network activations
+    with MSE ~0.009 (dfc2020) / ~0.040 (benv2). At cos_weight=1.0 the cosine
+    term would be 20-100x the prefusion MSE, which silently rescales the whole
+    prefusion loss and confounds "did the loss SHAPE help" with "did the loss
+    WEIGHT change". Pass a per-site weight instead. Ignored for mode="mse".
+
     mask: optional [B, N] bool, True = include this token. When given, both terms
-    are averaged over the selected tokens only.
+    are averaged over the selected tokens only. The centering mean in
+    mode="mse_ccos" still uses all tokens (see _centered_cos).
     """
+    if mode == "mse_ccos" and pred.shape[1] < 2:
+        # Centering a length-1 sequence gives exactly zero on both sides, so the
+        # cosine is 0/eps and the term degenerates to a gradient-free constant.
+        # The latent CLS call passes [B, 1, D]; fall back to MSE alone there.
+        mode = "mse"
+
     if mask is None:
         mse = F.mse_loss(pred, target)
-        if mode != "mse_cos":
+        if mode == "mse":
             return mse
-        cos = F.cosine_similarity(pred, target, dim=-1).mean()
-        return mse + (1.0 - cos)
+        if mode == "mse_ccos":
+            cos_term = _centered_cos(pred, target).mean()
+        else:
+            cos_term = 1.0 - F.cosine_similarity(pred, target, dim=-1).mean()
+        return mse + cos_weight * cos_term
     m = mask.unsqueeze(-1).to(pred.dtype)                  # [B, N, 1]
     denom = m.sum().clamp(min=1)
     mse = ((pred - target) ** 2 * m).sum() / (denom * pred.shape[-1])
-    if mode != "mse_cos":
+    if mode == "mse":
         return mse
-    cos_tok = F.cosine_similarity(pred, target, dim=-1)    # [B, N]
-    cos = (cos_tok * mask.to(cos_tok.dtype)).sum() / denom
-    return mse + (1.0 - cos)
+    if mode == "mse_ccos":
+        cos_tok = _centered_cos(pred, target)              # [B, N], already 1-cos
+    else:
+        cos_tok = 1.0 - F.cosine_similarity(pred, target, dim=-1)
+    cos_term = (cos_tok * mask.to(cos_tok.dtype)).sum() / denom
+    return mse + cos_weight * cos_term
 
 
 def create_latent_decoders(hidden_dim, latent_reconstruct_modalities, device, num_heads=8, ffn_factor=4):
@@ -98,7 +160,7 @@ def create_latent_decoders(hidden_dim, latent_reconstruct_modalities, device, nu
 # MASKING HELPER FUNCTION
 def mask_input(evan, batch_size, num_patches, token_mask_ratio, all_modalities, prefusion_features, modality_dropout, device,
                protected_modalities=None, active_losses=None, latent_reconstruct_modalities=None, protect_lrm=False, use_mask_token=False,
-               recon_mode="mse", prefusion_include_cls=True):
+               recon_mode="mse", prefusion_include_cls=True, recon_cos_weight=1.0):
     """
     Apply masking using projected sequences from other modalities, and compute prefusion loss.
 
@@ -175,7 +237,8 @@ def mask_input(evan, batch_size, num_patches, token_mask_ratio, all_modalities, 
                 if not prefusion_include_cls:
                     # proj_seq / tgt_seq are [CLS, patches...]; drop the CLS row.
                     p_seq, tgt_seq = p_seq[:, 1:], tgt_seq[:, 1:]
-                prefusion_loss = prefusion_loss + _recon_loss(p_seq, tgt_seq, recon_mode)
+                prefusion_loss = prefusion_loss + _recon_loss(
+                    p_seq, tgt_seq, recon_mode, cos_weight=recon_cos_weight)
             if projected_sequences:
                 prefusion_loss = prefusion_loss / len(projected_sequences)
 
@@ -441,13 +504,15 @@ def evaluate_multimodal(
 
 def _compute_latent_loss(student_fused, teacher_out, latent_projectors, latent_reconstruct_modalities, device,
                          modality_masks=None, latent_masked_only=False,
-                         recon_mode="mse", include_cls=True):
+                         recon_mode="mse", include_cls=True, recon_cos_weight=1.0):
     """Compute latent reconstruction loss: project student CLS+patch tokens to match teacher.
 
     include_cls=False drops the CLS term. For a segmenter the decoder reads only
     x_norm_patchtokens, so matching the teacher's CLS spends capacity on a token
     the task head never consumes.
-    recon_mode: "mse" (historical) or "mse_cos" (adds a 1-cosine term).
+    recon_mode: "mse" (historical), "mse_cos" (adds a raw 1-cosine term) or
+    "mse_ccos" (mean-centered cosine). recon_cos_weight scales that term; the
+    CLS call falls back to plain MSE under "mse_ccos" (see _recon_loss).
     """
     latent_loss = torch.tensor(0.0, device=device)
     for mod in latent_reconstruct_modalities:
@@ -469,13 +534,16 @@ def _compute_latent_loss(student_fused, teacher_out, latent_projectors, latent_r
             # latent ~250x prefusion and over 98% of the total training signal.
             # Fixed 2026-08-20; lambda_latent must be re-tuned at this scale.
             patch_loss = _recon_loss(projected_patches, teacher_patches, recon_mode,
-                                     mask=modality_masks[mod])
+                                     mask=modality_masks[mod],
+                                     cos_weight=recon_cos_weight)
         else:
-            patch_loss = _recon_loss(projected_patches, teacher_patches, recon_mode)
+            patch_loss = _recon_loss(projected_patches, teacher_patches, recon_mode,
+                                     cos_weight=recon_cos_weight)
         latent_loss = latent_loss + patch_loss
         if include_cls:
             latent_loss = latent_loss + _recon_loss(
-                projected_cls.unsqueeze(1), teacher_cls.unsqueeze(1), recon_mode)
+                projected_cls.unsqueeze(1), teacher_cls.unsqueeze(1), recon_mode,
+                cos_weight=recon_cos_weight)
     return latent_loss
 
 
@@ -558,6 +626,8 @@ def _unlabeled_batch_step(
     self_distill_addition: bool = False,
     recon_mode: str = "mse",
     recon_include_cls: bool = True,
+    recon_cos_weight_prefusion: float = 1.0,
+    recon_cos_weight_latent: float = 1.0,
 ):
     """Process one unlabeled (multimodal) batch. Returns (total_loss, loss_dict)."""
     evan = model.evan
@@ -584,6 +654,7 @@ def _unlabeled_batch_step(
         protect_lrm=protect_lrm,
         recon_mode=recon_mode,
         prefusion_include_cls=recon_include_cls,
+        recon_cos_weight=recon_cos_weight_prefusion,
     )
 
     # cross projector produces [B, 1+n_patches, D] for dropped mods — fusion needs to know prefix is smaller
@@ -606,6 +677,7 @@ def _unlabeled_batch_step(
             latent_masked_only=latent_masked_only,
             recon_mode=recon_mode,
             include_cls=recon_include_cls,
+            recon_cos_weight=recon_cos_weight_latent,
         )
         total_loss = total_loss + loss_weights['latent'] * latent_loss
         latent_loss_val = latent_loss.item()
@@ -934,6 +1006,8 @@ def train_delulu_model(
     self_distill_addition: bool = False,
     recon_mode: str = "mse",
     recon_include_cls: bool = True,
+    recon_cos_weight_prefusion: float = 1.0,
+    recon_cos_weight_latent: float = 1.0,
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -1220,6 +1294,8 @@ def train_delulu_model(
                     self_distill_addition=self_distill_addition,
                     recon_mode=recon_mode,
                     recon_include_cls=recon_include_cls,
+                    recon_cos_weight_prefusion=recon_cos_weight_prefusion,
+                    recon_cos_weight_latent=recon_cos_weight_latent,
                 )
                 unlabeled_count += 1
 

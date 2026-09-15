@@ -25,7 +25,16 @@
 #                             block. Default 2. Not a results-CSV column, so
 #                             encode it in CONFIG_LABEL when sweeping depth.
 #   RECON_LOSS=mse_cos        add a (1-cosine) term to the prefusion/latent
-#                             feature-matching losses (default mse)
+#                             feature-matching losses (default mse). mse_ccos
+#                             takes that cosine on MEAN-CENTERED tokens, which
+#                             is what actually penalises mean-collapse: a pure
+#                             mean predictor already scores 0.87/0.71 raw cosine.
+#   RECON_COS_W_PREFUSION=    weight on the cosine term in the prefusion loss
+#                             (default 1.0). Prefusion MSE is ~0.009-0.040, so
+#                             1.0 makes cosine 20-100x the MSE and rescales the
+#                             whole term; ~0.01 keeps them comparable.
+#   RECON_COS_W_LATENT=       same for the latent loss (default 1.0, already
+#                             sane there: latent targets are post-LayerNorm)
 #   RECON_DROP_CLS=1          drop the CLS token from those reconstruction
 #                             targets (a segmenter decoder never reads it)
 #   SAVE_CHECKPOINT=0         skip writing the final .pt (scratch is quota-bound;
@@ -110,6 +119,8 @@ fi
 RECON_ARGS=""
 [ -n "${RECON_LOSS:-}" ] && RECON_ARGS="${RECON_ARGS} --recon_loss ${RECON_LOSS}"
 [ -n "${RECON_DROP_CLS:-}" ] && [ "${RECON_DROP_CLS}" != "0" ] && RECON_ARGS="${RECON_ARGS} --recon_drop_cls"
+[ -n "${RECON_COS_W_PREFUSION:-}" ] && RECON_ARGS="${RECON_ARGS} --recon_cos_weight_prefusion ${RECON_COS_W_PREFUSION}"
+[ -n "${RECON_COS_W_LATENT:-}" ] && RECON_ARGS="${RECON_ARGS} --recon_cos_weight_latent ${RECON_COS_W_LATENT}"
 
 PROV_ARGS=""
 [ -n "${CONFIG_LABEL:-}" ] && PROV_ARGS="${PROV_ARGS} --config_label ${CONFIG_LABEL}"

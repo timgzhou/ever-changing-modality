@@ -86,6 +86,8 @@ def main():
     args.self_distill_addition = False
     args.recon_loss = 'mse'
     args.recon_drop_cls = False
+    args.recon_cos_weight_prefusion = 1.0
+    args.recon_cos_weight_latent = 1.0
     args.checkpoint_name = None
     args.save_checkpoint = False
     args.select_by = None
