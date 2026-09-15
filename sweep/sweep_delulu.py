@@ -84,6 +84,8 @@ def main():
     # added there raises AttributeError mid-trial until it is mirrored below.
     args.dyn_teacher = False
     args.self_distill_addition = False
+    args.recon_loss = 'mse'
+    args.recon_drop_cls = False
     args.checkpoint_name = None
     args.save_checkpoint = False
     args.select_by = None

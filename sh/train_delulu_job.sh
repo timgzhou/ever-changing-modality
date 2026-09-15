@@ -24,6 +24,10 @@
 #                             (n-1) self-attention blocks + 1 cross-attention
 #                             block. Default 2. Not a results-CSV column, so
 #                             encode it in CONFIG_LABEL when sweeping depth.
+#   RECON_LOSS=mse_cos        add a (1-cosine) term to the prefusion/latent
+#                             feature-matching losses (default mse)
+#   RECON_DROP_CLS=1          drop the CLS token from those reconstruction
+#                             targets (a segmenter decoder never reads it)
 #   SAVE_CHECKPOINT=0         skip writing the final .pt (scratch is quota-bound;
 #                             ablations that only need the metrics should set this)
 #   SELF_DISTILL_ADDITION=1   opt-in: distil the new-modality heads against the
@@ -103,6 +107,10 @@ if [ "${SAVE_CHECKPOINT:-1}" = "0" ]; then
 fi
 # Provenance columns: which tuned config produced this row. Without these every
 # cross-config row looks identical apart from its hyperparameters.
+RECON_ARGS=""
+[ -n "${RECON_LOSS:-}" ] && RECON_ARGS="${RECON_ARGS} --recon_loss ${RECON_LOSS}"
+[ -n "${RECON_DROP_CLS:-}" ] && [ "${RECON_DROP_CLS}" != "0" ] && RECON_ARGS="${RECON_ARGS} --recon_drop_cls"
+
 PROV_ARGS=""
 [ -n "${CONFIG_LABEL:-}" ] && PROV_ARGS="${PROV_ARGS} --config_label ${CONFIG_LABEL}"
 [ -n "${PROJ_LAYERS:-}" ] && PROV_ARGS="${PROV_ARGS} --intermediate_projector_num_layers ${PROJ_LAYERS}"
@@ -145,6 +153,7 @@ python -u train_delulu.py \
     --protect_lrm "${PROTECT_LRM}" \
     --latent_masked_only \
     ${SELF_DISTILL_FLAG} \
+    ${RECON_ARGS} \
     ${PROV_ARGS} \
     --student_init "${STUDENT_INIT}" \
     --seed "${SEED}" \

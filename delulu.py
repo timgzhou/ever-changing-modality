@@ -48,6 +48,38 @@ def distillation_loss(student_logits, teacher_logits, temperature, task_type,
 
 # ==================== Delulu TRAINING COMPONENT ====================
 
+def _recon_loss(pred, target, mode="mse", mask=None):
+    """Reconstruction loss for the prefusion / latent feature-matching terms.
+
+    mode="mse"      plain F.mse_loss (historical behaviour).
+    mode="mse_cos"  MSE + (1 - cosine similarity) averaged over tokens.
+
+    Why the cosine term: measured on trained checkpoints, the cross-modal
+    projector is WORSE than a trivial "predict this sample's mean patch token"
+    baseline on both MSE and cosine, and retains only 3-27% of the target's
+    across-patch variance -- i.e. plain MSE is largely satisfied by regressing
+    toward the mean. Cosine penalises that directional collapse, which MSE does
+    not. See the projector-mean-collapse analysis.
+
+    mask: optional [B, N] bool, True = include this token. When given, both terms
+    are averaged over the selected tokens only.
+    """
+    if mask is None:
+        mse = F.mse_loss(pred, target)
+        if mode != "mse_cos":
+            return mse
+        cos = F.cosine_similarity(pred, target, dim=-1).mean()
+        return mse + (1.0 - cos)
+    m = mask.unsqueeze(-1).to(pred.dtype)                  # [B, N, 1]
+    denom = m.sum().clamp(min=1)
+    mse = ((pred - target) ** 2 * m).sum() / (denom * pred.shape[-1])
+    if mode != "mse_cos":
+        return mse
+    cos_tok = F.cosine_similarity(pred, target, dim=-1)    # [B, N]
+    cos = (cos_tok * mask.to(cos_tok.dtype)).sum() / denom
+    return mse + (1.0 - cos)
+
+
 def create_latent_decoders(hidden_dim, latent_reconstruct_modalities, device, num_heads=8, ffn_factor=4):
     """Create transformer-based projectors for latent matching (CLS + patches jointly)."""
     projectors = nn.ModuleDict()
@@ -65,7 +97,8 @@ def create_latent_decoders(hidden_dim, latent_reconstruct_modalities, device, nu
 
 # MASKING HELPER FUNCTION
 def mask_input(evan, batch_size, num_patches, token_mask_ratio, all_modalities, prefusion_features, modality_dropout, device,
-               protected_modalities=None, active_losses=None, latent_reconstruct_modalities=None, protect_lrm=False, use_mask_token=False):
+               protected_modalities=None, active_losses=None, latent_reconstruct_modalities=None, protect_lrm=False, use_mask_token=False,
+               recon_mode="mse", prefusion_include_cls=True):
     """
     Apply masking using projected sequences from other modalities, and compute prefusion loss.
 
@@ -138,7 +171,11 @@ def mask_input(evan, batch_size, num_patches, token_mask_ratio, all_modalities, 
                 if protect_lrm and (tgt_mod in lrm):
                     tgt_seq = tgt_seq.detach()
                 tgt_seq = torch.cat([tgt_seq[:, :1], tgt_seq[:, evan.n_storage_tokens + 1:]], dim=1)
-                prefusion_loss = prefusion_loss + F.mse_loss(proj_seq, tgt_seq)
+                p_seq = proj_seq
+                if not prefusion_include_cls:
+                    # proj_seq / tgt_seq are [CLS, patches...]; drop the CLS row.
+                    p_seq, tgt_seq = p_seq[:, 1:], tgt_seq[:, 1:]
+                prefusion_loss = prefusion_loss + _recon_loss(p_seq, tgt_seq, recon_mode)
             if projected_sequences:
                 prefusion_loss = prefusion_loss / len(projected_sequences)
 
@@ -403,8 +440,15 @@ def evaluate_multimodal(
 
 
 def _compute_latent_loss(student_fused, teacher_out, latent_projectors, latent_reconstruct_modalities, device,
-                         modality_masks=None, latent_masked_only=False):
-    """Compute latent reconstruction loss: project student CLS+patch tokens to match teacher."""
+                         modality_masks=None, latent_masked_only=False,
+                         recon_mode="mse", include_cls=True):
+    """Compute latent reconstruction loss: project student CLS+patch tokens to match teacher.
+
+    include_cls=False drops the CLS term. For a segmenter the decoder reads only
+    x_norm_patchtokens, so matching the teacher's CLS spends capacity on a token
+    the task head never consumes.
+    recon_mode: "mse" (historical) or "mse_cos" (adds a 1-cosine term).
+    """
     latent_loss = torch.tensor(0.0, device=device)
     for mod in latent_reconstruct_modalities:
         student_patches = student_fused[mod]['x_norm_patchtokens']
@@ -424,11 +468,14 @@ def _compute_latent_loss(student_fused, teacher_out, latent_projectors, latent_r
             # unmasked branch below and the prefusion loss both use. That made
             # latent ~250x prefusion and over 98% of the total training signal.
             # Fixed 2026-08-20; lambda_latent must be re-tuned at this scale.
-            n_masked_elems = mask.sum().clamp(min=1) * projected_patches.shape[-1]
-            patch_loss = ((projected_patches - teacher_patches) ** 2 * mask).sum() / n_masked_elems
+            patch_loss = _recon_loss(projected_patches, teacher_patches, recon_mode,
+                                     mask=modality_masks[mod])
         else:
-            patch_loss = F.mse_loss(projected_patches, teacher_patches)
-        latent_loss = latent_loss + F.mse_loss(projected_cls, teacher_cls) + patch_loss
+            patch_loss = _recon_loss(projected_patches, teacher_patches, recon_mode)
+        latent_loss = latent_loss + patch_loss
+        if include_cls:
+            latent_loss = latent_loss + _recon_loss(
+                projected_cls.unsqueeze(1), teacher_cls.unsqueeze(1), recon_mode)
     return latent_loss
 
 
@@ -509,6 +556,8 @@ def _unlabeled_batch_step(
     unprotect_starting_mod: bool = False,
     regression_loss_scale: float = 1.0,
     self_distill_addition: bool = False,
+    recon_mode: str = "mse",
+    recon_include_cls: bool = True,
 ):
     """Process one unlabeled (multimodal) batch. Returns (total_loss, loss_dict)."""
     evan = model.evan
@@ -533,6 +582,8 @@ def _unlabeled_batch_step(
         latent_reconstruct_modalities=latent_reconstruct_modalities,
         use_mask_token=use_mask_token,
         protect_lrm=protect_lrm,
+        recon_mode=recon_mode,
+        prefusion_include_cls=recon_include_cls,
     )
 
     # cross projector produces [B, 1+n_patches, D] for dropped mods — fusion needs to know prefix is smaller
@@ -553,6 +604,8 @@ def _unlabeled_batch_step(
             device=device,
             modality_masks=modality_masks,
             latent_masked_only=latent_masked_only,
+            recon_mode=recon_mode,
+            include_cls=recon_include_cls,
         )
         total_loss = total_loss + loss_weights['latent'] * latent_loss
         latent_loss_val = latent_loss.item()
@@ -879,6 +932,8 @@ def train_delulu_model(
     unprotect_starting_mod: bool = False,
     agree_ref: str = 'teacher',              # 'teacher' (default) or 'peeking'
     self_distill_addition: bool = False,
+    recon_mode: str = "mse",
+    recon_include_cls: bool = True,
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -1163,6 +1218,8 @@ def train_delulu_model(
                     unprotect_starting_mod=unprotect_starting_mod,
                     regression_loss_scale=regression_loss_scale,
                     self_distill_addition=self_distill_addition,
+                    recon_mode=recon_mode,
+                    recon_include_cls=recon_include_cls,
                 )
                 unlabeled_count += 1
 

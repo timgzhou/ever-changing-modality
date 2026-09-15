@@ -60,6 +60,19 @@ def _parse_args():
                         help='Fraction of training to protect LRM (startmod) encoder from prefusion loss '
                              'by detaching its features. 0.0=never protect (default), 1.0=always protect, '
                              '0.5=protect first half then release.')
+    parser.add_argument('--recon_loss', type=str, default='mse', choices=['mse', 'mse_cos'],
+                        help='Loss for the prefusion and latent feature-matching terms. '
+                             "'mse' is the historical behaviour; 'mse_cos' adds a "
+                             '(1 - cosine) term. Measured on trained checkpoints the '
+                             'projector is WORSE than a per-sample-mean predictor and keeps '
+                             'only 3-27%% of the target across-patch variance, i.e. plain MSE '
+                             'is largely satisfied by regressing to the mean; cosine '
+                             'penalises that collapse.')
+    parser.add_argument('--recon_drop_cls', action='store_true',
+                        help='Drop the CLS token from the prefusion and latent '
+                             'reconstruction targets. A segmenter decoder reads only '
+                             'x_norm_patchtokens, so matching the teacher CLS spends '
+                             'capacity on a token the task head never consumes.')
     parser.add_argument('--self_distill_addition', action='store_true',
                         help='Experimental. On unlabeled token-masking batches (no modality '
                              'fully dropped), distil the new-modality heads against the '
@@ -292,6 +305,8 @@ def main(args=None):
         protect_lrm=args.protect_lrm,
         latent_masked_only=args.latent_masked_only,
         self_distill_addition=args.self_distill_addition,
+        recon_mode=args.recon_loss,
+        recon_include_cls=not args.recon_drop_cls,
         unprotect_starting_mod=args.unprotect_starting_mod,
         task_type=task_config.task_type,
         label_key=task_config.label_key,
@@ -350,6 +365,8 @@ def main(args=None):
             # this may not pan out. The checkpoint is the record of how a given
             # set of weights was produced.
             'self_distill_addition': args.self_distill_addition,
+            'recon_loss': args.recon_loss,
+            'recon_drop_cls': args.recon_drop_cls,
             'best_checkpoints': best_checkpoints,
         }, ckpt_path)
         print(f"Checkpoint saved to: {ckpt_path}  (final epoch {args.epochs})")
