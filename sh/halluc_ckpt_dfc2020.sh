@@ -33,6 +33,13 @@ CONFIG="configs/delulu_best_dfc2020.yaml"
 START="${START:-s1}"; NEW="${NEW:-s2_norgb}"
 SELECTOR="${SELECTOR:-transfer}"
 SEED="${SEED:-0}"
+# 40 epochs, not the config's 128. make_scheduler() sets T_max from the epoch
+# count, so this is a complete, fully-annealed 40-epoch run reaching eta_min --
+# NOT a truncated 128-epoch run. The question here is whether the cosine term
+# changes what the projector learns, which is visible well before convergence;
+# spending 3x the GPU time to sharpen a number we are comparing ACROSS arms
+# (all trained identically) buys nothing.
+EPOCHS="${EPOCHS:-40}"
 RESULTS_CSV="res/delulu/dfc2020_halluc_ckpt.csv"
 LEDGER="logs/train_delulu/submitted_halluc.tsv"
 mkdir -p logs/train_delulu res/delulu; touch "${LEDGER}"
@@ -63,6 +70,7 @@ for ARM in ${ARMS:-control ccos ccos_w1}; do
 
     EX="ALL,DATASET=dfc2020,START=${START},NEW=${NEW},TEACHER=${TEACHER}"
     EX="${EX},CONFIG=${CONFIG},SELECT_BY=${SELECTOR},SEED=${SEED},BATCH_SIZE=8"
+    EX="${EX},EPOCHS=${EPOCHS}"
     EX="${EX},RESULTS_CSV=${RESULTS_CSV},SAVE_CHECKPOINT=1,CKPT_NAME=${CKPT}"
     EX="${EX},CONFIG_LABEL=halluc_${ARM}"
     case "${ARM}" in
