@@ -41,6 +41,18 @@ df = pd.concat(frames, ignore_index=True)
 group_keys = ["dataset", "modality", "model_type", "train_mode", "dino_init",
               "decoder", "train_split"]
 
+# Metric direction. Accuracy / mAP / mIoU are higher-is-better; RMSE (biomassters
+# regression) is LOWER-is-better. Sorting every metric descending silently picked
+# the WORST regression teacher -- biomassters teachers were selected at val RMSE
+# 78.32/79.56 when better checkpoints existed. Rank by a signed key instead.
+_LOWER_IS_BETTER = {"RMSE", "rmse", "MSE", "mse", "loss"}
+
+
+def _rank_key(frame):
+    """Signed val_metric so a descending sort always means 'best first'."""
+    sign = frame["metric_name"].map(lambda m: -1.0 if str(m) in _LOWER_IS_BETTER else 1.0)
+    return frame["val_metric"] * sign
+
 counts = df.groupby(group_keys).size().reset_index(name="n_runs")
 
 # Teacher pool: only runs whose checkpoint still exists on disk. Old .pt files
@@ -59,14 +71,14 @@ if (~_alive).any():
     print(f"[warn] {(~_alive).sum()} run(s) have a missing checkpoint file and "
           f"are excluded from teacher selection (still shown in the summary)")
 best_teacher_pool = (
-    df[_alive].sort_values("val_metric", ascending=False)
+    df[_alive].assign(_rank=_rank_key(df[_alive])).sort_values("_rank", ascending=False)
     .groupby(group_keys, as_index=False)
     .first()[group_keys + ["learning_rate", "metric_name", "val_metric",
                            "test_metric", "saved_checkpoint"]]
 )
 
 best = (
-    df.sort_values("val_metric", ascending=False)
+    df.assign(_rank=_rank_key(df)).sort_values("_rank", ascending=False)
     .groupby(group_keys, as_index=False)
     .first()[group_keys + ["learning_rate", "trainable_params", "metric_name", "val_metric", "test_metric", "saved_checkpoint"]]
     .merge(counts, on=group_keys)
@@ -86,7 +98,7 @@ for dataset, group in best.groupby("dataset"):
 # dino_init. Filtering to dino_init==True was right when DINO always won, but
 # with the upernet decoder the best s1 and s2_norgb teachers are dino_init=False.
 teachers = (
-    best_teacher_pool.sort_values("val_metric", ascending=False)
+    best_teacher_pool.assign(_rank=_rank_key(best_teacher_pool)).sort_values("_rank", ascending=False)
         .groupby(["dataset", "modality", "model_type", "decoder", "train_split"],
                  as_index=False)
         .first()
