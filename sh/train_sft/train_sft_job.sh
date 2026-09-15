@@ -10,6 +10,11 @@
 
 # Expected env vars (set by train_sft_all.sh):
 #   DATASET, MODEL, TRAIN_MODE, MODALITY_ENTRY, LR, WD, TRAIN_SPLIT
+#   EPOCHS      training epochs (default 24)
+#   DINO_ARMS   which init arms to run: "1 0" (default, dino then random),
+#               "1" for dino only, "0" for random only. Each arm is a full
+#               training run, so "1 0" doubles the walltime -- biomassters at
+#               ~14.4 min/epoch needs one arm per job beyond ~24 epochs.
 
 source sh/env.sh
 export TQDM_DISABLE=1
@@ -60,7 +65,7 @@ TRAIN_SPLIT="${TRAIN_SPLIT:-split1}"
 
 echo "Running: model=${MODEL} dataset=${DATASET} train_mode=${TRAIN_MODE} modalities=${MODALITIES} lr=${LR} wd=${WD} train_split=${TRAIN_SPLIT}"
 
-for USE_DINO in 1 0; do
+for USE_DINO in ${DINO_ARMS:-1 0}; do
     DINO_VAL="True"
     DINO_FLAG="--use_dino_weights"
     if [ "${USE_DINO}" = "0" ]; then
@@ -80,7 +85,11 @@ for USE_DINO in 1 0; do
     # tz_modality_specific_layer_augmenter) that were dropped when LoRA was
     # removed; the optional group matches both the old and new schema so
     # completed runs are still recognised and not re-submitted.
-    if grep -qP "^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},([^,]*,[^,]*,)?${LR},${WD},([^,]+,){7}${DINO_VAL},${T},\Q${DECODER_TAG}\E,${TRAIN_AUG},${TRAIN_SPLIT}\r?$" "${RESULTS_CSV}" 2>/dev/null; then
+    # The epoch count is part of the key: a 24-epoch row must NOT suppress a
+    # 48-epoch rerun of the same config. Layout after lr,wd is
+    #   trainable_params, epoch, test, val, metric_name, checkpoint, global_rep
+    # so epoch is field 2 of the 7 that used to be skipped wholesale.
+    if grep -qP "^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},([^,]*,[^,]*,)?${LR},${WD},[^,]+,${EPOCHS:-24},([^,]+,){5}${DINO_VAL},${T},\Q${DECODER_TAG}\E,${TRAIN_AUG},${TRAIN_SPLIT}\r?$" "${RESULTS_CSV}" 2>/dev/null; then
         echo "  → dino_init=${DINO_VAL} train_split=${TRAIN_SPLIT} already in results, skipping"
         continue
     fi
@@ -91,7 +100,7 @@ for USE_DINO in 1 0; do
         --dataset ${DATASET} \
         --modalities ${MODALITIES} \
         --train_mode ${TRAIN_MODE} \
-        --epochs 24 \
+        --epochs ${EPOCHS:-24} \
         --lr ${LR} \
         --weight_decay ${WD} \
         --train_aug ${TRAIN_AUG} \
