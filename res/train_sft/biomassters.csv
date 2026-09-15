@@ -40,3 +40,7 @@ biomassters,evan_base,s2_rgb,fft,0.0001,0.01,125007873,24,76.90,76.10,RMSE,check
 biomassters,evan_base,s2_norgb,fft,0.0001,0.01,125794305,24,78.90,77.99,RMSE,checkpoints/sft_evan_base_biomassters_s2_norgb_fft_lr0.0001_20260913_200241.pt,clstoken,True,12,upernet+relu,none,split1
 biomassters,evan_base,s2_rgb,fft,0.0001,0.01,125007873,24,83.87,83.21,RMSE,checkpoints/sft_evan_base_biomassters_s2_rgb_fft_lr0.0001_20260913_225624.pt,clstoken,False,12,upernet+relu,none,split1
 biomassters,evan_base,s2_norgb,fft,0.0001,0.01,125794305,24,78.73,78.10,RMSE,checkpoints/sft_evan_base_biomassters_s2_norgb_fft_lr0.0001_20260913_225624.pt,clstoken,False,12,upernet+relu,none,split1
+biomassters,evan_base,s2_rgb,fft,0.0001,0.01,125007873,48,62.18,61.04,RMSE,checkpoints/sft_evan_base_biomassters_s2_rgb_fft_lr0.0001_20260915_005745.pt,clstoken,True,12,upernet+relu,none,split1
+biomassters,evan_base,s2_rgb,fft,0.0005,0.01,125007873,48,41.96,41.01,RMSE,checkpoints/sft_evan_base_biomassters_s2_rgb_fft_lr0.0005_20260915_005742.pt,clstoken,True,12,upernet+relu,none,split1
+biomassters,evan_base,s2_norgb,fft,0.0005,0.01,125794305,48,41.88,41.01,RMSE,checkpoints/sft_evan_base_biomassters_s2_norgb_fft_lr0.0005_20260915_011435.pt,clstoken,True,12,upernet+relu,none,split1
+biomassters,evan_base,s2_norgb,fft,0.0001,0.01,125794305,48,65.63,65.04,RMSE,checkpoints/sft_evan_base_biomassters_s2_norgb_fft_lr0.0001_20260915_011435.pt,clstoken,True,12,upernet+relu,none,split1
