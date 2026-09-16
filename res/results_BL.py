@@ -400,14 +400,25 @@ def _sft_frame(dataset, arch):
 
 
 def _load_sft_dino(dataset, arch='evan_base'):
-    """DINO-init SFT for given arch: modality → test_metric (val-selected)."""
+    """Supervised SFT for given arch: modality → test_metric (val-selected).
+
+    Init (DINO vs random) is chosen by val, not pinned -- see note below.
+    """
     df = _sft_frame(dataset, arch)
     if df is None:
         return {}
     df = df.copy()
-    df['dino_init'] = df['dino_init'].astype(str).str.lower().map(
-        {'true': True, 'false': False, '1': True, '0': False})
-    df = df[df['dino_init'] == True]
+    # NOTE: do NOT filter to dino_init == True. The DINO weights are RGB
+    # pretrained -- train_sft.py maps them onto S2 via rgb_in_s2_indices, so
+    # they initialise 3 channels at most. On DFC2020 that makes DINO init
+    # actively HARMFUL as the non-RGB fraction of the input grows (paired over
+    # matched lr/wd/epoch, n=31: non-DINO wins 25, mean +2.54 mIoU, p=2e-5;
+    # per modality s2_rgb -2.04 [DINO wins, input IS rgb] ... s2_norgb +4.78,
+    # s2_norgb+s1 +5.96 [zero rgb bands]). On EuroSAT the sign flips (DINO wins
+    # 46/47) because its primary modality is RGB. So there is no correct global
+    # value for this flag. Let best-by-val pick it like any other hyperparameter:
+    # it selects DINO for s2_rgb/eurosat and non-DINO for the band-heavy
+    # modalities, with <=0.10 test regret on 7 of 8 DFC2020 modalities.
     if df.empty:
         return {}
     df['val_metric']  = pd.to_numeric(df['val_metric'],  errors='coerce')
@@ -485,14 +496,22 @@ def _load_mixmatch_peek(dataset, arch='evan_base'):
 
 
 def _load_sft_combined_dino(dataset, arch='evan_base'):
-    """DINO-init SFT on combined modality for given arch."""
+    """Supervised SFT on combined modality for given arch (init chosen by val)."""
     df = _sft_frame(dataset, arch)
     if df is None:
         return {}
     df = df.copy()
-    df['dino_init'] = df['dino_init'].astype(str).str.lower().map(
-        {'true': True, 'false': False, '1': True, '0': False})
-    df = df[df['dino_init'] == True]
+    # NOTE: do NOT filter to dino_init == True. The DINO weights are RGB
+    # pretrained -- train_sft.py maps them onto S2 via rgb_in_s2_indices, so
+    # they initialise 3 channels at most. On DFC2020 that makes DINO init
+    # actively HARMFUL as the non-RGB fraction of the input grows (paired over
+    # matched lr/wd/epoch, n=31: non-DINO wins 25, mean +2.54 mIoU, p=2e-5;
+    # per modality s2_rgb -2.04 [DINO wins, input IS rgb] ... s2_norgb +4.78,
+    # s2_norgb+s1 +5.96 [zero rgb bands]). On EuroSAT the sign flips (DINO wins
+    # 46/47) because its primary modality is RGB. So there is no correct global
+    # value for this flag. Let best-by-val pick it like any other hyperparameter:
+    # it selects DINO for s2_rgb/eurosat and non-DINO for the band-heavy
+    # modalities, with <=0.10 test regret on 7 of 8 DFC2020 modalities.
     if df.empty:
         return {}
     df['val_metric']  = pd.to_numeric(df['val_metric'],  errors='coerce')
