@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=02:00:00
+#SBATCH --time=03:00:00
 #SBATCH --account=aip-gpleiss
 #SBATCH --output=logs/projector_probe/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com
@@ -13,9 +13,11 @@
 #
 # Required: CKPT, SRC, TGT, DEPTH, LOSS
 # Optional: COS_WEIGHT EPOCHS LR BATCH_SIZE EVAL_BATCHES SEED RESULTS_CSV TAG
+#           MASK_RATIO (source patches hidden from the projector, as in real
+#           training -- tuned dfc2020 uses 0.64) and SCORE_MASKED_ONLY=1
 #
-# 2h walltime: the encoder runs under no_grad and only a ~14-28M param projector
-# gets gradients, so an epoch is minutes, not the ~3h a full delulu run takes.
+# 3h walltime: the encoder runs under no_grad and only a ~14-28M param projector
+# gets gradients. At 8 epochs a job took ~1.2 min; 32 epochs puts it near 5.
 set -euo pipefail
 source sh/env.sh
 export TQDM_DISABLE=1
@@ -33,10 +35,12 @@ python -u analysis/train_projector_probe.py \
     --depth "${DEPTH}" \
     --loss "${LOSS}" \
     --cos_weight "${COS_WEIGHT:-1.0}" \
-    --epochs "${EPOCHS:-8}" \
+    --epochs "${EPOCHS:-32}" \
+    --mask_ratio "${MASK_RATIO:-0.0}" \
     --lr "${LR:-3e-4}" \
     --batch_size "${BATCH_SIZE:-16}" \
     --eval_batches "${EVAL_BATCHES:-24}" \
     --seed "${SEED:-0}" \
     --results_csv "${RESULTS_CSV:-res/delulu/projector_probe.csv}" \
-    --tag "${TAG:-}"
+    --tag "${TAG:-}" \
+    ${SCORE_MASKED_ONLY:+--score_masked_only}

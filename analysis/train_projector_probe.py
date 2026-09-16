@@ -26,6 +26,24 @@ Setup
 
 No fusion blocks, no decoder, no task head, no CE/distill/latent terms.
 
+Masking (--mask_ratio, default 0 = off)
+---------------------------------------
+Real training never shows the projector a complete source view: the tuned
+dfc2020 transfer config masks ~64% of source patches (mae_mask_ratio 0.64) and
+passes that mask into _project_sequence, so cross-attention is BLOCKED from the
+masked positions. With --mask_ratio the probe reproduces that: a fresh random
+mask per batch, fed to the projector as src_patch_mask.
+
+This matters for the loss comparison because masking is where a directional
+term should matter MOST -- with most of the source hidden the projector has to
+extrapolate rather than interpolate, which is exactly when regressing toward a
+plausible mean is most tempting. It could equally invert: cosine has no
+magnitude anchor to stabilise extrapolation.
+
+--score_masked_only restricts the LOSS to masked target positions, matching
+`latent_masked_only: True` in the tuned config. Evaluation always scores all
+patches, so numbers stay comparable across arms.
+
 The CLS row is dropped from both sides: 'ccos' centers across the token axis,
 which is only meaningful for the patch grid, and the downstream task head reads
 x_norm_patchtokens anyway.
@@ -75,14 +93,48 @@ def centered_cos(pred, target, eps=1e-6):
 
 
 def make_loss(kind, cos_weight):
-    """kind: mse | mse_ccos | ccos. Applied to patch tokens [B, N, D]."""
+    """kind: mse | mse_ccos | ccos. Applied to patch tokens [B, N, D].
+
+    The returned fn takes an optional [B, N] bool mask (True = score this
+    token). The centering inside centered_cos always uses ALL tokens -- it
+    estimates the sample's common component, not the scored subset.
+    """
+    def _mse(p, t, m):
+        if m is None:
+            return F.mse_loss(p, t)
+        w = m.unsqueeze(-1).to(p.dtype)
+        return ((p - t) ** 2 * w).sum() / (w.sum().clamp(min=1) * p.shape[-1])
+
+    def _ccos(p, t, m):
+        c = centered_cos(p, t)                      # [B, N]
+        if m is None:
+            return c.mean()
+        mm = m.to(c.dtype)
+        return (c * mm).sum() / mm.sum().clamp(min=1)
+
     if kind == 'mse':
-        return lambda p, t: F.mse_loss(p, t)
+        return lambda p, t, m=None: _mse(p, t, m)
     if kind == 'mse_ccos':
-        return lambda p, t: F.mse_loss(p, t) + cos_weight * centered_cos(p, t).mean()
+        return lambda p, t, m=None: _mse(p, t, m) + cos_weight * _ccos(p, t, m)
     if kind == 'ccos':
-        return lambda p, t: centered_cos(p, t).mean()
+        return lambda p, t, m=None: _ccos(p, t, m)
     raise ValueError(f"unknown loss {kind}")
+
+
+def make_patch_mask(B, n_patches, ratio, device, generator=None):
+    """[B, n_patches] bool, True = masked. Exactly round(ratio*n) per sample.
+
+    Matches mask_input()'s construction in delulu.py: rank uniform noise and
+    mask the lowest-scoring positions, so every sample has the same count.
+    """
+    n_mask = int(round(n_patches * ratio))
+    if n_mask <= 0:
+        return None
+    noise = torch.rand(B, n_patches, device=device, generator=generator)
+    ids = torch.argsort(noise, dim=1)
+    mask = torch.zeros(B, n_patches, device=device, dtype=torch.bool)
+    mask.scatter_(1, ids[:, :n_mask], True)
+    return mask
 
 
 def build_projector(evan, src_mod, tgt_mod, depth, device):
@@ -110,9 +162,12 @@ def build_projector(evan, src_mod, tgt_mod, depth, device):
     return proj, queries, params
 
 
-def project(evan, proj, queries, src_seq):
+def project(evan, proj, queries, src_seq, src_patch_mask=None):
     if evan.intermediate_projector_type == 'cross':
-        return proj(src_seq, queries=queries, rope_embed=evan.rope_embed, src_patch_mask=None)
+        return proj(src_seq, queries=queries, rope_embed=evan.rope_embed,
+                    src_patch_mask=src_patch_mask)
+    # The 'self' projector has no mask pathway; masking is a cross-projector
+    # concept (it blocks source keys in cross-attention).
     return proj(src_seq)
 
 
@@ -125,15 +180,26 @@ def encode(evan, batch, bands, mods, device):
 
 @torch.no_grad()
 def evaluate(evan, proj, queries, loader, bands, mods, src_mod, tgt_mod,
-             device, n_batches, n_prefix):
+             device, n_batches, n_prefix, mask_ratio=0.0, n_patches=None):
+    """Eval always scores ALL patches, so arms stay comparable.
+
+    When mask_ratio > 0 the source is masked the same way as in training --
+    otherwise a model trained on a 36%-visible source would be evaluated on an
+    input distribution it never saw.
+    """
     proj.eval()
     al, sh, bp, losses = [], [], [], []
     seen = 0
+    # Fixed generator: every arm sees the SAME eval masks, so the comparison is
+    # not confounded by which patches happened to be hidden.
+    gen = torch.Generator(device=device).manual_seed(1234) if mask_ratio > 0 else None
     for batch in loader:
         if seen >= n_batches:
             break
         feats = encode(evan, batch, bands, mods, device)
-        pred = project(evan, proj, queries, feats[src_mod])[:, 1:]     # drop CLS
+        src = feats[src_mod]
+        m = make_patch_mask(src.shape[0], n_patches, mask_ratio, device, gen) if mask_ratio > 0 else None
+        pred = project(evan, proj, queries, src, m)[:, 1:]             # drop CLS
         tgt = feats[tgt_mod][:, n_prefix:]                             # drop CLS+storage
         al.append(patch_pearson(pred, tgt).flatten().cpu())
         s = shuffled_patch_pearson(pred, tgt)
@@ -168,7 +234,15 @@ def main():
                     help='weight on the centered-cosine term for mse_ccos. The patch-token '
                          'MSE here is ~0.01, so 1.0 makes cosine dominate; that is a '
                          'deliberate arm, not an oversight.')
-    ap.add_argument('--epochs', type=int, default=6)
+    ap.add_argument('--mask_ratio', type=float, default=0.0,
+                    help='Fraction of SOURCE patches hidden from the projector (blocked as '
+                         'cross-attention keys), as in real training. The tuned dfc2020 '
+                         'transfer config uses mae_mask_ratio 0.64. 0 = no masking.')
+    ap.add_argument('--score_masked_only', action='store_true',
+                    help='Compute the LOSS only on masked target positions, matching '
+                         'latent_masked_only in the tuned config. Evaluation always scores '
+                         'all patches regardless.')
+    ap.add_argument('--epochs', type=int, default=32)
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--weight_decay', type=float, default=0.01)
     ap.add_argument('--batch_size', type=int, default=16)
@@ -202,6 +276,7 @@ def main():
     bands = task.modality_bands_dict
     n_prefix = evan.n_storage_tokens + 1
 
+    n_patches = (evan.img_size // evan.patch_size) ** 2
     proj, queries, params = build_projector(evan, args.src_mod, args.tgt_mod, args.depth, dev)
     n_par = sum(p.numel() for p in params)
     loss_fn = make_loss(args.loss, args.cos_weight)
@@ -211,7 +286,9 @@ def main():
 
     print(f"=== projector probe | {args.src_mod} -> {args.tgt_mod} | "
           f"depth={args.depth} loss={args.loss} "
-          f"{'w=' + str(args.cos_weight) if args.loss == 'mse_ccos' else ''} ===")
+          f"{'w=' + str(args.cos_weight) if args.loss == 'mse_ccos' else ''} "
+          f"mask={args.mask_ratio}"
+          f"{' scored_masked_only' if args.score_masked_only else ''} ===")
     print(f"trainable params: {n_par:,} (encoder frozen)")
 
     t0 = time.time()
@@ -221,22 +298,26 @@ def main():
             if args.max_steps_per_epoch and i >= args.max_steps_per_epoch:
                 break
             feats = encode(evan, batch, bands, mods, dev)
-            pred = project(evan, proj, queries, feats[args.src_mod])[:, 1:]
+            src = feats[args.src_mod]
+            m = make_patch_mask(src.shape[0], n_patches, args.mask_ratio, dev)
+            pred = project(evan, proj, queries, src, m)[:, 1:]
             tgt = feats[args.tgt_mod][:, n_prefix:]
-            loss = loss_fn(pred, tgt)
+            loss = loss_fn(pred, tgt, m if args.score_masked_only else None)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             sched.step()
             run += loss.item(); nb += 1
         m = evaluate(evan, proj, queries, val_loader, bands, mods,
-                     args.src_mod, args.tgt_mod, dev, args.eval_batches, n_prefix)
+                     args.src_mod, args.tgt_mod, dev, args.eval_batches, n_prefix,
+                     args.mask_ratio, n_patches)
         print(f"  ep {ep+1}/{args.epochs} train_loss={run/max(1,nb):.5f} "
               f"val_mse={m['val_mse']:.5f} aligned={m['aligned']:.4f} "
               f"shuf={m['shuffled']:.4f} gap={m['gap']:.4f} batch_r={m['batch_r']:.4f}")
 
     test = evaluate(evan, proj, queries, test_loader, bands, mods,
-                    args.src_mod, args.tgt_mod, dev, args.eval_batches, n_prefix)
+                    args.src_mod, args.tgt_mod, dev, args.eval_batches, n_prefix,
+                    args.mask_ratio, n_patches)
     print("\n=== TEST ===")
     for k, v in test.items():
         print(f"  {k:<16} {v:.4f}")
@@ -244,6 +325,7 @@ def main():
     os.makedirs(os.path.dirname(args.results_csv) or '.', exist_ok=True)
     row = dict(tag=args.tag, dataset=args.dataset, src_mod=args.src_mod, tgt_mod=args.tgt_mod,
                depth=args.depth, loss=args.loss, cos_weight=args.cos_weight,
+               mask_ratio=args.mask_ratio, score_masked_only=args.score_masked_only,
                epochs=args.epochs, lr=args.lr, batch_size=args.batch_size, seed=args.seed,
                trainable_params=n_par, checkpoint=os.path.basename(args.checkpoint),
                minutes=round((time.time() - t0) / 60, 2),

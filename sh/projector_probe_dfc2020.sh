@@ -31,7 +31,13 @@ SRC="${SRC:-s1}"; TGT="${TGT:-s2_norgb}"
 DEPTHS="${DEPTHS:-2 3 4}"
 LOSSES="${LOSSES:-mse mse_ccos ccos}"
 SEED="${SEED:-0}"
-EPOCHS="${EPOCHS:-8}"
+# MASK_RATIO reproduces real training, where the projector never sees a complete
+# source view: the tuned dfc2020 transfer config hides 64% of source patches and
+# blocks them as cross-attention keys. Masking is where a directional loss should
+# matter most -- with most of the source hidden the projector must extrapolate,
+# which is exactly when regressing to a plausible mean is most tempting.
+MASK_RATIO="${MASK_RATIO:-0.0}"
+EPOCHS="${EPOCHS:-32}"
 RESULTS_CSV="${RESULTS_CSV:-res/delulu/projector_probe_dfc2020.csv}"
 LEDGER="logs/projector_probe/submitted.tsv"
 mkdir -p logs/projector_probe res/delulu; touch "${LEDGER}"
@@ -56,7 +62,9 @@ for D in ${DEPTHS}; do
   for L in ${LOSSES}; do
     # Direction is part of the identity: without it a reverse-direction run
     # (s2_norgb -> s1) collides with the forward one in the same results CSV.
-    TAG="${SRC}to${TGT}_d${D}_${L}_s${SEED}"
+    MTAG=$(printf 'm%g' "${MASK_RATIO}" | tr -d '.')
+    [ -n "${SCORE_MASKED_ONLY:-}" ] && MTAG="${MTAG}o"
+    TAG="${SRC}to${TGT}_d${D}_${L}_${MTAG}_s${SEED}"
     if printf '%s\n' "${DONE}" | grep -qxF "${TAG}"; then
         echo "  [done] ${TAG} (already in ${RESULTS_CSV})"; skip=$((skip+1)); continue
     fi
@@ -66,6 +74,8 @@ for D in ${DEPTHS}; do
     EX="ALL,CKPT=${CKPT},SRC=${SRC},TGT=${TGT},DEPTH=${D},LOSS=${L}"
     EX="${EX},SEED=${SEED},EPOCHS=${EPOCHS},RESULTS_CSV=${RESULTS_CSV},TAG=${TAG}"
     [ -n "${COS_WEIGHT:-}" ] && EX="${EX},COS_WEIGHT=${COS_WEIGHT}"
+    EX="${EX},MASK_RATIO=${MASK_RATIO}"
+    [ -n "${SCORE_MASKED_ONLY:-}" ] && EX="${EX},SCORE_MASKED_ONLY=1"
     n=$((n+1))
     if [ "${DRYRUN:-0}" = "1" ]; then
         echo "[$n] depth=${D} loss=${L}"
