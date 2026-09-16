@@ -119,6 +119,25 @@ def _fmt_meanstd(val, decimals=1):
 
 DELULU_CSV = 'res/delulu/hptuned_masking_may6.csv'  # overridden by --apr21 / --may5 flags
 
+# Per-dataset Delulu result files, read IN ADDITION to DELULU_CSV.
+#
+# DELULU_CSV is a single pooled file from the April/May runs. dfc2020 moved to
+# the Copernicus-Bench split in August and biomassters was added in September;
+# neither writes into that pooled file, so without this map their Delulu columns
+# come back empty (or, worse, filled from the pre-split rows that used to live
+# in the pooled file -- those have been quarantined to res/ignore/).
+#
+# Only files whose rows carry `select_by` are usable: the table picks a config
+# per (start, new, selector), and a file with select_by unset cannot answer that
+# unless --ignore_select_by is passed.
+DELULU_EXTRA_CSVS = {
+    'dfc2020':     ['res/delulu/dfc2020_crossconfig.csv',
+                    'res/delulu/dfc2020_cobench_upernet.csv'],
+    'biomassters': ['res/delulu/biomassters_crossconfig.csv',
+                    'res/delulu/biomassters_best_s1s2.csv',
+                    'res/delulu/biomassters_best_s2s1.csv'],
+}
+
 # ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
@@ -198,11 +217,27 @@ def _load_delulu(dataset, arch, val_col, test_col, ignore_select_by=False):
     norm_val  = COL_MAP.get(val_col,  val_col)
     norm_test = COL_MAP.get(test_col, test_col)
 
-    df = _read_csv(DELULU_CSV)
-    if df is None:
+    frames = []
+    base = _read_csv(DELULU_CSV)
+    if base is not None:
+        frames.append(base)
+    for extra in DELULU_EXTRA_CSVS.get(dataset, []):
+        e = _read_csv(extra)
+        if e is not None:
+            frames.append(e)
+    if not frames:
         return {}
+    df = pd.concat(frames, ignore_index=True, sort=False)
 
     df = df[df['dataset'] == dataset]
+
+    # train_delulu stores regression metrics NEGATED (delulu.py _neg_rmse) so
+    # that val-selection can maximise uniformly across task types. Flip them
+    # back for display, after the dataset filter so only regression rows move.
+    if dataset in _LOWER_IS_BETTER_DS:
+        for c in df.columns:
+            if c.startswith(('val_', 'test_')):
+                df[c] = -pd.to_numeric(df[c], errors='coerce')
 
     # apr21 has model_arch; may5 does not (all evan_base)
     if 'model_arch' in df.columns:
