@@ -408,17 +408,17 @@ def _load_sft_dino(dataset, arch='evan_base'):
     if df is None:
         return {}
     df = df.copy()
-    # NOTE: do NOT filter to dino_init == True. The DINO weights are RGB
-    # pretrained -- train_sft.py maps them onto S2 via rgb_in_s2_indices, so
-    # they initialise 3 channels at most. On DFC2020 that makes DINO init
-    # actively HARMFUL as the non-RGB fraction of the input grows (paired over
-    # matched lr/wd/epoch, n=31: non-DINO wins 25, mean +2.54 mIoU, p=2e-5;
-    # per modality s2_rgb -2.04 [DINO wins, input IS rgb] ... s2_norgb +4.78,
-    # s2_norgb+s1 +5.96 [zero rgb bands]). On EuroSAT the sign flips (DINO wins
-    # 46/47) because its primary modality is RGB. So there is no correct global
-    # value for this flag. Let best-by-val pick it like any other hyperparameter:
-    # it selects DINO for s2_rgb/eurosat and non-DINO for the band-heavy
-    # modalities, with <=0.10 test regret on 7 of 8 DFC2020 modalities.
+    # NOTE: do NOT filter to dino_init == True. Which init wins flips with the
+    # DECODER, not the train split. DFC2020, paired over matched
+    # (modality, epoch, lr, wd):
+    #     linear  : DINO wins,   mean -5.3 to -5.9 mIoU, 47/48 pairs
+    #     upernet : random wins, mean +2.1 to +2.6 mIoU, 37/45 pairs
+    # Both splits agree within a decoder; fully controlled (n=15, both decoders
+    # x both inits) the interaction is +6.27 mIoU, t=9.65, p=1.5e-07.
+    # EuroSAT: DINO wins 46/47 (its primary modality IS rgb).
+    # So there is no correct global value for this flag. Let best-by-val pick it
+    # like any other hyperparameter (<=0.10 test regret on 7 of 8 DFC2020
+    # upernet modalities; s1 is the one ambiguous case).
     if df.empty:
         return {}
     df['val_metric']  = pd.to_numeric(df['val_metric'],  errors='coerce')
@@ -501,17 +501,17 @@ def _load_sft_combined_dino(dataset, arch='evan_base'):
     if df is None:
         return {}
     df = df.copy()
-    # NOTE: do NOT filter to dino_init == True. The DINO weights are RGB
-    # pretrained -- train_sft.py maps them onto S2 via rgb_in_s2_indices, so
-    # they initialise 3 channels at most. On DFC2020 that makes DINO init
-    # actively HARMFUL as the non-RGB fraction of the input grows (paired over
-    # matched lr/wd/epoch, n=31: non-DINO wins 25, mean +2.54 mIoU, p=2e-5;
-    # per modality s2_rgb -2.04 [DINO wins, input IS rgb] ... s2_norgb +4.78,
-    # s2_norgb+s1 +5.96 [zero rgb bands]). On EuroSAT the sign flips (DINO wins
-    # 46/47) because its primary modality is RGB. So there is no correct global
-    # value for this flag. Let best-by-val pick it like any other hyperparameter:
-    # it selects DINO for s2_rgb/eurosat and non-DINO for the band-heavy
-    # modalities, with <=0.10 test regret on 7 of 8 DFC2020 modalities.
+    # NOTE: do NOT filter to dino_init == True. Which init wins flips with the
+    # DECODER, not the train split. DFC2020, paired over matched
+    # (modality, epoch, lr, wd):
+    #     linear  : DINO wins,   mean -5.3 to -5.9 mIoU, 47/48 pairs
+    #     upernet : random wins, mean +2.1 to +2.6 mIoU, 37/45 pairs
+    # Both splits agree within a decoder; fully controlled (n=15, both decoders
+    # x both inits) the interaction is +6.27 mIoU, t=9.65, p=1.5e-07.
+    # EuroSAT: DINO wins 46/47 (its primary modality IS rgb).
+    # So there is no correct global value for this flag. Let best-by-val pick it
+    # like any other hyperparameter (<=0.10 test regret on 7 of 8 DFC2020
+    # upernet modalities; s1 is the one ambiguous case).
     if df.empty:
         return {}
     df['val_metric']  = pd.to_numeric(df['val_metric'],  errors='coerce')
