@@ -7,6 +7,11 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
+# kn101 has failing GPU memory: every job scheduled there on 2026-09-15 died with
+# "CUDA error: uncorrectable ECC error encountered" (9 of 9), while every job on
+# every other node succeeded. Slurm still lists it as healthy, so exclude it
+# explicitly. Override with EXCLUDE_NODES= if it is ever repaired.
+#SBATCH --exclude=kn101
 
 # One projector-probe arm: frozen encoder, train ONLY the cross-modal projector.
 # See analysis/train_projector_probe.py for what this measures and why.
