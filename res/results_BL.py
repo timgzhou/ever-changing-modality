@@ -65,7 +65,15 @@ OUT_DIR = 'res/latex'
 def _read_csv(path):
     if not os.path.isfile(path):
         return None
-    df = pd.read_csv(path)
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.ParserError:
+        # A handful of older eurosat distillation CSVs have rows with one extra
+        # field (an unquoted comma inside a value). Drop just those rows rather
+        # than losing the whole file -- and say so, so a genuinely corrupt new
+        # file is not silently half-read.
+        df = pd.read_csv(path, on_bad_lines='skip', engine='python')
+        print(f'  [warn] {path}: skipped malformed row(s)')
     if 'dataset' in df.columns:
         df = df[df['dataset'] != 'dataset']
     return df if not df.empty else None
