@@ -1,0 +1,10 @@
+tag,dataset,src_mod,tgt_mod,depth,loss,cos_weight,epochs,lr,batch_size,seed,trainable_params,checkpoint,minutes,test_aligned,test_shuffled,test_gap,test_batch_r,test_batch_r_median,test_val_mse
+s1tos2_norgb_d3_mse_ccos_s0,dfc2020,s1,s2_norgb,3,mse_ccos,1.0,8,0.0003,16,0,21266688,halluc_dfc2020_s1tos2_norgb_control_s0.pt,1.11,0.867498,0.577341,0.290157,0.635444,0.676897,0.121914
+s1tos2_norgb_d2_mse_s0,dfc2020,s1,s2_norgb,2,mse,1.0,8,0.0003,16,0,14178816,halluc_dfc2020_s1tos2_norgb_control_s0.pt,1.19,0.85147,0.592209,0.259261,0.586281,0.626019,0.134129
+s1tos2_norgb_d2_mse_ccos_s0,dfc2020,s1,s2_norgb,2,mse_ccos,1.0,8,0.0003,16,0,14178816,halluc_dfc2020_s1tos2_norgb_control_s0.pt,1.19,0.864664,0.579221,0.285443,0.628053,0.669055,0.124078
+s1tos2_norgb_d2_ccos_s0,dfc2020,s1,s2_norgb,2,ccos,1.0,8,0.0003,16,0,14178816,halluc_dfc2020_s1tos2_norgb_control_s0.pt,1.3,0.293566,-0.006848,0.300415,0.397847,0.433258,1.150074
+s1tos2_norgb_d4_mse_s0,dfc2020,s1,s2_norgb,4,mse,1.0,8,0.0003,16,0,28354560,halluc_dfc2020_s1tos2_norgb_control_s0.pt,1.28,0.84795,0.594063,0.253887,0.573952,0.613757,0.137107
+s1tos2_norgb_d4_mse_ccos_s0,dfc2020,s1,s2_norgb,4,mse_ccos,1.0,8,0.0003,16,0,28354560,halluc_dfc2020_s1tos2_norgb_control_s0.pt,1.31,0.868976,0.575161,0.293815,0.640218,0.681615,0.120835
+s1tos2_norgb_d3_ccos_s0,dfc2020,s1,s2_norgb,3,ccos,1.0,8,0.0003,16,0,21266688,halluc_dfc2020_s1tos2_norgb_control_s0.pt,1.33,0.287597,-0.009255,0.296853,0.387122,0.41938,1.176107
+s1tos2_norgb_d3_mse_s0,dfc2020,s1,s2_norgb,3,mse,1.0,8,0.0003,16,0,21266688,halluc_dfc2020_s1tos2_norgb_control_s0.pt,1.53,0.851104,0.591759,0.259345,0.583638,0.623713,0.134723
+s1tos2_norgb_d4_ccos_s0,dfc2020,s1,s2_norgb,4,ccos,1.0,8,0.0003,16,0,28354560,halluc_dfc2020_s1tos2_norgb_control_s0.pt,1.49,0.226674,-0.024126,0.2508,0.337881,0.363166,1.02851

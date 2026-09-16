@@ -54,7 +54,9 @@ fi
 n=0; dup=0; skip=0
 for D in ${DEPTHS}; do
   for L in ${LOSSES}; do
-    TAG="d${D}_${L}_s${SEED}"
+    # Direction is part of the identity: without it a reverse-direction run
+    # (s2_norgb -> s1) collides with the forward one in the same results CSV.
+    TAG="${SRC}to${TGT}_d${D}_${L}_s${SEED}"
     if printf '%s\n' "${DONE}" | grep -qxF "${TAG}"; then
         echo "  [done] ${TAG} (already in ${RESULTS_CSV})"; skip=$((skip+1)); continue
     fi
