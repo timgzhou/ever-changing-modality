@@ -65,7 +65,7 @@ for DATASET in ${DATASETS}; do
         for FAM in ${CONFIG_FAMILIES}; do
             CONFIG="configs/delulu_best_${FAM}.yaml"
             for SEL in ${SELECTORS}; do
-                TAG="${DATASET} ${START} ${NEW} ${FAM} ${SEL}"
+                TAG="${DATASET} ${START} ${NEW} ${FAM} ${SEL}${LR:+ lr${LR}}"
                 if printf '%s' "${INFLIGHT}" | grep -qxF "${TAG}"; then
                     echo "  [have] ${TAG}: in flight"; dup=$((dup+1)); continue
                 fi
@@ -73,7 +73,18 @@ for DATASET in ${DATASETS}; do
                 EX="ALL,DATASET=${DATASET},START=${START},NEW=${NEW},TEACHER=${TEACHER}"
                 EX="${EX},CONFIG=${CONFIG},SELECT_BY=${SEL},BATCH_SIZE=${BS}"
                 EX="${EX},RESULTS_CSV=res/delulu/${DATASET}_crossconfig.csv"
-                EX="${EX},CONFIG_LABEL=${FAM}_${SEL}"
+                # LR override: the source config's lr can be catastrophically
+                # wrong for the target dataset. On biomassters every config with
+                # lr <= 1e-4 collapsed (dfc2020_peeking 5/5, benv2_addition 4/4;
+                # RMSE 70-86 against a ~42-48 teacher) while every config with
+                # lr >= 3.9e-4 survived (0/14). Set LR=<value> to rescue those
+                # families; the label records it so the rows stay distinguishable.
+                LBL="${FAM}_${SEL}"
+                if [ -n "${LR:-}" ]; then
+                    EX="${EX},LR=${LR}"
+                    LBL="${LBL}_lr${LR}"
+                fi
+                EX="${EX},CONFIG_LABEL=${LBL}"
                 # biomassters: pin 64 epochs, overriding the config's value
                 [ "${DATASET}" = "biomassters" ] && EX="${EX},EPOCHS=64"
                 if [ "${DRYRUN:-0}" = "1" ]; then
