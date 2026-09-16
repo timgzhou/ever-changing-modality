@@ -30,6 +30,12 @@ def main():
     parser.add_argument('--results_csv', type=str,
                         default='res/delulu-sweep/sweep_results_nomae.csv')
     parser.add_argument('--wandb_project', type=str, default='delulu-sweep')
+    # Informational, logged to the results CSV. Used by the partial-transfer
+    # sweeps (sweep/create_sweep_benv2_losswts.py), where each sweep pins the
+    # DFC2020 config tuned for ONE selector and must be compared against the
+    # BEN-v2 baseline for that SAME selector.
+    parser.add_argument('--select_by', type=str, default=None,
+                        choices=['transfer', 'peeking', 'addition'])
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--epochs', type=int, default=64)
@@ -90,7 +96,6 @@ def main():
     args.recon_cos_weight_latent = 1.0
     args.checkpoint_name = None
     args.save_checkpoint = False
-    args.select_by = None
 
     train_delulu.main(args)
 
