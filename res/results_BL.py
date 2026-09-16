@@ -119,6 +119,57 @@ def _fmt_meanstd(val, decimals=1):
 
 DELULU_CSV = 'res/delulu/hptuned_masking_may6.csv'  # overridden by --apr21 / --may5 flags
 
+# Flat per-dataset baseline CSVs, for datasets that never used the
+# res/baselines/<family>/<dataset>/<arch>/ directory layout.
+#
+# dfc2020 (Copernicus-Bench) and biomassters write ONE flat file per family
+# under res/baselines/, e.g. dfc2020_cobench_distill_transfer_upernet.csv. The
+# loaders only globbed the directory layout, so KD/TTM/MixMatch/MKE came back
+# empty for both datasets even though the results existed.
+#
+# Distillation: prefer the *distill_transfer* file. It is the correct analogue of
+# Delulu's transfer metric (unimodal student on the NEW modality); the plain
+# *distillation* file passes --modalities <teacher> <new>, a BIMODAL student,
+# which is the ADDITION setting. See sh/distill_transfer_dfc2020.sh.
+BASELINE_FLAT_CSVS = {
+    'distillation': {
+        'dfc2020':     ['res/baselines/dfc2020_cobench_distill_transfer_upernet.csv'],
+        'biomassters': ['res/baselines/biomassters_distill_transfer_upernet.csv'],
+    },
+    'distillation_add': {   # bimodal student -> the addition/ensemble column
+        'dfc2020':     ['res/baselines/dfc2020_cobench_distillation_upernet.csv'],
+        'biomassters': ['res/baselines/biomassters_distillation_upernet.csv'],
+    },
+    'mke': {
+        'dfc2020':     ['res/baselines/dfc2020_cobench_mke_upernet.csv'],
+        'biomassters': ['res/baselines/biomassters_mke_upernet.csv'],
+    },
+    'mixmatch': {
+        # RERUN first: the original dfc2020 rows all used lambda_u=75, which
+        # collapses training (0.34-23.39 mIoU vs 54-59 at lambda_u 0.5-1.0).
+        'dfc2020':     ['res/baselines/dfc2020_cobench_mixmatch_upernet_RERUN.csv',
+                        'res/baselines/dfc2020_cobench_mixmatch_lambdau_upernet.csv'],
+        'biomassters': ['res/baselines/biomassters_mixmatch_upernet.csv'],
+    },
+}
+
+
+def _flat_frames(family, dataset, arch):
+    """Concatenated flat baseline CSVs for (family, dataset), or None."""
+    frames = []
+    for path in BASELINE_FLAT_CSVS.get(family, {}).get(dataset, []):
+        df = _read_csv(path)
+        if df is None:
+            continue
+        if 'model_type' in df.columns:
+            df = df[df['model_type'] == arch]
+        if len(df):
+            frames.append(df)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
 # Per-dataset Delulu result files, read IN ADDITION to DELULU_CSV.
 #
 # DELULU_CSV is a single pooled file from the April/May runs. dfc2020 moved to
@@ -142,7 +193,38 @@ DELULU_EXTRA_CSVS = {
 # Data loaders
 # ---------------------------------------------------------------------------
 
+def _distill_agg(df, id_cols, result):
+    """Aggregate one distillation frame into result[(teacher, student, kl)]."""
+    df = df.copy()
+    df['test_metric']        = pd.to_numeric(df['test_metric'],        errors='coerce')
+    df['best_val_agreement'] = pd.to_numeric(df['best_val_agreement'], errors='coerce')
+    for (teacher, student, kl_type), grp in df.groupby(
+            ['teacher_modality', 'student_modality', 'kl_type']):
+        val_rows = grp[grp['best_val_agreement'].notna()]
+        if val_rows.empty:
+            topk = grp.nlargest(5, 'test_metric')['test_metric']
+            result[(teacher, student, kl_type)] = (topk.mean(), topk.std())
+            continue
+        top2 = val_rows.nlargest(2, 'best_val_agreement')
+        all_test = list(top2['test_metric'])
+        no_val = grp[grp['best_val_agreement'].isna()]
+        use_ids = [c for c in id_cols if c in grp.columns]
+        for _, row in top2.iterrows():
+            if use_ids:
+                mask = (no_val[use_ids] == row[use_ids].values).all(axis=1)
+                all_test.extend(no_val[mask]['test_metric'].tolist())
+        s = pd.Series(all_test, dtype=float).dropna()
+        result[(teacher, student, kl_type)] = (s.mean(), s.std())
+    return result
+
+
 def _load_distillation(dataset, arch):
+    # Flat-file datasets (dfc2020 cobench, biomassters) have no per-arch dir.
+    flat = _flat_frames('distillation', dataset, arch)
+    if flat is not None and 'teacher_modality' in flat.columns:
+        id_cols = list(flat.columns[6:13]) + ['teacher_checkpoint']
+        return _distill_agg(flat, id_cols, {})
+
     base = f'res/baselines/distillation/{dataset}/{arch}'
     if not os.path.isdir(base):
         return {}
@@ -334,14 +416,28 @@ def _load_sft_dino(dataset, arch='evan_base'):
     return result
 
 
+def _nbest(grp, col, n, dataset):
+    """Top-n rows by `col`, respecting the metric direction (RMSE is lower-better)."""
+    return (grp.nsmallest(n, col) if dataset in _LOWER_IS_BETTER_DS
+            else grp.nlargest(n, col))[col]
+
+
 def _load_mke_addition(dataset, arch='evan_base'):
-    df = _read_csv(f'res/baselines/mke/{dataset}.csv')
+    df = _flat_frames('mke', dataset, arch)
     if df is None:
+        df = _read_csv(f'res/baselines/mke/{dataset}.csv')
+        if df is None:
+            return {}
+        df = df[df['model_type'] == arch]
+    if df.empty or 'valchecked_test_metric' not in df.columns:
         return {}
-    df = df[df['model_type'] == arch]
-    if df.empty:
-        return {}
+    df = df.copy()
     df['valchecked_test_metric'] = pd.to_numeric(df['valchecked_test_metric'], errors='coerce')
+    # Older runs (the 3 biomassters rows) predate valchecked_test_metric and
+    # leave it empty; fall back to the plain test metric so the cell is a number
+    # rather than nan. Those rows are not val-selected -- noted in the audit.
+    if df['valchecked_test_metric'].isna().all() and 'student_test_metric' in df.columns:
+        df['valchecked_test_metric'] = pd.to_numeric(df['student_test_metric'], errors='coerce')
     result = {}
     for (teacher, student_mods), grp in df.groupby(['teacher_modality', 'student_modalities']):
         if '+' not in str(student_mods):
@@ -350,23 +446,37 @@ def _load_mke_addition(dataset, arch='evan_base'):
         new_parts = [p for p in parts if p != teacher]
         if len(new_parts) != 1:
             continue
-        top3 = grp.nlargest(3, 'valchecked_test_metric')['valchecked_test_metric']
+        top3 = _nbest(grp, 'valchecked_test_metric', 3, dataset)
         result[(teacher, new_parts[0])] = (top3.mean(), top3.std())
     return result
 
 
 def _load_mixmatch_peek(dataset, arch='evan_base'):
-    df = _read_csv(f'res/baselines/mixmatch/baseline_mixmatch_{dataset}.csv')
+    df = _flat_frames('mixmatch', dataset, arch)
     if df is None:
+        df = _read_csv(f'res/baselines/mixmatch/baseline_mixmatch_{dataset}.csv')
+        if df is None:
+            return {}
+        df = df[df['model_type'] == arch]
+    if df.empty or 'best_val_metric' not in df.columns:
         return {}
-    df = df[df['model_type'] == arch]
-    if df.empty:
-        return {}
+    df = df.copy()
     df['best_val_metric']      = pd.to_numeric(df['best_val_metric'],      errors='coerce')
     df['best_val_test_metric'] = pd.to_numeric(df['best_val_test_metric'], errors='coerce')
     result = {}
     for modality, grp in df.groupby('modality'):
-        top3 = grp.nlargest(3, 'best_val_metric')['best_val_test_metric']
+        # These flat files are SWEEPS over lambda_u, and lambda_u is the single
+        # biggest driver of the score (dfc2020 s2_norgb: 59.4 at 0.5 down to 5.2
+        # at 75). Averaging the top-3 val rows therefore mixes a good config with
+        # a collapsed one and reports a hyperparameter sweep's spread as if it
+        # were seed noise. Pick the best lambda_u by val, then average its seeds.
+        if 'lambda_u' in grp.columns:
+            by_lu = grp.groupby('lambda_u')['best_val_metric'].mean()
+            best_lu = by_lu.idxmin() if dataset in _LOWER_IS_BETTER_DS else by_lu.idxmax()
+            grp = grp[grp['lambda_u'] == best_lu]
+        sel  = (grp.nsmallest(3, 'best_val_metric') if dataset in _LOWER_IS_BETTER_DS
+                else grp.nlargest(3, 'best_val_metric'))
+        top3 = sel['best_val_test_metric']
         result[modality] = (top3.mean(), top3.std())
     return result
 
