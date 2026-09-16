@@ -342,7 +342,10 @@ def _load_delulu(dataset, arch, val_col, test_col, ignore_select_by=False):
     df[norm_val]  = pd.to_numeric(df[norm_val],  errors='coerce')
     result = {}
     for (start, new), grp in df.groupby(['starting_modality', 'new_modality']):
-        top3 = grp.nlargest(3, norm_val)[norm_test]
+        # Direction matters: the regression columns were un-negated above, so
+        # nlargest would pick the WORST (highest-RMSE) configs for biomassters.
+        top3 = _nbest(grp, norm_val, 3, dataset).index
+        top3 = grp.loc[top3, norm_test]
         result[(start, new)] = (top3.mean(), top3.std())
     return result
 

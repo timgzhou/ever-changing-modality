@@ -13,6 +13,15 @@
 # comparison in the linear sweep (dino_init=True, train_split=full, lr=5e-4),
 # both weight decays. 12 jobs, not a full 48-job re-sweep.
 #
+# EPOCHS: the job script defaults to 24 and propagates through --export=ALL, so
+# `EPOCHS=64 bash <this script>` re-runs longer. 24 is NOT converged -- val mIoU
+# was still climbing at the last epoch (s2_norgb+s1: 64.24 at ep19 -> 66.70 at
+# ep23) -- and the MixMatch baseline trains for 64, which is how MixMatch came
+# to beat DINO-SFT on dfc2020 s1 (48.7 vs 46.2) despite never beating it before.
+# An undertrained teacher also understates every stage-1 method that distills
+# from it, Delulu included. The CSV dedup key includes EPOCHS, so 64-epoch runs
+# do not collide with the 24-epoch ones.
+#
 # Usage: bash sh/train_sft/train_sft_dfc2020_upernet.sh
 
 export DECODER=upernet
