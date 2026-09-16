@@ -97,6 +97,9 @@ def main():
     parser.add_argument('--train_mode', type=str, default='fft',
                         choices=['probe', 'adaptor', 'fft', 'emb+probe'])
     parser.add_argument('--checkpoint_name', type=str, default=None)
+    parser.add_argument('--backbone_lr_mult', type=float, default=0.1,
+                        help="Backbone lr multiplier in fft mode (default 0.1, the "
+                             "historical hardcoded lr/10). 1.0 = symmetric lr.")
     parser.add_argument('--decoder_type', type=str, default='linear',
                         choices=['linear', 'upernet'],
                         help="Dense head for segmentation/regression. 'linear' = 1x1 conv on the "
@@ -290,8 +293,18 @@ def main():
                 head_params.update(id(p) for p in h.parameters())
         backbone_p = [p for p in model.parameters() if p.requires_grad and id(p) not in head_params]
         head_p     = [p for p in model.parameters() if p.requires_grad and id(p) in head_params]
+        # Discriminative lr: the backbone trains slower than the head. The 1/10
+        # default suits a PRETRAINED backbone, but it is applied regardless of
+        # init, and under upernet the head is 39M params at full lr against an
+        # 85M backbone at lr/10 -- so a DINO backbone is held back while the
+        # large decoder adapts around it. Under a linear head (~6K params) the
+        # same discount instead cripples a random backbone. Exposed so the
+        # discount can be matched to the init; see --backbone_lr_mult.
+        bb_mult = args.backbone_lr_mult
+        print(f"Discriminative lr: backbone x{bb_mult} ({args.lr * bb_mult:.2e}), "
+              f"head x1 ({args.lr:.2e})")
         optimizer = torch.optim.AdamW([
-            {'params': backbone_p, 'lr': args.lr / 10},
+            {'params': backbone_p, 'lr': args.lr * bb_mult},
             {'params': head_p,     'lr': args.lr},
         ], weight_decay=args.weight_decay)
     else:
@@ -377,6 +390,12 @@ def main():
     # removed ROI-disjoint split wrote res/train_sft/dfc2020.csv with a 10-class
     # head, and the two must never share a file.
     _suffix = "_cobench" if args.dataset == "dfc2020" else ""
+    # backbone_lr_mult is a NEW column. Appending a 19-field row under the
+    # existing 18-field header does not error -- pandas silently shifts every
+    # field left by one (train_split would read the multiplier). So any run that
+    # is not at the historical default goes to its own file.
+    if args.backbone_lr_mult != 0.1:
+        _suffix += "_bblr"
     filename = f"res/train_sft/{args.dataset}{_suffix}.csv"
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     file_exists = os.path.isfile(filename)
@@ -385,6 +404,7 @@ def main():
         "learning_rate", "weight_decay", "trainable_params", "epoch",
         "test_metric", "val_metric", "metric_name", "saved_checkpoint", "global_rep",
         "dino_init", "num_time_steps", "decoder", "train_aug", "train_split",
+        "backbone_lr_mult",
     ]
     with open(filename, mode='a', newline='') as file:
         # lineterminator: csv defaults to \r\n; the sweep scripts grep with a
@@ -399,7 +419,7 @@ def main():
             f"{best_val_metric:.2f}" if best_val_metric is not None else "",
             metric_name, checkpoint_path, args.global_rep,
             args.use_dino_weights, args.num_time_steps, decoder_tag,
-            args.train_aug, args.train_split,
+            args.train_aug, args.train_split, args.backbone_lr_mult,
         ])
 
     if args.wandb_project:

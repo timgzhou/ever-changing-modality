@@ -32,6 +32,15 @@ CSV_SUFFIX=""
 if [ "${DATASET}" = "dfc2020" ]; then
     CSV_SUFFIX="_cobench"
 fi
+# BACKBONE_LR_MULT: multiplier on the backbone lr in fft mode (train_sft.py
+# default 0.1 = the historical hardcoded lr/10; 1.0 = symmetric). Anything other
+# than 0.1 adds a results column, so train_sft.py writes it to its own *_bblr
+# file -- mirror that routing here or the dedup check reads the wrong file.
+BBLR_ARG=""
+if [ -n "${BACKBONE_LR_MULT:-}" ]; then
+    BBLR_ARG="--backbone_lr_mult ${BACKBONE_LR_MULT}"
+    [ "${BACKBONE_LR_MULT}" != "0.1" ] && CSV_SUFFIX="${CSV_SUFFIX}_bblr"
+fi
 RESULTS_CSV="res/train_sft/${DATASET}${CSV_SUFFIX}.csv"
 
 # BioMassters is temporal: pool features over this many timesteps (<=12).
@@ -93,7 +102,13 @@ for USE_DINO in ${DINO_ARMS:-1 0}; do
     # 48-epoch rerun of the same config. Layout after lr,wd is
     #   trainable_params, epoch, test, val, metric_name, checkpoint, global_rep
     # so epoch is field 2 of the 7 that used to be skipped wholesale.
-    if grep -qP "^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},([^,]*,[^,]*,)?${LR},${WD},[^,]+,${EPOCHS:-24},([^,]+,){5}${DINO_VAL},${T},\Q${DECODER_TAG}\E,${TRAIN_AUG},${TRAIN_SPLIT}\r?$" "${RESULTS_CSV}" 2>/dev/null; then
+    # BACKBONE_LR_MULT != 0.1 routes train_sft.py to a separate *_bblr.csv with one
+    # extra trailing column, so the dedup pattern must not anchor on train_split$.
+    _TAIL='\r?$'
+    if [ -n "${BACKBONE_LR_MULT:-}" ] && [ "${BACKBONE_LR_MULT}" != "0.1" ]; then
+        _TAIL=",${BACKBONE_LR_MULT}\r?$"
+    fi
+    if grep -qP "^${DATASET},${MODEL},${MODALITY_KEY},${TRAIN_MODE},([^,]*,[^,]*,)?${LR},${WD},[^,]+,${EPOCHS:-24},([^,]+,){5}${DINO_VAL},${T},\Q${DECODER_TAG}\E,${TRAIN_AUG},${TRAIN_SPLIT}${_TAIL}" "${RESULTS_CSV}" 2>/dev/null; then
         echo "  → dino_init=${DINO_VAL} train_split=${TRAIN_SPLIT} already in results, skipping"
         continue
     fi
@@ -109,6 +124,7 @@ for USE_DINO in ${DINO_ARMS:-1 0}; do
         --weight_decay ${WD} \
         --train_aug ${TRAIN_AUG} \
         --train_split ${TRAIN_SPLIT} \
+        ${BBLR_ARG} \
         ${EXTRA_ARGS} \
         ${DINO_FLAG}
 done
