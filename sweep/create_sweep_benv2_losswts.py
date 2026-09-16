@@ -127,8 +127,13 @@ def main():
                     for loss in v:
                         extra.extend(['--active_losses', str(loss)])
                 elif isinstance(v, bool):
-                    if v:
-                        extra.append(f'--{k}')
+                    # sweep_delulu.py parses its boolean flags with type=_bool
+                    # (--latent_masked_only, --unprotect_starting_mod,
+                    # --use_mask_token), so they REQUIRE a value. A bare
+                    # `--latent_masked_only` -- which is what train_delulu.py
+                    # takes -- makes argparse swallow the next token and the
+                    # trial dies before training. Always emit the value.
+                    extra.extend([f'--{k}', 'True' if v else 'False'])
                 else:
                     extra.extend([f'--{k}', str(v)])
 

@@ -79,7 +79,12 @@ def kd_ttm(dataset, src, tgt):
 
 
 def mixmatch(dataset, src, tgt):
-    for p in (f'res/baselines/{dataset}_cobench_mixmatch_upernet.csv',
+    # RERUN first: the dfc2020 MixMatch rows were re-run on 2026-09-16 after the
+    # originals collapsed (<25 mIoU). This loop takes the FIRST file with rows,
+    # so the rerun must precede the stale file or the audit reports the old
+    # failures -- which is what results_BL.py's BASELINE_FLAT_CSVS already does.
+    for p in (f'res/baselines/{dataset}_cobench_mixmatch_upernet_RERUN.csv',
+              f'res/baselines/{dataset}_cobench_mixmatch_upernet.csv',
               f'res/baselines/{dataset}_mixmatch_upernet.csv',
               f'res/baselines/mixmatch/baseline_mixmatch_{dataset}.csv'):
         df = _read(p)
