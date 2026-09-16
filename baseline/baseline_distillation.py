@@ -18,11 +18,16 @@ from delulunet_main import evan_small, evan_base, evan_large, EVANClassifier, Ev
 from data_utils import get_loaders, create_multimodal_batch
 from train_utils import _compute_map, compute_miou, evaluate
 
+# Must track the dataset loaders' own _VALID_MODS, not lag them. biomassters
+# gained s2_rgb/s2_norgb on 2026-09-13 (biomassters_data_utils._VALID_MODS) and
+# benv2 has always accepted s2_rgb (geobench_data_utils), but this list was not
+# updated, so --modalities s2_norgb was rejected for biomassters long after the
+# data layer supported it.
 VALID_NEW_MODS = {
     'eurosat': ['vre', 'nir', 'swir', 'rgb', 's2'],
-    'benv2':   ['s1', 's2', 's2_norgb'],
+    'benv2':   ['s1', 's2', 's2_rgb', 's2_norgb'],
     'dfc2020': ['s1', 's2', 's2_rgb', 's2_norgb'],
-    'biomassters': ['s1', 's2'],
+    'biomassters': ['s1', 's2', 's2_rgb', 's2_norgb'],
 }
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')

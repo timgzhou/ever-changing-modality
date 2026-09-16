@@ -245,12 +245,46 @@ def _load_rsfm(dataset):
     return result
 
 
+# The SFT CSV, decoder and train_split that each dataset's table is built from.
+# Getting any of these wrong silently reports a different model:
+#   - dfc2020 results live in dfc2020_cobench.csv; the older dfc2020.csv is
+#     LINEAR-decoder only, so reading it gave s2_rgb = 33.0 instead of 59.0.
+#   - a `full` teacher has already seen train2 with labels, which is the stage-1
+#     unlabeled pool, so mixing splits leaks. split1 only.
+#   - dfc2020/benv2 tables are upernet; biomassters is upernet+relu.
+SFT_SOURCE = {
+    'benv2':       dict(csv='benv2',           decoder='upernet',      split='split1'),
+    'dfc2020':     dict(csv='dfc2020_cobench', decoder='upernet',      split='split1'),
+    'eurosat':     dict(csv='eurosat',         decoder=None,           split=None),
+    'biomassters': dict(csv='biomassters',     decoder='upernet+relu', split='split1'),
+}
+
+
+def _sft_frame(dataset, arch):
+    """Load the SFT rows for a dataset's table: right file, decoder and split."""
+    spec = SFT_SOURCE.get(dataset, dict(csv=dataset, decoder=None, split=None))
+    df = _read_csv(f"res/train_sft/{spec['csv']}.csv")
+    if df is None:
+        return None
+    df = df[df['model_type'] == arch]
+    # Filter only on columns the file actually has: older CSVs predate them, and
+    # a missing column means the file is single-decoder / single-split anyway.
+    if spec['decoder'] and 'decoder' in df.columns:
+        want = spec['decoder']
+        got = df['decoder'].astype(str)
+        # 'upernet+relu' is recorded as 'upernet' plus relu_output in some files.
+        df = df[(got == want) | (got == want.split('+')[0])] if '+' in want else df[got == want]
+    if spec['split'] and 'train_split' in df.columns:
+        df = df[df['train_split'].astype(str) == spec['split']]
+    return df if len(df) else None
+
+
 def _load_sft_dino(dataset, arch='evan_base'):
     """DINO-init SFT for given arch: modality → test_metric (val-selected)."""
-    df = _read_csv(f'res/train_sft/{dataset}.csv')
+    df = _sft_frame(dataset, arch)
     if df is None:
         return {}
-    df = df[df['model_type'] == arch]
+    df = df.copy()
     df['dino_init'] = df['dino_init'].astype(str).str.lower().map(
         {'true': True, 'false': False, '1': True, '0': False})
     df = df[df['dino_init'] == True]
@@ -304,10 +338,10 @@ def _load_mixmatch_peek(dataset, arch='evan_base'):
 
 def _load_sft_combined_dino(dataset, arch='evan_base'):
     """DINO-init SFT on combined modality for given arch."""
-    df = _read_csv(f'res/train_sft/{dataset}.csv')
+    df = _sft_frame(dataset, arch)
     if df is None:
         return {}
-    df = df[df['model_type'] == arch]
+    df = df.copy()
     df['dino_init'] = df['dino_init'].astype(str).str.lower().map(
         {'true': True, 'false': False, '1': True, '0': False})
     df = df[df['dino_init'] == True]
