@@ -52,8 +52,11 @@ done < "${LEDGER}"
 n=0; dup=0; miss=0
 for DATASET in ${DATASETS}; do
     PRE=$(prefix_for "${DATASET}"); DEC=$(decoder_for "${DATASET}"); BS=$(batch_for "${DATASET}")
-    for pair in "s1 s2" "s2 s1" "s2_rgb s2_norgb" "s2_norgb s2_rgb"; do
-        set -- $pair; START="$1"; NEW="$2"
+    # PAIRS is a space-separated list of START:NEW, overriding the default,
+    # e.g. PAIRS="s2_rgb:s1" to fill a single missing table cell. s2_rgb->s1 is
+    # in the paper table but was never in the default list.
+    for pair in ${PAIRS:-s1:s2 s2:s1 s2_rgb:s2_norgb s2_norgb:s2_rgb}; do
+        START="${pair%%:*}"; NEW="${pair##*:}"
         KEY="${PRE}/${START}/evan_base/${DEC}/split1"
         TEACHER=$(jq -r ".\"${KEY}\".checkpoint // empty" "${TEACHERS_JSON}")
         if [ -z "${TEACHER}" ] || [ ! -f "${TEACHER}" ]; then

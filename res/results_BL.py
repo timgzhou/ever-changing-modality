@@ -19,24 +19,45 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 
 DATASETS = ['benv2', 'dfc2020', 'eurosat']
+# Datasets rendered in the focused per-dataset tables (--datasets).
+ALL_DATASETS = ['benv2', 'dfc2020', 'eurosat', 'biomassters']
 
 DATASET_NAMES = {
     'benv2':   'reBEN (Multi-Label Classification, mAP)',
     'dfc2020': 'DFC2020 (Semantic Segmentation, mIoU)',
     'eurosat': 'EuroSAT (Classification, Acc)',
+    'biomassters': 'BioMassters (AGB Regression, RMSE -- LOWER IS BETTER)',
 }
 
 DATASET_DISPLAY = {
     'benv2':   r'\shortstack[c]{reBEN\\(mAP)}',
     'dfc2020': r'\shortstack[c]{DFC2020\\(mIoU)}',
     'eurosat': r'\shortstack[c]{EuroSAT\\(Acc)}',
+    'biomassters': r'\shortstack[c]{BioMassters\\(RMSE $\downarrow$)}',
 }
 
 VALID_TRANSFERS = {
     'benv2':   [('s2_rgb', 's1'), ('s2_rgb', 's2_norgb'), ('s1', 's2'), ('s2', 's1')],
     'dfc2020': [('s2_rgb', 's1'), ('s2_rgb', 's2_norgb'), ('s1', 's2'), ('s2', 's1')],
     'eurosat': [('rgb', 'vre')],
+    'biomassters': [('s2_rgb', 's1'), ('s2_rgb', 's2_norgb'), ('s1', 's2'), ('s2', 's1')],
 }
+
+# Datasets whose metric is lower-is-better (see LOWER_IS_BETTER_DATASETS below,
+# which is the row-level counterpart used at bolding time).
+_LOWER_IS_BETTER_DS = ('biomassters',)
+
+
+def _best_by_val(grp, dataset, col='val_metric'):
+    """Pick the best-by-val row, respecting the metric's direction.
+
+    BioMassters is RMSE, so ascending=False silently selected the WORST model:
+    the s2_rgb teacher came back as test 76.9 (an undertrained lr 1e-4 run) when
+    the best is 41.96.
+    """
+    ascending = dataset in _LOWER_IS_BETTER_DS
+    return grp.sort_values(col, ascending=ascending).iloc[0]
+
 
 MOD_DISPLAY = {
     's2_rgb': 'S2-RGB', 's2': 'S2', 's1': 'S1',
@@ -219,7 +240,7 @@ def _load_rsfm(dataset):
     df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
     result = {}
     for (model, modality), grp in df.groupby(['model', 'modality']):
-        best = grp.sort_values('val_metric', ascending=False).iloc[0]
+        best = _best_by_val(grp, dataset)
         result[(model, modality)] = best['test_metric']
     return result
 
@@ -239,7 +260,7 @@ def _load_sft_dino(dataset, arch='evan_base'):
     df['test_metric'] = pd.to_numeric(df['test_metric'], errors='coerce')
     result = {}
     for modality, grp in df.groupby('modality'):
-        best = grp.sort_values('val_metric', ascending=False).iloc[0]
+        best = _best_by_val(grp, dataset)
         result[modality] = best['test_metric']
     return result
 
@@ -298,7 +319,7 @@ def _load_sft_combined_dino(dataset, arch='evan_base'):
     for modality, grp in df.groupby('modality'):
         if '+' not in str(modality):
             continue
-        best = grp.sort_values('val_metric', ascending=False).iloc[0]
+        best = _best_by_val(grp, dataset)
         result[modality] = best['test_metric']
     return result
 
@@ -508,7 +529,29 @@ def _num(s):
     return float(m.group()) if m else float('nan')
 
 
+# Metrics where a LOWER number is better. BioMassters is AGB regression scored
+# by RMSE; every other dataset here (mAP / mIoU / Acc) is higher-is-better.
+LOWER_IS_BETTER_DATASETS = ('biomassters',)
+
+
+def _row_lower_is_better(row):
+    r"""True when this row's dataset is scored by a lower-is-better metric.
+
+    The Dataset cell holds a LaTeX display string (e.g. a \shortstack with
+    'BioMassters' and 'RMSE' in it), so match on the rendered text rather than a
+    dataset key -- that is all that survives into the table frame.
+    """
+    cell = str(row.get('Dataset', ''))
+    low = cell.lower()
+    return any(d in low for d in LOWER_IS_BETTER_DATASETS) or 'rmse' in low
+
+
 def _bold_max_per_row(df, cols):
+    """Bold the BEST cell per row, respecting the metric's direction.
+
+    Previously this always took max(), which silently bolds the WORST cell for
+    an RMSE row. See LOWER_IS_BETTER_DATASETS.
+    """
     df = df.copy()
     for c in cols:
         df[c] = df[c].astype(object)
@@ -517,7 +560,8 @@ def _bold_max_per_row(df, cols):
         valid = {c: v for c, v in vals.items() if not np.isnan(v)}
         if not valid:
             continue
-        best_col = max(valid, key=valid.__getitem__)
+        pick = min if _row_lower_is_better(row) else max
+        best_col = pick(valid, key=valid.__getitem__)
         df.at[i, best_col] = _bold(_escape(row[best_col]))
     return df
 
@@ -1110,7 +1154,15 @@ def main():
                         help='Show KD-ens/TTM-ens and Delulu-ens columns in Addition table')
     parser.add_argument('--ignore_select_by', action='store_true',
                         help='Pool all configs per (start, new) ignoring select_by filter')
+    parser.add_argument('--datasets', nargs='+', default=None, choices=ALL_DATASETS,
+                        help='Render only these datasets (e.g. --datasets dfc2020 biomassters). '
+                             'Empty cells are shown as -- rather than dropped, so the table '
+                             'doubles as a coverage view. Writes res/latex/<ds>_tables*.tex.')
     args = parser.parse_args()
+
+    global DATASETS
+    if args.datasets:
+        DATASETS = list(args.datasets)
 
     global DELULU_CSV
     if args.apr21:

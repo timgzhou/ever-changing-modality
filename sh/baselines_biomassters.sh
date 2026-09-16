@@ -27,13 +27,21 @@ set -u
 MODEL="${MODEL:-evan_base}"
 EPOCHS="${EPOCHS:-64}"
 LRS="${LRS:-0.0005 0.0001}"
-KL_TYPES="${KL_TYPES:-kd ttm}"
+KL_TYPES="${KL_TYPES-kd ttm}"     # `-` not `:-`: KL_TYPES="" skips distillation
+RUN_MKE="${RUN_MKE:-1}"           # RUN_MKE=0 skips the mke family
 BATCH_SIZE="${BATCH_SIZE:-8}"          # T=12 folds time into batch; 8 is the safe point
 SUBMIT="${SUBMIT:-0}"
 
 # best-by-val split1 upernet+relu teachers
 TEACHER_s2="checkpoints/sft_evan_base_biomassters_s2_fft_lr0.0005_20260725_075836.pt"
 TEACHER_s1="checkpoints/sft_evan_base_biomassters_s1_fft_lr0.0005_20260725_075947.pt"
+# s2_rgb / s2_norgb teachers from the 2026-09-15 stage-0 rerun (sh/biomassters_rerun_stage0.sh,
+# TRAIN_SPLIT=split1, 48 epochs). Best-by-val = LOWEST RMSE, both at lr 5e-4:
+#   s2_rgb   upernet+relu  val 41.01 / test 41.96
+#   s2_norgb upernet+relu  val 41.01 / test 41.88
+# Their lr 1e-4 runs sit at val 61-83 and must NOT be used -- undertrained by lr.
+TEACHER_s2_rgb="checkpoints/sft_evan_base_biomassters_s2_rgb_fft_lr0.0005_20260915_005742.pt"
+TEACHER_s2_norgb="checkpoints/sft_evan_base_biomassters_s2_norgb_fft_lr0.0005_20260915_011435.pt"
 
 COMMON="--decoder_type upernet --relu_output --model ${MODEL} --num_time_steps 12"
 COMMON="${COMMON} --batch_size ${BATCH_SIZE} --epochs ${EPOCHS}"
@@ -42,7 +50,11 @@ n=0
 submit () {  # $1=tag  $2...=args
     local tag="$1"; shift
     if [ "$SUBMIT" = "1" ]; then
-        sbatch --export=ALL,BASELINE_ARGS="$*",RUN_TAG="${tag}" \
+        # WALLTIME overrides the job script's #SBATCH --time. Biomassters runs
+        # 64 epochs in 9:08-9:56 against an 11:59 default, and a job killed at
+        # the wall writes NO results row, so a longer request is cheap insurance.
+        sbatch ${WALLTIME:+--time="${WALLTIME}"} \
+            --export=ALL,BASELINE_ARGS="$*",RUN_TAG="${tag}" \
             sh/baselines_biomassters_job.sh >/dev/null
     fi
     echo "  [$((++n))] ${tag}"
@@ -66,6 +78,7 @@ for P in ${PAIRS}; do
                 ${COMMON} --lr "${LR}" --kl_type "${KL}" \
                 --results_csv res/baselines/biomassters_distillation_upernet.csv
         done
+        [ "${RUN_MKE}" = "1" ] && \
         submit "bm_mke_${START}_to_${NEW}_lr${LR}" \
             baseline/baseline_mke.py --dataset biomassters \
             --modalities "${START}" "${NEW}" --teacher_checkpoint "${TEACHER}" \
@@ -83,7 +96,7 @@ LAMBDA_US="${LAMBDA_US:-0.5 1.0}"
 # s2/s1 were the original pair; s2_rgb/s2_norgb became valid biomassters
 # modalities on 2026-09-13 (s2_norgb is the 7-band complement of s2_rgb within
 # the 10-band S2 stack). Override to launch a subset, e.g. SINGLES="s2_rgb s2_norgb".
-SINGLES="${SINGLES:-s2 s1 s2_rgb s2_norgb}"
+SINGLES="${SINGLES-s2 s1 s2_rgb s2_norgb}"   # `-` not `:-`: SINGLES="" skips mixmatch
 for MOD in ${SINGLES}; do
     for LR in ${LRS}; do
         for LU in ${LAMBDA_US}; do

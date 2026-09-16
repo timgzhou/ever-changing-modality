@@ -28,19 +28,21 @@ set -u
 DECODER="${DECODER:-upernet}"
 MODEL="${MODEL:-evan_base}"
 EPOCHS="${EPOCHS:-64}"
-LR="${LR:-0.0001}"
+LRS="${LRS:-${LR:-0.0001}}"          # LRS sweeps; LR kept for back-compat
 MODALITIES="${MODALITIES:-s1 s2_rgb s2_norgb}"
 LAMBDA_US="${LAMBDA_US:-0.5 1.0 5.0 25.0 75.0}"
+RESULTS_CSV="${RESULTS_CSV:-res/baselines/dfc2020_cobench_mixmatch_lambdau_${DECODER}.csv}"
 SUBMIT="${SUBMIT:-0}"
 
 n=0
 for M in ${MODALITIES}; do
+ for LR in ${LRS}; do
   for LU in ${LAMBDA_US}; do
-    TAG="mixmatch_lu${LU}_${M}_${DECODER}"
+    TAG="mixmatch_lu${LU}_${M}_lr${LR}_${DECODER}"
     ARGS="baseline/baseline_mixmatch.py --dataset dfc2020 --modality ${M}"
     ARGS="${ARGS} --decoder_type ${DECODER} --model ${MODEL} --use_dino_weights"
     ARGS="${ARGS} --epochs ${EPOCHS} --lr ${LR} --lambda_u ${LU}"
-    ARGS="${ARGS} --results_csv res/baselines/dfc2020_cobench_mixmatch_lambdau_${DECODER}.csv"
+    ARGS="${ARGS} --results_csv ${RESULTS_CSV}"
     if [ "$SUBMIT" = "1" ]; then
         sbatch --export=ALL,BASELINE_ARGS="${ARGS}",RUN_TAG="${TAG}",DECODER="${DECODER}" \
             sh/baselines_dfc2020_job.sh >/dev/null
@@ -48,6 +50,7 @@ for M in ${MODALITIES}; do
     n=$((n+1))
     echo "  [$n] ${TAG}"
   done
+ done
 done
 echo
 echo "total: ${n} jobs (SUBMIT=${SUBMIT})"
