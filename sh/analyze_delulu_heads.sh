@@ -5,7 +5,10 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-
+# kn101 has failing GPU memory: every job scheduled there since 2026-09-15 died
+# with "CUDA error: uncorrectable ECC error encountered", while jobs on every
+# other node succeeded. Slurm still lists it as healthy. Remove if repaired.
+#SBATCH --exclude=kn101
 # Per-head accuracy analysis for DeluluNet, all 6 directions x {full, distill_only}.
 # Runs in ONE job: each direction is eval-only (test split, 986 tiles), so the
 # whole sweep is far cheaper than the training runs.

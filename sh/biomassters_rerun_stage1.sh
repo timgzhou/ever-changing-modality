@@ -4,7 +4,10 @@
 #SBATCH --output=logs/train_delulu/bm_chain_%j.out
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
-
+# kn101 has failing GPU memory: every job scheduled there since 2026-09-15 died
+# with "CUDA error: uncorrectable ECC error encountered", while jobs on every
+# other node succeeded. Slurm still lists it as healthy. Remove if repaired.
+#SBATCH --exclude=kn101
 # Chain job: after the biomassters stage-0 reruns land, rebuild the teacher
 # registry and relaunch the affected stage-1 cross-config runs.
 #

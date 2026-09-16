@@ -5,7 +5,10 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-
+# kn101 has failing GPU memory: every job scheduled there since 2026-09-15 died
+# with "CUDA error: uncorrectable ECC error encountered", while jobs on every
+# other node succeeded. Slurm still lists it as healthy. Remove if repaired.
+#SBATCH --exclude=kn101
 # Asymmetric Duos (arXiv 2505.18636) temperature weighting for DeluluNet transfer.
 # Fits two scalars on val2 -- once against the frozen teacher's predictions
 # (label-free, the deployable setting) and once against val2 labels (reference).

@@ -6,7 +6,10 @@
 #SBATCH --mail-type=ALL
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
-
+# kn101 has failing GPU memory: every job scheduled there since 2026-09-15 died
+# with "CUDA error: uncorrectable ECC error encountered", while jobs on every
+# other node succeeded. Slurm still lists it as healthy. Remove if repaired.
+#SBATCH --exclude=kn101
 # Download the BioMassters geobench shards directly (no GPU needed).
 #
 # Why this exists: the released geobench-v2 0.9 pins only the FIRST 3 of the

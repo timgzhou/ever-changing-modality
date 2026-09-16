@@ -7,7 +7,10 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-
+# kn101 has failing GPU memory: every job scheduled there since 2026-09-15 died
+# with "CUDA error: uncorrectable ECC error encountered", while jobs on every
+# other node succeeded. Slurm still lists it as healthy. Remove if repaired.
+#SBATCH --exclude=kn101
 # Test train_delulu on BioMassters with DEFAULT hyperparameters (the train_delulu
 # submission defaults now baked into train_delulu.py's argparser) and modality
 # protection DISABLED (--unprotect_starting_mod).

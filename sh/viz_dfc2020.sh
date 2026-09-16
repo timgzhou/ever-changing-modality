@@ -5,7 +5,10 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=48G
-
+# kn101 has failing GPU memory: every job scheduled there since 2026-09-15 died
+# with "CUDA error: uncorrectable ECC error encountered", while jobs on every
+# other node succeeded. Slurm still lists it as healthy. Remove if repaired.
+#SBATCH --exclude=kn101
 # Visualize DFC2020 s2_rgb -> s2_norgb predictions for the first 4 test samples:
 # 2 input panels + 5 prediction panels (2 SFT, 3 Delulu paths) + 1 target.
 #
