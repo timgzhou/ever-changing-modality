@@ -232,3 +232,6 @@ DFC2020.zip
 # Large binary artifacts — exceed GitHub's 100 MB file limit
 *.zip
 model/models.zip
+# Quarantined result CSVs: superseded by a split/teacher/config change.
+# Kept on disk for provenance, out of git so they can never feed a table.
+res/ignore/
