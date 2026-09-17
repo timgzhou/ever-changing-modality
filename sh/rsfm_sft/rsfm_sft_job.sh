@@ -39,9 +39,15 @@ for LR in "${LRS[@]}"; do
         fi
         # BATCH_SIZE: biomassters is temporal (T=12) and rsfm_sft.py folds T into
         # the batch before the frozen backbone, so the effective backbone batch is
-        # BATCH_SIZE*12. The rsfm default of 32 would be 384 and OOMs; 4 keeps it
-        # at 48. Matches sh/baselines_biomassters.sh, which documents 8 as the
-        # safe point for a model that folds T the same way.
+        # BATCH_SIZE*12. The rsfm default of 32 would be 384 and OOMs.
+        #
+        # Use 8, NOT 4. The heads start with BatchNorm2d, which raises
+        # "Expected more than 1 value per channel when training" on a batch of 1,
+        # and biomassters train1=2005 / val1=869 both leave a remainder of 1 at
+        # bs=4 (2005 = 501*4 + 1). The loaders set no drop_last, so that final
+        # batch is always delivered and the job dies at the END of epoch 1 --
+        # after the wall-clock cost of a full epoch, and invisible to a smoke
+        # test that stops early. 2005 % 8 = 5 and 869 % 8 = 5, so 8 is safe.
         python -u rsfm_sft.py \
             --model ${MODEL} \
             --dataset ${DATASET} \
