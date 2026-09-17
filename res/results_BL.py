@@ -174,6 +174,23 @@ def _flat_frames(family, dataset, arch):
             continue
         if 'model_type' in df.columns:
             df = df[df['model_type'] == arch]
+        # TRANSFER distillation only: report the TEACHER-INIT arm.
+        #
+        # KD/TTM students were built with load_weights=False -- neither teacher
+        # weights nor DINO -- while Delulu's transfer student defaults to
+        # student_init='teacher' and MKE/MixMatch both get DINO. That gave the
+        # Transfer column's baselines strictly less initialisation than every
+        # other method in the tables. The teacher-init arm
+        # (--init_from_teacher) is the like-for-like analogue of Delulu's
+        # setting: backbone and modality-specific blocks copied, patch embedder
+        # random (the channel counts differ).
+        #
+        # Both arms live in the same CSV, so without this filter the table would
+        # silently pool them and report whichever won by val.
+        if family == 'distillation' and 'init_from_teacher' in df.columns:
+            mask = df['init_from_teacher'].astype(str).str.lower().isin(['true', '1'])
+            if mask.any():
+                df = df[mask]
         if len(df):
             frames.append(df)
     if not frames:
