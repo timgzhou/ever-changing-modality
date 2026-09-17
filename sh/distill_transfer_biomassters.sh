@@ -45,6 +45,12 @@ TEACHER_s2_norgb="checkpoints/sft_evan_base_biomassters_s2_norgb_fft_lr0.0005_20
 
 # The four pairs the paper table reports.
 PAIRS="${PAIRS:-s2_rgb:s1 s2_rgb:s2_norgb s1:s2 s2:s1}"
+# INIT_FROM_TEACHER=1 initialises the student from the teacher's backbone rather
+# than from scratch. The default arm uses load_weights=False -- neither teacher
+# weights nor DINO -- while Delulu's transfer student defaults to
+# student_init='teacher', so the two were not comparable. Matches
+# sh/distill_transfer_dfc2020.sh.
+INIT_FROM_TEACHER="${INIT_FROM_TEACHER:-0}"
 
 n=0
 for P in ${PAIRS}; do
@@ -56,11 +62,13 @@ for P in ${PAIRS}; do
     for LR in ${LRS}; do
       for KL in ${KL_TYPES}; do
         TAG="bm_distill_transfer_${KL}_${START}_to_${NEW}_lr${LR}"
+        [ "$INIT_FROM_TEACHER" = "1" ] && TAG="${TAG}_initteacher"
         ARGS="baseline/baseline_distillation.py --dataset biomassters --modalities ${NEW}"
         ARGS="${ARGS} --teacher_checkpoint ${TEACHER} --decoder_type upernet --relu_output"
         ARGS="${ARGS} --model ${MODEL} --num_time_steps 12 --batch_size ${BATCH_SIZE}"
         ARGS="${ARGS} --epochs ${EPOCHS} --lr ${LR} --kl_type ${KL}"
         ARGS="${ARGS} --results_csv ${RESULTS_CSV}"
+        [ "$INIT_FROM_TEACHER" = "1" ] && ARGS="${ARGS} --init_from_teacher"
         if [ "$SUBMIT" = "1" ]; then
             sbatch --time="${WALLTIME}" \
                 --export=ALL,BASELINE_ARGS="${ARGS}",RUN_TAG="${TAG}" \
