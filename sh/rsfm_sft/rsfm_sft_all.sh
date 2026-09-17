@@ -25,18 +25,17 @@ declare -A MODALITY_CONFIGS
 # s2s1 covers the s1<->s2 Addition rows; s2_rgb+s1 and s2_rgb+s2_norgb cover the
 # two S2-RGB Addition rows. COMBINED_RSFM_ALIASES in results_BL.py maps them.
 MODALITY_CONFIGS['dfc2020']="${MODALITIES:-s1 s2 s2_rgb s2_norgb s2s1 s2_rgb+s1 s2_rgb+s2_norgb}"
-# biomassters is absent from rsfm_sft.py's MODALITY_CONFIGS, and neither wrapper
-# can take its data as-is (checked 2026-09-15):
-#   biomassters loaders yield [B, C, T=12, H, W]; both wrappers take [B, C, H, W].
-#   PanopticonWrapper  - upstream is a DINOv2 ViT over (imgs, chn_ids). No time
-#                        axis in the architecture at all. Not temporal.
-#   OlmoEarthWrapper   - the MODEL is temporal (its tensors are [B,H,W,T,C]), but
-#                        the wrapper hardcodes T=1 via .unsqueeze(3) and passes a
-#                        dummy [B,1,3] timestamp. The capability is there, unused.
-# So OlmoEarth could be extended to real T=12 (plus genuine timestamps), while
-# Panopticon would have to mean-pool over T the way EVAN does
-# (forward_modality_specific_features). Both are code changes, not launcher ones.
-MODALITY_CONFIGS['biomassters']="${MODALITIES:-}"
+# biomassters (enabled 2026-09-17). It is temporal (T=12) and a REGRESSION task,
+# and rsfm_sft.py previously supported neither. Both are now handled:
+#   temporal   - neither wrapper is temporal (Panopticon's backbone has no time
+#                axis; OlmoEarthWrapper hardcodes T=1 via .unsqueeze(3)), so
+#                rsfm_sft.py folds T into the batch, runs the frozen backbone per
+#                timestep, and mean-pools FEATURES over T -- the same shim EVAN
+#                uses, so the oracles stay comparable to the models they bound.
+#   regression - dense head with num_classes=1, MSELoss, RMSE metric, and
+#                LOWER-IS-BETTER val selection (the sentinel and comparison flip).
+# BATCH_SIZE must be small: T folds into the batch, so 4 -> 48 at the backbone.
+MODALITY_CONFIGS['biomassters']="${MODALITIES:-s1 s2 s2_rgb s2_norgb s2s1 s2_rgb+s1 s2_rgb+s2_norgb}"
 MODALITY_CONFIGS['benv2']="${MODALITIES:-s2_norgb}"
 MODALITY_CONFIGS['eurosat']="${MODALITIES:-rgb+nir rgb+vre rgb+swir}"
 

@@ -77,6 +77,12 @@ MODALITY_CONFIGS = {
               's2_rgb+s1', 's2_rgb+s2_norgb', 's1+s2', 's2+s1'],
     'dfc2020': ['s2', 's1', 's2s1', 's2_rgb', 's2_norgb', 's2_vre', 's2_nir', 's2_swir', 's2_aw',
                 's2_rgb+s1', 's2_rgb+s2_norgb', 's1+s2', 's2+s1'],
+    # BioMassters: temporal (T=12) S1/S2 with a dense per-pixel AGB target.
+    # Neither wrapper is temporal, so extract_features/eval_head fold T into the
+    # batch and mean-pool FEATURES over T -- the same shim EVAN uses
+    # (delulunet_main.py:880-935), so the oracles stay comparable to our models.
+    'biomassters': ['s2', 's1', 's2s1', 's2_rgb', 's2_norgb',
+                    's2_rgb+s1', 's2_rgb+s2_norgb'],
 }
 
 # Short model names → HuggingFace repo IDs for DINOv3 ViT models
@@ -424,6 +430,15 @@ PANOPTICON_CHANNEL_IDS = {
     ('dfc2020', 's1'):       (-1, -2),
     ('dfc2020', 's2_rgb'):   ('B04','B03','B02'),
     ('dfc2020', 's2_norgb'): ('B01','B05','B06','B07','B08','B8A','B09','B10','B11','B12'),
+    # ── BioMassters (10-band S2: B02-B08,B8A,B11,B12 -- no B01/B09/B10) ────
+    # Band order per biomassters_data_utils: B02,B03,B04,B05,B06,B07,B08,B8A,B11,B12.
+    ('biomassters', 's2'):       ('B02','B03','B04','B05','B06','B07','B08','B8A','B11','B12'),
+    # S1 here is FOUR bands (VV/VH ascending + descending), not the 2-band VV/VH
+    # of benv2/dfc2020 -- see BIOMASSTERS_S1_BANDS. Panopticon's SAR sentinels
+    # are per-polarisation, so asc and desc reuse the same two ids.
+    ('biomassters', 's1'):       (-1, -2, -1, -2),
+    ('biomassters', 's2_rgb'):   ('B04','B03','B02'),
+    ('biomassters', 's2_norgb'): ('B05','B06','B07','B08','B8A','B11','B12'),
 }
 
 # 's2s1' carries no '+', so _resolve_ids looks it up whole instead of splitting
@@ -591,6 +606,31 @@ def create_classification_head(feature_dim: int, num_classes: int, device):
     return head.to(device)
 
 
+def _temporal_fold(imgs):
+    """[B, C, T, H, W] -> ([B*T, C, H, W], T); non-temporal input passes through.
+
+    Neither RSFM wrapper is temporal: PanopticonWrapper's backbone (a DINOv2 ViT
+    over (imgs, chn_ids)) has no time axis at all, and OlmoEarthWrapper hardcodes
+    T=1 via .unsqueeze(3) with a dummy timestamp. Rather than make each wrapper
+    temporal, fold T into the batch, run the frozen backbone per timestep, and
+    mean-pool the FEATURES over T -- exactly EVAN's shim
+    (delulunet_main.py:880-935), so RSFM oracles and our own models pool time the
+    same way and remain comparable.
+    """
+    if imgs.dim() != 5:
+        return imgs, None
+    B, C, T, H, W = imgs.shape
+    return imgs.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W), T
+
+
+def _temporal_pool(feat, n_time):
+    """Un-fold the batch axis and mean over T. Handles every feature layout."""
+    if n_time is None:
+        return feat
+    lead = feat.shape[0] // n_time
+    return feat.reshape(lead, n_time, *feat.shape[1:]).mean(dim=1)
+
+
 def create_segmentation_head(feature_dim: int, num_classes: int, device):
     """
     Create a segmentation head with BatchNorm2d + Conv2d, following EvanSegmenter pattern.
@@ -633,11 +673,14 @@ def extract_features(model, loader, device, modality_slices: dict, modality: str
 
     from tqdm import tqdm
     for batch in tqdm(loader, desc=f'Extracting [{modality}]', leave=False):
-        imgs = batch['image'].to(device)  # [B, C, H, W]
+        imgs = batch['image'].to(device)  # [B, C, H, W] or [B, C, T, H, W]
 
-        # Slice to specific modality if needed
+        # Slice to specific modality if needed. Channels are dim 1 in both the
+        # temporal and non-temporal layouts, so this stays shape-agnostic.
         if mod_slice is not None:
-            imgs = imgs[:, mod_slice, :, :]
+            imgs = imgs[:, mod_slice]
+
+        imgs, n_time = _temporal_fold(imgs)
 
         # Forward pass through frozen backbone
         with torch.no_grad():
@@ -661,6 +704,8 @@ def extract_features(model, loader, device, modality_slices: dict, modality: str
             else:
                 # [B, feature_dim, H, W] → global average pool [B, feature_dim]
                 features = feat.mean(dim=(2, 3))
+
+            features = _temporal_pool(features, n_time)
 
         all_feats.append(features.cpu())
 
@@ -721,7 +766,12 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
 
     train1, val1, _, _, test, task_config = get_loaders(
         dataset, starting_modality, batch_size, num_workers,
-        data_normalizer=data_normalizer, num_time_steps=10,
+        # 12, not the old hardcoded 10: every biomassters EVAN/Delulu run pools
+        # the full year (see sh/train_delulu_job.sh NUM_TIME_STEPS and
+        # train_sft.py --num_time_steps default 12). An oracle that saw only 10
+        # timesteps would not be comparable to the models it is the ceiling for.
+        # Non-temporal datasets ignore this argument.
+        data_normalizer=data_normalizer, num_time_steps=12,
         new_modality=new_modality, data_root=data_root,
     )
 
@@ -831,7 +881,7 @@ def get_task_config_and_loaders(dataset, modality, batch_size, num_workers,
 
 
 def compute_metrics(logits, labels, task_type='classification', multilabel=False,
-                   num_classes=None, ignore_index=-100):
+                   num_classes=None, ignore_index=-100, mask_above=None):
     """
     Compute metrics based on task type, using train_utils functions for consistency.
 
@@ -843,7 +893,21 @@ def compute_metrics(logits, labels, task_type='classification', multilabel=False
         num_classes: Required for segmentation
         ignore_index: Label to ignore in segmentation (default -100)
     """
-    if multilabel:
+    if task_type == 'regression':
+        # RMSE in the target's own units (biomassters regression_scale=1.0 -> t/ha).
+        # LOWER IS BETTER; every ranking site must branch on it (metric-direction-trap).
+        # The SAME AGB>=400 exclusion the loss uses must apply here, or the metric
+        # scores pixels the teachers drop and the oracle reads better than the
+        # models it is meant to bound.
+        pred = logits.squeeze(1).float() if logits.dim() == labels.dim() + 1 else logits.float()
+        tgt = labels.float()
+        if mask_above is not None:
+            keep = tgt < mask_above
+            if not keep.any():
+                return float('nan')
+            pred, tgt = pred[keep], tgt[keep]
+        return torch.sqrt(F.mse_loss(pred, tgt)).item()
+    elif multilabel:
         # mAP for multilabel classification (uses train_utils._compute_map)
         return _compute_map(logits, labels)
     elif task_type == 'segmentation':
@@ -859,7 +923,7 @@ def compute_metrics(logits, labels, task_type='classification', multilabel=False
 
 def eval_head(model, head, loader, criterion, device, segmentation, multilabel,
               num_classes, ignore_index, desc='Eval', modality_slice=None,
-              preprocess_fn=None):
+              preprocess_fn=None, regression=False, mask_above=None):
     """Run model+head over loader, return (metric, loss). Used for val and test."""
     from tqdm import tqdm
     model.eval()
@@ -881,6 +945,8 @@ def eval_head(model, head, loader, criterion, device, segmentation, multilabel,
             if multilabel:
                 labels = labels.float()
 
+        imgs, n_time = _temporal_fold(imgs)
+
         with torch.no_grad():
             output = model(imgs, output_hidden_states=segmentation)
             feat = output.last_hidden_state if hasattr(output, 'last_hidden_state') \
@@ -895,18 +961,25 @@ def eval_head(model, head, loader, criterion, device, segmentation, multilabel,
                     features = feat
                 else:
                     features = feat.mean(dim=(2, 3))
+            features = _temporal_pool(features, n_time)
 
             logits = head(features)
             if segmentation and logits.shape[-1] != labels.shape[-1]:
                 logits = F.interpolate(logits, size=labels.shape[-2:], mode='bilinear', align_corners=False)
+            # make_criterion returns MaskedMSELoss for regression, which aligns
+            # the dense head's [B,1,H,W] against the [B,H,W] target itself. A bare
+            # nn.MSELoss would broadcast to [B,B,H,W] -- every prediction against
+            # every OTHER sample's label -- so do not swap it for one.
             total_loss += criterion(logits, labels).item()
             all_logits.append(logits.cpu())
             all_labels.append(labels.cpu())
 
     metric = compute_metrics(
         torch.cat(all_logits), torch.cat(all_labels),
-        task_type='segmentation' if segmentation else 'classification',
+        task_type=('regression' if regression else
+                   'segmentation' if segmentation else 'classification'),
         multilabel=multilabel, num_classes=num_classes, ignore_index=ignore_index,
+        mask_above=mask_above,
     )
     return metric, total_loss / len(loader)
 
@@ -939,7 +1012,8 @@ def _patch_tokens_to_spatial(feat):
 def train_head(model, head, train_loader, val_loader, criterion, device,
                epochs, lr, weight_decay, train_mode='lp', wandb_log=False,
                segmentation=False, multilabel=False, num_classes=None, ignore_index=-100,
-               modality_slice=None, preprocess_fn=None, warmup_epochs=1):
+               modality_slice=None, preprocess_fn=None, warmup_epochs=1,
+               regression=False, mask_above=None):
     """
     Train the head (+ optionally backbone layers) on train_loader.
 
@@ -987,10 +1061,14 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
     from train_utils import make_scheduler
     scheduler = make_scheduler(optimizer, epochs, warmup_epochs=warmup_epochs)
 
-    best_val_metric = 0.0
+    # RMSE is LOWER-IS-BETTER, so the sentinel and the comparison below must
+    # flip for regression -- with 0.0 and `>` no epoch would ever improve and
+    # the returned head would be the un-trained one.
+    best_val_metric = float('inf') if regression else 0.0
     best_state = None
     best_model_state = None
-    metric_name = "mIoU" if segmentation else ("mAP" if multilabel else "Acc")
+    metric_name = ("RMSE" if regression else
+                   "mIoU" if segmentation else ("mAP" if multilabel else "Acc"))
 
     from tqdm import tqdm
 
@@ -1007,13 +1085,16 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
                 if modality_slice is not None:
                     imgs = imgs[:, modality_slice]
             if segmentation:
-                labels = batch.get('mask', batch.get('label')).to(device).long()
+                labels = batch.get('mask', batch.get('label')).to(device)
+                labels = labels.float() if regression else labels.long()
             else:
                 labels = batch['label'].to(device)
                 if multilabel:
                     labels = labels.float()
 
             optimizer.zero_grad()
+
+            imgs, n_time = _temporal_fold(imgs)
 
             # Forward pass
             # output_hidden_states=True for segmentation (need patch tokens);
@@ -1053,6 +1134,8 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
                         else:
                             features = feat.mean(dim=(2, 3))
 
+            features = _temporal_pool(features, n_time)
+
             logits = head(features)
             if segmentation and logits.shape[-1] != labels.shape[-1]:
                 logits = F.interpolate(logits, size=labels.shape[-2:], mode='bilinear', align_corners=False)
@@ -1074,10 +1157,12 @@ def train_head(model, head, train_loader, val_loader, criterion, device,
             num_classes=num_classes, ignore_index=ignore_index,
             desc=f'Epoch {epoch+1}/{epochs} [val]',
             modality_slice=modality_slice,
-            preprocess_fn=preprocess_fn,
+            preprocess_fn=preprocess_fn, regression=regression,
+            mask_above=mask_above,
         )
 
-        if val_metric > best_val_metric:
+        improved = (val_metric < best_val_metric) if regression else (val_metric > best_val_metric)
+        if improved:
             best_val_metric = val_metric
             best_state = {k: v.clone() for k, v in head.state_dict().items()}
             if train_mode == 'fft':
@@ -1157,15 +1242,31 @@ def main():
     # Head
     print("\n=== Creating task-specific head ===")
     is_segmentation = (task_config.task_type == 'segmentation')
+    # Regression (biomassters AGB) reuses the DENSE head with num_classes=1 and
+    # travels every spatial code path, exactly as train_sft.py does
+    # (train_sft.py:225-240). `dense` is what the plumbing below keys on.
+    is_regression = (task_config.task_type == 'regression')
+    dense = is_segmentation or is_regression
 
-    if is_segmentation:
+    if dense:
         head = create_segmentation_head(feature_dim, task_config.num_classes, device)
     else:
         head = create_classification_head(feature_dim, task_config.num_classes, device)
 
     # Loss
     ignore_index = getattr(task_config, 'ignore_index', -100)
-    if task_config.multilabel:
+    if is_regression:
+        # Use the project's builder, NOT a bare nn.MSELoss(): for biomassters it
+        # returns MaskedMSELoss(regression_mask_above=400), which (a) drops the
+        # AGB>=400 pixels the BioMassters winner's NoNaNRMSE drops -- scoring
+        # them makes the oracle look better than the models it should bound --
+        # and (b) aligns the dense head's [B,1,H,W] with the [B,H,W] target.
+        # A bare MSELoss broadcasts those to [B,B,H,W], comparing every
+        # prediction against every OTHER sample's label.
+        from train_utils import make_criterion
+        criterion = make_criterion(task_config)
+        metric_name = "RMSE"        # LOWER IS BETTER -- see train_head
+    elif task_config.multilabel:
         criterion = nn.BCEWithLogitsLoss()
         metric_name = "mAP"
     elif is_segmentation:
@@ -1190,7 +1291,8 @@ def main():
         fm, head, train1_loader, val1_loader, criterion, device,
         epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
         train_mode=args.train_mode, wandb_log=bool(args.wandb_project),
-        segmentation=is_segmentation, multilabel=task_config.multilabel,
+        segmentation=dense, multilabel=task_config.multilabel, regression=is_regression,
+        mask_above=getattr(task_config, 'regression_mask_above', None),
         num_classes=task_config.num_classes, ignore_index=ignore_index,
         preprocess_fn=preprocess_fn, warmup_epochs=args.warmup_epochs,
     )
@@ -1201,7 +1303,8 @@ def main():
     print(f"\n=== Evaluating best checkpoint on test set ===")
     test_metric, _ = eval_head(
         fm, head, test_loader, criterion, device,
-        segmentation=is_segmentation, multilabel=task_config.multilabel,
+        segmentation=dense, multilabel=task_config.multilabel, regression=is_regression,
+        mask_above=getattr(task_config, 'regression_mask_above', None),
         num_classes=task_config.num_classes, ignore_index=ignore_index,
         desc='Test', preprocess_fn=preprocess_fn,
     )
