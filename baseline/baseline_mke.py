@@ -169,6 +169,13 @@ def main():
                         help='Path to unimodal teacher checkpoint (trained on split 1)')
     parser.add_argument('--model', type=str, default='evan_base',
                         choices=['evan_small', 'evan_base', 'evan_large'])
+    parser.add_argument('--init_from_teacher', action='store_true',
+                        help="Initialise the student from the teacher checkpoint "
+                             "instead of from scratch/DINO, matching Delulu's "
+                             "student_init='teacher'. The shared backbone is the "
+                             "teacher's; the second modality is added with "
+                             "create_modality_components (blocks seeded from the "
+                             "backbone). Overrides --use_dino_weights.")
     parser.add_argument('--use_dino_weights', action='store_true',
                         help='Init student backbone from DINOv2 ViT weights')
     parser.add_argument('--batch_size', type=int, default=32)
@@ -206,6 +213,12 @@ def main():
 
     if args.results_csv is None:
         args.results_csv = f"res/baseline_mke_{args.dataset}.csv"
+    # init_from_teacher is a NEW arm and the existing MKE CSVs have a fixed
+    # 21-column schema. Appending a 22nd field under the old header does not
+    # error -- pandas silently shifts every column left -- so the arm gets its
+    # own file instead. results_BL.py reads both via BASELINE_FLAT_CSVS.
+    if args.init_from_teacher:
+        args.results_csv = args.results_csv.replace('.csv', '_initteacher.csv')
 
     teacher_checkpoint_path = args.teacher_checkpoint
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -340,31 +353,61 @@ def main():
         else None
     )
 
-    model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
-    evan_model = model_fn(
-        tz_fusion_time=args.tz_fusion_time,
-        n_storage_tokens=4,
-        starting_modality=student_modalities,
-        starting_n_chans=all_n_chans,
-        img_size=task_config.img_size,
-        device=device,
-        load_weights=args.use_dino_weights,
-        rgb_in_s2_indices=rgb_in_s2_indices,
-    )
-
-    if is_segmentation or is_regression:
-        student_model = EvanSegmenter(
-            evan_model, num_classes=num_classes,
-            decoder_strategy="mean", device=device,
-            decoder_type=args.decoder_type,
-            decoder_channels=args.decoder_channels,
-            relu_output=(args.relu_output and is_regression),
-        )
+    if args.init_from_teacher:
+        # MKE's student is the same EVAN + EvanSegmenter stack Delulu uses, minus
+        # masking and hallucination, so Delulu's own init path applies verbatim:
+        # load the teacher checkpoint AS the student, then add the second
+        # modality with create_modality_components (train_delulu.py:236-244).
+        # The shared backbone stays teacher-trained and the new modality's
+        # blocks are seeded from it (add_new_msla init="backbone") rather than
+        # randomly -- strictly more signal than --use_dino_weights.
+        #
+        # This adds no parameters MKE did not already carry: EVAN.__init__
+        # builds the intermediate projectors for ANY multi-modality model, which
+        # is why MKE already reports 175.0M total against 146.7M trainable -- a
+        # 28,353,024 gap matching Delulu's 28,354,560 of frozen projectors.
+        print(f"Initialising student from teacher checkpoint: {args.teacher_checkpoint}")
+        if is_segmentation or is_regression:
+            student_model = EvanSegmenter.from_checkpoint(args.teacher_checkpoint, device)
+        else:
+            student_model = EVANClassifier.from_checkpoint(args.teacher_checkpoint, device)
+        evan_model = student_model.evan
+        teacher_mod = evan_model.supported_modalities[0]
+        for mod, n_ch in zip(student_modalities, all_n_chans):
+            if mod not in evan_model.patch_embedders:
+                print(f"  Adding modality '{mod}' ({n_ch} channels) from backbone init")
+                evan_model.create_modality_components(mod, n_ch)
+        student_model = student_model.to(device)
     else:
-        student_model = EVANClassifier(
-            evan_model, num_classes=num_classes,
-            classifier_strategy="mean", global_rep=args.global_rep, device=device,
+        model_fn = {'evan_small': evan_small, 'evan_base': evan_base, 'evan_large': evan_large}[args.model]
+        evan_model = model_fn(
+            tz_fusion_time=args.tz_fusion_time,
+            n_storage_tokens=4,
+            starting_modality=student_modalities,
+            starting_n_chans=all_n_chans,
+            img_size=task_config.img_size,
+            device=device,
+            load_weights=args.use_dino_weights,
+            rgb_in_s2_indices=rgb_in_s2_indices,
         )
+
+    # The teacher-init branch already produced a fully-wrapped student
+    # (from_checkpoint returns the Segmenter/Classifier), so only the
+    # build-from-scratch path needs a wrapper here.
+    if not args.init_from_teacher:
+        if is_segmentation or is_regression:
+            student_model = EvanSegmenter(
+                evan_model, num_classes=num_classes,
+                decoder_strategy="mean", device=device,
+                decoder_type=args.decoder_type,
+                decoder_channels=args.decoder_channels,
+                relu_output=(args.relu_output and is_regression),
+            )
+        else:
+            student_model = EVANClassifier(
+                evan_model, num_classes=num_classes,
+                classifier_strategy="mean", global_rep=args.global_rep, device=device,
+            )
     student_model = student_model.to(device)
 
     # Freeze / unfreeze — apply modality-specific unfreezing for every student modality

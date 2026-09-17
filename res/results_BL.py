@@ -141,8 +141,17 @@ BASELINE_FLAT_CSVS = {
         'biomassters': ['res/baselines/biomassters_distillation_upernet.csv'],
     },
     'mke': {
-        'dfc2020':     ['res/baselines/dfc2020_cobench_mke_upernet.csv'],
-        'biomassters': ['res/baselines/biomassters_mke_upernet.csv'],
+        # *_initteacher.csv FIRST: the teacher-init arm is the like-for-like
+        # analogue of Delulu's student_init='teacher'. MKE is the same EVAN +
+        # EvanSegmenter stack minus masking and hallucination, so Delulu's own
+        # init path applies -- load the teacher as the student, then add the
+        # second modality (blocks seeded from the backbone). It gets its own
+        # file because the original CSVs have a fixed 21-column schema and an
+        # extra field would silently shift every column left in pandas.
+        'dfc2020':     ['res/baselines/dfc2020_cobench_mke_upernet_initteacher.csv',
+                        'res/baselines/dfc2020_cobench_mke_upernet.csv'],
+        'biomassters': ['res/baselines/biomassters_mke_upernet_initteacher.csv',
+                        'res/baselines/biomassters_mke_upernet.csv'],
     },
     'freematch': {
         # FreeMatch is semi-supervised and TEACHER-FREE, like MixMatch, so these
@@ -167,8 +176,17 @@ BASELINE_FLAT_CSVS = {
 
 def _flat_frames(family, dataset, arch):
     """Concatenated flat baseline CSVs for (family, dataset), or None."""
+    paths = list(BASELINE_FLAT_CSVS.get(family, {}).get(dataset, []))
+    # MKE's teacher-init arm lives in its OWN FILE (the original CSVs have a
+    # fixed 21-column schema, so an extra column would silently shift fields).
+    # When that file has rows, report it alone -- the random/DINO-init arm is
+    # not comparable to Delulu's teacher-initialised student.
+    if family == 'mke':
+        ti = [p for p in paths if '_initteacher' in p]
+        if any((_read_csv(p) is not None and len(_read_csv(p))) for p in ti):
+            paths = ti
     frames = []
-    for path in BASELINE_FLAT_CSVS.get(family, {}).get(dataset, []):
+    for path in paths:
         df = _read_csv(path)
         if df is None:
             continue
