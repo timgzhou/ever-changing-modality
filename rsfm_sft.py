@@ -426,6 +426,18 @@ PANOPTICON_CHANNEL_IDS = {
     ('dfc2020', 's2_norgb'): ('B01','B05','B06','B07','B08','B8A','B09','B10','B11','B12'),
 }
 
+# 's2s1' carries no '+', so _resolve_ids looks it up whole instead of splitting
+# it into parts -- hence the ValueError that killed the dfc2020 s2s1 oracle.
+# It cannot be a plain PANOPTICON_CHANNEL_IDS entry either: a tuple mixing band
+# names with the S1 sentinels (-1, -2) would be routed by `isinstance(spec[0],
+# str)` into get_band_wavelengths() as a whole, which only understands names.
+# Declare it as a COMPOSITION instead, resolved part-by-part exactly as '+' is.
+# Order must match the tensor the loader hands over: S2 bands then 2 S1 (see the
+# modality == 's2s1' branch, which slices imgs[:, :13] then imgs[:, -2:]).
+PANOPTICON_ALIASES = {
+    's2s1': ('s2', 's1'),
+}
+
 
 class PanopticonWrapper(ModelWrapper):
     """
@@ -459,7 +471,8 @@ class PanopticonWrapper(ModelWrapper):
 
         ids = []
         for part in modality.split('+'):
-            ids.extend(_resolve_ids(dataset, part))
+            for sub in PANOPTICON_ALIASES.get(part, (part,)):
+                ids.extend(_resolve_ids(dataset, sub))
         self.chn_ids = torch.tensor(ids, dtype=torch.int16)
 
     def forward(self, imgs, output_hidden_states=False):
