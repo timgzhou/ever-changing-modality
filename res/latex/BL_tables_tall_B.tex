@@ -1,58 +1,58 @@
 % Table: Transfer
-\begin{tabular}{cc | c c c c | c c c c}
+\begin{tabular}{cc | c c c c}
 \toprule
-  \multicolumn{2}{c|}{\shortstack[c]{Dataset\\(metric)}} & \multicolumn{4}{c|}{\shortstack[c]{DFC2020\\(mIoU)}} & \multicolumn{4}{c}{\shortstack[c]{BioMassters\\(RMSE $\downarrow$)}} \\
+  \multicolumn{2}{c|}{\shortstack[c]{Dataset\\(metric)}} & \multicolumn{4}{c}{\shortstack[c]{BioMassters\\(RMSE $\downarrow$)}} \\
   \midrule
-  \multicolumn{2}{c|}{Start ($M_A$)} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c|}{$\mathrm{S2}$} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c}{$\mathrm{S2}$} \\
-  \multicolumn{2}{c|}{Transfer ($M_B$)} & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ \\
+  \multicolumn{2}{c|}{Start ($M_A$)} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c}{$\mathrm{S2}$} \\
+  \multicolumn{2}{c|}{Transfer ($M_B$)} & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ \\
   \midrule
-  $f_0(M_A)$ & $f_0$ & 59.0 & 59.0 & 46.2 & 58.2 & 42.0 & 42.0 & 47.7 & 43.6 \\
+  $f_0(M_A)$ & $f_0$ & 42.0 & 42.0 & 47.7 & 43.6 \\
   \midrule
-  \multirow{2}{*}{Baselines} & KD & \textbf{46.9$\pm$1.2} & 57.5$\pm$0.2 & 50.8$\pm$0.6 & \textbf{46.6$\pm$0.6} & -- & -- & -- & -- \\
-   & TTM & 46.7$\pm$0.2 & 58.2$\pm$0.4 & \textbf{51.3$\pm$0.7} & 46.3$\pm$0.8 & -- & -- & -- & -- \\
-  Ours & Delulu & -- & \textbf{58.6$\pm$0.2} & 50.6$\pm$0.2 & 46.4$\pm$0.5 & -- & \textbf{43.2$\pm$0.0} & \textbf{48.1$\pm$0.3} & \textbf{51.8$\pm$0.7} \\
+  \multirow{2}{*}{Baselines} & KD & 49.9$\pm$0.1 & \textbf{45.7$\pm$0.0} & \textbf{50.8$\pm$0.1} & 51.3$\pm$0.0 \\
+   & TTM & 50.1$\pm$0.2 & \textbf{45.7$\pm$0.0} & 50.7$\pm$0.1 & 50.8$\pm$0.1 \\
+  Ours & Delulu & \textbf{52.3} & 43.2$\pm$0.0 & 48.1$\pm$0.3 & \textbf{51.7$\pm$0.5} \\
   \midrule
-  \multirow{3}{*}{\shortstack[c]{Oracle\\($M_B$)}} & DINOv3 & \textcolor{gray}{46.2} & \textcolor{gray}{58.6} & \textcolor{gray}{58.2} & \textcolor{gray}{46.2} & \textcolor{gray}{47.7} & \textcolor{gray}{41.9} & \textcolor{gray}{43.6} & \textcolor{gray}{47.7} \\
-   & Panopticon & -- & -- & -- & -- & -- & -- & -- & -- \\
-   & OlmoEarth & -- & -- & -- & -- & -- & -- & -- & -- \\
+  \multirow{3}{*}{\shortstack[c]{Oracle\\($M_B$)}} & DINOv3 & \textcolor{gray}{47.7} & \textcolor{gray}{41.9} & \textcolor{gray}{43.6} & \textcolor{gray}{47.7} \\
+   & Panopticon & -- & -- & -- & -- \\
+   & OlmoEarth & -- & -- & -- & -- \\
 \bottomrule
 \end{tabular}
 
 \bigskip
 
 % Table: Peek
-\begin{tabular}{cc | c c c c | c c c c}
+\begin{tabular}{cc | c c c c}
 \toprule
-  \multicolumn{2}{c|}{\shortstack[c]{Dataset\\(metric)}} & \multicolumn{4}{c|}{\shortstack[c]{DFC2020\\(mIoU)}} & \multicolumn{4}{c}{\shortstack[c]{BioMassters\\(RMSE $\downarrow$)}} \\
+  \multicolumn{2}{c|}{\shortstack[c]{Dataset\\(metric)}} & \multicolumn{4}{c}{\shortstack[c]{BioMassters\\(RMSE $\downarrow$)}} \\
   \midrule
-  \multicolumn{2}{c|}{Start ($M_A$)} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c|}{$\mathrm{S2}$} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c}{$\mathrm{S2}$} \\
-  \multicolumn{2}{c|}{New ($M_B$)} & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ \\
+  \multicolumn{2}{c|}{Start ($M_A$)} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c}{$\mathrm{S2}$} \\
+  \multicolumn{2}{c|}{New ($M_B$)} & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ \\
   \midrule
-  $f_0(M_A)$ & $f_0$ & 59.0 & 59.0 & 46.2 & 58.2 & 42.0 & 42.0 & 47.7 & 43.6 \\
-  Baselines & MixMatch & \textbf{59.5} & 59.5 & \textbf{48.7} & -- & \textbf{59.2$\pm$0.9} & \textbf{59.2$\pm$0.9} & 57.7$\pm$1.7 & \textbf{56.8$\pm$0.2} \\
-  Ours & Delulu & -- & \textbf{60.3$\pm$0.4} & 46.9$\pm$2.7 & \textbf{61.9$\pm$2.5} & -- & 56.4$\pm$19.1 & \textbf{60.6$\pm$18.4} & 54.0$\pm$10.8 \\
+  $f_0(M_A)$ & $f_0$ & 42.0 & 42.0 & 47.7 & 43.6 \\
+  Baselines & MixMatch & \textbf{59.2$\pm$0.9} & \textbf{59.2$\pm$0.9} & \textbf{57.7$\pm$1.7} & \textbf{56.8$\pm$0.2} \\
+  Ours & Delulu & 46.5 & 44.5$\pm$2.2 & 48.6$\pm$1.5 & 46.2$\pm$0.3 \\
   \midrule
-  \multirow{2}{*}{\shortstack[c]{Oracle\\($M_A$)}} & Panopticon & -- & -- & -- & -- & -- & -- & -- & -- \\
-   & OlmoEarth & -- & -- & -- & -- & -- & -- & -- & -- \\
+  \multirow{2}{*}{\shortstack[c]{Oracle\\($M_A$)}} & Panopticon & -- & -- & -- & -- \\
+   & OlmoEarth & -- & -- & -- & -- \\
 \bottomrule
 \end{tabular}
 
 \bigskip
 
 % Table: Addition
-\begin{tabular}{cc | c c c c | c c c c}
+\begin{tabular}{cc | c c c c}
 \toprule
-  \multicolumn{2}{c|}{\shortstack[c]{Dataset\\(metric)}} & \multicolumn{4}{c|}{\shortstack[c]{DFC2020\\(mIoU)}} & \multicolumn{4}{c}{\shortstack[c]{BioMassters\\(RMSE $\downarrow$)}} \\
+  \multicolumn{2}{c|}{\shortstack[c]{Dataset\\(metric)}} & \multicolumn{4}{c}{\shortstack[c]{BioMassters\\(RMSE $\downarrow$)}} \\
   \midrule
-  \multicolumn{2}{c|}{Start ($M_A$)} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c|}{$\mathrm{S2}$} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c}{$\mathrm{S2}$} \\
-  \multicolumn{2}{c|}{New ($M_B$)} & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ \\
+  \multicolumn{2}{c|}{Start ($M_A$)} & \multicolumn{2}{c}{$\mathrm{S2}_{rgb}$} & \multicolumn{1}{c}{$\mathrm{S1}$} & \multicolumn{1}{c}{$\mathrm{S2}$} \\
+  \multicolumn{2}{c|}{New ($M_B$)} & $\mathrm{S1}$ & $\mathrm{S2}_{\neg rgb}$ & $\mathrm{S2}$ & $\mathrm{S1}$ \\
   \midrule
-  $f_0(M_A)$ & $f_0$ & \textbf{59.0} & 59.0 & 46.2 & 58.2 & \textbf{42.0} & 42.0 & 47.7 & 43.6 \\
-  Baselines & MKE & 57.9$\pm$0.4 & 58.9$\pm$0.0 & \textbf{50.4$\pm$0.1} & \textbf{62.8$\pm$0.0} & -- & -- & 58.8 & 59.4$\pm$0.8 \\
-  Ours & Delulu & -- & \textbf{59.3$\pm$0.2} & 49.2$\pm$1.4 & 60.7$\pm$3.4 & -- & \textbf{60.8$\pm$25.8} & \textbf{64.7$\pm$24.2} & \textbf{63.3$\pm$25.7} \\
+  $f_0(M_A)$ & $f_0$ & 42.0 & 42.0 & 47.7 & 43.6 \\
+  Baselines & MKE & \textbf{59.0$\pm$0.4} & \textbf{63.0$\pm$1.0} & \textbf{58.8} & \textbf{59.4$\pm$0.8} \\
+  Ours & Delulu & 42.4 & 42.5$\pm$0.1 & 47.2$\pm$0.4 & 44.7$\pm$0.5 \\
   \midrule
-  \multirow{3}{*}{\shortstack[c]{Oracle\\($M_A$+$M_B$)}} & DINOv3 & \textcolor{gray}{61.0} & \textcolor{gray}{60.9} & \textcolor{gray}{61.6} & \textcolor{gray}{61.6} & -- & -- & \textcolor{gray}{43.4} & \textcolor{gray}{43.4} \\
-   & Panopticon & -- & -- & -- & -- & -- & -- & -- & -- \\
-   & OlmoEarth & -- & -- & -- & -- & -- & -- & -- & -- \\
+  \multirow{3}{*}{\shortstack[c]{Oracle\\($M_A$+$M_B$)}} & DINOv3 & -- & -- & \textcolor{gray}{43.4} & \textcolor{gray}{43.4} \\
+   & Panopticon & -- & -- & -- & -- \\
+   & OlmoEarth & -- & -- & -- & -- \\
 \bottomrule
 \end{tabular}
