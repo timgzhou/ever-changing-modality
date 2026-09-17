@@ -65,7 +65,7 @@ for DATASET in ${DATASETS}; do
         for FAM in ${CONFIG_FAMILIES}; do
             CONFIG="configs/delulu_best_${FAM}.yaml"
             for SEL in ${SELECTORS}; do
-                TAG="${DATASET} ${START} ${NEW} ${FAM} ${SEL}${LR:+ lr${LR}}"
+                TAG="${DATASET} ${START} ${NEW} ${FAM} ${SEL}${LR:+ lr${LR}}${STUDENT_INIT:+ init${STUDENT_INIT}}${SEED:+ s${SEED}}"
                 if printf '%s' "${INFLIGHT}" | grep -qxF "${TAG}"; then
                     echo "  [have] ${TAG}: in flight"; dup=$((dup+1)); continue
                 fi
@@ -84,6 +84,21 @@ for DATASET in ${DATASETS}; do
                     EX="${EX},LR=${LR}"
                     LBL="${LBL}_lr${LR}"
                 fi
+                # STUDENT_INIT=random re-rolls the student's weights while
+                # KEEPING the frozen teacher, so supervision is unchanged and
+                # only the starting point moves (train_delulu.py:255). The
+                # earlier 6-pair probe at lr 1.57e-4 predates the per-selector
+                # tuned configs and had no config_label, so it is not comparable
+                # to the current table; this reruns it properly. The label
+                # records the arm so teacher- and random-init rows never pool.
+                if [ -n "${STUDENT_INIT:-}" ] && [ "${STUDENT_INIT}" != "teacher" ]; then
+                    EX="${EX},STUDENT_INIT=${STUDENT_INIT}"
+                    LBL="${LBL}_init${STUDENT_INIT}"
+                fi
+                # SEED: replicates. The teacher-init rows show within-pair sd
+                # 0.77-0.99 mIoU, so a single run per cell cannot resolve the
+                # ~0.5 effect this ablation is chasing.
+                [ -n "${SEED:-}" ] && EX="${EX},SEED=${SEED}" && LBL="${LBL}_s${SEED}"
                 EX="${EX},CONFIG_LABEL=${LBL}"
                 # biomassters: pin 64 epochs, overriding the config's value
                 [ "${DATASET}" = "biomassters" ] && EX="${EX},EPOCHS=64"
