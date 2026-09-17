@@ -99,6 +99,16 @@ def _parse_args():
                              'The starting-modality head keeps the teacher as its anchor. Uses '
                              'no labels: the labeled pool stays unimodal. Off by default; '
                              'recorded in the checkpoint, not in the results CSV.')
+    parser.add_argument('--temporal_prefusion', action='store_true',
+                        help="Temporal datasets only: run masking and the "
+                             "prefusion/hallucination step BEFORE pooling over T, "
+                             "so the projector maps modality A at timestep t to "
+                             "modality B at timestep t. Default pools first, which "
+                             "asks it to hallucinate one time-AVERAGED modality "
+                             "from another. The mask is drawn once per sample and "
+                             "shared across T (an independent mask per timestep "
+                             "would let the model copy a masked patch from another "
+                             "timestep). No effect on non-temporal data.")
     parser.add_argument('--latent_masked_only', action='store_true',
                         help='Only compute latent loss on masked patch positions (not unmasked ones).')
     parser.add_argument('--unprotect_starting_mod', action='store_true',
@@ -325,6 +335,7 @@ def main(args=None):
         recon_include_cls=not args.recon_drop_cls,
         recon_cos_weight_prefusion=args.recon_cos_weight_prefusion,
         recon_cos_weight_latent=args.recon_cos_weight_latent,
+        temporal_prefusion=args.temporal_prefusion,
         unprotect_starting_mod=args.unprotect_starting_mod,
         task_type=task_config.task_type,
         label_key=task_config.label_key,

@@ -160,7 +160,7 @@ def create_latent_decoders(hidden_dim, latent_reconstruct_modalities, device, nu
 # MASKING HELPER FUNCTION
 def mask_input(evan, batch_size, num_patches, token_mask_ratio, all_modalities, prefusion_features, modality_dropout, device,
                protected_modalities=None, active_losses=None, latent_reconstruct_modalities=None, protect_lrm=False, use_mask_token=False,
-               recon_mode="mse", prefusion_include_cls=True, recon_cos_weight=1.0):
+               recon_mode="mse", prefusion_include_cls=True, recon_cos_weight=1.0, n_time=None):
     """
     Apply masking using projected sequences from other modalities, and compute prefusion loss.
 
@@ -174,6 +174,15 @@ def mask_input(evan, batch_size, num_patches, token_mask_ratio, all_modalities, 
                                        (src detached before projection; tgt detached for loss).
         use_mask_token: If True, replace projector outputs with a broadcast learned mask token
                         (projector_queries). Prefusion loss is always 0 in this mode.
+        n_time: When the features are temporal and still folded as [B*T, L, D],
+                the number of timesteps T. The mask is then drawn ONCE per sample
+                and repeated across T, so a patch is hidden at every timestep.
+                Drawing it independently per timestep would let the model recover
+                a masked patch at time t by copying it from t', which makes the
+                task token-interpolation rather than modality hallucination.
+                Modality DROPOUT is likewise decided once per sample, not per
+                timestep -- a modality is either present or absent for the whole
+                sequence, which is what a missing sensor actually looks like.
     Returns:
         (modality_masks, masked_mod_features, modality_dropped, prefusion_loss)
     """
@@ -193,18 +202,25 @@ def mask_input(evan, batch_size, num_patches, token_mask_ratio, all_modalities, 
     for mod in all_modalities:
         modality_dropped[mod] = mod in drop_candidates
 
+        # With temporal features still folded, rows are [B*T]; draw the pattern
+        # for B samples and repeat_interleave it over T so every timestep of a
+        # sample is masked identically (see `n_time` in the docstring).
+        n_draw = batch_size // n_time if n_time else batch_size
+
         if len(drop_candidates) > 0:
             # Modality dropout mode: dropped=all masked, surviving=no token masking
             mask_val = mod in drop_candidates # True means masked, False means visible
-            modality_masks[mod] = torch.full((batch_size, num_patches), mask_val, device=device, dtype=torch.bool)
+            mask = torch.full((n_draw, num_patches), mask_val, device=device, dtype=torch.bool)
         else:
             # token dropping mode: randomly mask token_mask_ratio of tokens per modality
             len_keep = int(num_patches * (1 - token_mask_ratio))
-            noise = torch.rand(batch_size, num_patches, device=device)
+            noise = torch.rand(n_draw, num_patches, device=device)
             ids_shuffle = torch.argsort(noise, dim=1)
-            mask = torch.ones(batch_size, num_patches, device=device, dtype=torch.bool)
+            mask = torch.ones(n_draw, num_patches, device=device, dtype=torch.bool)
             mask.scatter_(1, ids_shuffle[:, :len_keep], False)
-            modality_masks[mod] = mask
+        if n_time:
+            mask = mask.repeat_interleave(n_time, dim=0)   # [B, P] -> [B*T, P]
+        modality_masks[mod] = mask
 
     prefusion_loss = torch.tensor(0.0, device=device)
 
@@ -628,6 +644,7 @@ def _unlabeled_batch_step(
     recon_include_cls: bool = True,
     recon_cos_weight_prefusion: float = 1.0,
     recon_cos_weight_latent: float = 1.0,
+    temporal_prefusion: bool = False,
 ):
     """Process one unlabeled (multimodal) batch. Returns (total_loss, loss_dict)."""
     evan = model.evan
@@ -635,7 +652,18 @@ def _unlabeled_batch_step(
     batch_size = next(iter(full_multimodal_input.values())).shape[0]
     num_patches = (evan.img_size // evan.patch_size) ** 2
 
-    prefusion_features = evan.forward_modality_specific_features(full_multimodal_input)
+    # TEMPORAL: keep the time axis folded ([B*T, L, D]) through masking and the
+    # prefusion/hallucination step, then pool before fusion. Pooling first (the
+    # old behaviour) asked the projector to hallucinate one time-AVERAGED
+    # modality from another, discarding the per-timestep correspondence that is
+    # the strongest cue available -- and letting the reconstruction losses be
+    # satisfied by matching a mean. Non-temporal data is unaffected (n_time=None).
+    prefusion_features, n_time = evan.forward_modality_specific_features(
+        full_multimodal_input, pool_time=not temporal_prefusion)
+    if not temporal_prefusion:
+        n_time = None                      # pooled already; behave as before
+    if n_time:
+        batch_size = batch_size * n_time   # rows are [B*T] until the pool below
 
     # Teacher targets + logits (one no_grad block)
     with torch.no_grad():
@@ -655,7 +683,17 @@ def _unlabeled_batch_step(
         recon_mode=recon_mode,
         prefusion_include_cls=recon_include_cls,
         recon_cos_weight=recon_cos_weight_prefusion,
+        n_time=n_time,
     )
+
+    # Pool time AFTER masking + prefusion: fusion blocks, latent loss, distill
+    # and the head all expect [B, L, D].
+    if n_time:
+        batch_size = batch_size // n_time
+        for mod, feat in masked_mod_features.items():
+            BT, L, D = feat.shape
+            masked_mod_features[mod] = feat.reshape(BT // n_time, n_time, L, D).mean(dim=1)
+        modality_masks = {m: v[::n_time] for m, v in modality_masks.items()}
 
     # cross projector produces [B, 1+n_patches, D] for dropped mods — fusion needs to know prefix is smaller
     dropped_mods = {mod for mod, dropped in modality_dropped.items() if dropped}
@@ -1008,6 +1046,7 @@ def train_delulu_model(
     recon_include_cls: bool = True,
     recon_cos_weight_prefusion: float = 1.0,
     recon_cos_weight_latent: float = 1.0,
+    temporal_prefusion: bool = False,
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -1296,6 +1335,7 @@ def train_delulu_model(
                     recon_include_cls=recon_include_cls,
                     recon_cos_weight_prefusion=recon_cos_weight_prefusion,
                     recon_cos_weight_latent=recon_cos_weight_latent,
+                    temporal_prefusion=temporal_prefusion,
                 )
                 unlabeled_count += 1
 

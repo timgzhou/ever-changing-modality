@@ -126,6 +126,9 @@ fi
 # Provenance columns: which tuned config produced this row. Without these every
 # cross-config row looks identical apart from its hyperparameters.
 RECON_ARGS=""
+# TEMPORAL_PREFUSION=1: mask + hallucinate BEFORE pooling over T (biomassters
+# only; no effect on non-temporal data). See --temporal_prefusion.
+[ -n "${TEMPORAL_PREFUSION:-}" ] && [ "${TEMPORAL_PREFUSION}" != "0" ] && RECON_ARGS="${RECON_ARGS} --temporal_prefusion"
 [ -n "${RECON_LOSS:-}" ] && RECON_ARGS="${RECON_ARGS} --recon_loss ${RECON_LOSS}"
 [ -n "${RECON_DROP_CLS:-}" ] && [ "${RECON_DROP_CLS}" != "0" ] && RECON_ARGS="${RECON_ARGS} --recon_drop_cls"
 [ -n "${RECON_COS_W_PREFUSION:-}" ] && RECON_ARGS="${RECON_ARGS} --recon_cos_weight_prefusion ${RECON_COS_W_PREFUSION}"

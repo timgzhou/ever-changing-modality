@@ -65,7 +65,7 @@ for DATASET in ${DATASETS}; do
         for FAM in ${CONFIG_FAMILIES}; do
             CONFIG="configs/delulu_best_${FAM}.yaml"
             for SEL in ${SELECTORS}; do
-                TAG="${DATASET} ${START} ${NEW} ${FAM} ${SEL}${LR:+ lr${LR}}${STUDENT_INIT:+ init${STUDENT_INIT}}${SEED:+ s${SEED}}"
+                TAG="${DATASET} ${START} ${NEW} ${FAM} ${SEL}${LR:+ lr${LR}}${STUDENT_INIT:+ init${STUDENT_INIT}}${SEED:+ s${SEED}}${TEMPORAL_PREFUSION:+ tpf}"
                 if printf '%s' "${INFLIGHT}" | grep -qxF "${TAG}"; then
                     echo "  [have] ${TAG}: in flight"; dup=$((dup+1)); continue
                 fi
@@ -99,9 +99,15 @@ for DATASET in ${DATASETS}; do
                 # 0.77-0.99 mIoU, so a single run per cell cannot resolve the
                 # ~0.5 effect this ablation is chasing.
                 [ -n "${SEED:-}" ] && EX="${EX},SEED=${SEED}" && LBL="${LBL}_s${SEED}"
+                # A/B arm: prefusion before the temporal pool (biomassters only).
+                if [ -n "${TEMPORAL_PREFUSION:-}" ] && [ "${TEMPORAL_PREFUSION}" != "0" ]; then
+                    EX="${EX},TEMPORAL_PREFUSION=1"; LBL="${LBL}_tpf"
+                fi
                 EX="${EX},CONFIG_LABEL=${LBL}"
-                # biomassters: pin 64 epochs, overriding the config's value
-                [ "${DATASET}" = "biomassters" ] && EX="${EX},EPOCHS=64"
+                # biomassters: pin 64 epochs, overriding the config's value --
+                # unless the caller set EPOCHS explicitly (e.g. a 24-epoch A/B,
+                # which costs ~4 h/job instead of ~10 h at ~9-10 min/epoch).
+                [ "${DATASET}" = "biomassters" ] && EX="${EX},EPOCHS=${EPOCHS:-64}"
                 if [ "${DRYRUN:-0}" = "1" ]; then
                     echo "[$n] ${DATASET} ${START}->+${NEW}  cfg=${FAM}/${SEL}"
                 else

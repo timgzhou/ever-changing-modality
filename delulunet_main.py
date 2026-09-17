@@ -856,7 +856,8 @@ class EVAN(nn.Module):
         embedded_modalities = self.forward_modality_specific_features(x)
         return self.forward_fusion_from_modality_features(embedded_modalities)
 
-    def forward_modality_specific_features(self, x: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    def forward_modality_specific_features(self, x: Dict[str, Tensor],
+                                           pool_time: bool = True):
         """
         Extract features after modality-specific layers (first tz_fusion_time blocks).
         This is useful for MAE training where you want features before fusion.
@@ -872,8 +873,19 @@ class EVAN(nn.Module):
             x: Dictionary of modality tensors {mod: [B, C, H, W]} or {mod: [B, C, T, H, W]}
             masks: Optional mask tensor
 
+        pool_time=False returns the features STILL FOLDED as [B*T, L, D] plus the
+        number of timesteps, i.e. (features, T), so a caller can run per-timestep
+        work -- masking and the cross-modal projector / prefusion loss -- before
+        collapsing time. Pooling first makes the projector hallucinate one
+        time-AVERAGED modality from another, which destroys the temporal
+        correspondence that is the strongest cue available, and lets the
+        reconstruction losses be satisfied by matching a mean. T is None for
+        non-temporal input, and the caller must pool before fusion (the fusion
+        blocks and heads expect [B, L, D]).
+
         Returns:
-            Dictionary mapping modality_key -> features after modality-specific processing
+            Dictionary mapping modality_key -> features after modality-specific
+            processing; or (dict, T) when pool_time=False.
         """
         if not isinstance(x, dict) or len(x) == 0:
             raise ValueError("Input must be a non-empty dict of modalities")
@@ -928,6 +940,10 @@ class EVAN(nn.Module):
             embedded_modalities[modality_key] = x_mod
 
         # --- Temporal pool: un-fold [B*T, L, D] -> [B, T, L, D], mean over T ---
+        if not pool_time:
+            # Caller pools later (after masking / prefusion). Hand back the
+            # folded features and T so it can do the un-fold itself.
+            return embedded_modalities, temporal_T
         if temporal_T is not None:
             for modality_key, x_mod in embedded_modalities.items():
                 BT, L, D = x_mod.shape
