@@ -17,6 +17,11 @@
 # loads train1/val1, i.e. split1, so these are the correct non-leaky oracles.
 set -u
 SUBMIT="${SUBMIT:-0}"
+# MEASURED (2026-09-17): biomassters panopticon s1 ran BOTH lr combos in
+# 3:00:30, i.e. ~90 min/combo at 24 epochs, bs=8, T=12. Request ~1.5x that, not
+# more: on this cluster walltime drives backfill priority, so an 11:59 request
+# for a 3 h job sits behind everything. dfc2020 jobs (non-temporal, 9 combos x
+# 20 epochs) measured 1:12-1:33, which the 5:59 default already covers.
 WALLTIME="${WALLTIME:-5:59:00}"
 
 declare -A MODALITY_CONFIGS
