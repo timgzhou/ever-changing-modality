@@ -120,6 +120,7 @@ for USE_DINO in ${DINO_ARMS:-1 0}; do
         --modalities ${MODALITIES} \
         --train_mode ${TRAIN_MODE} \
         --epochs ${EPOCHS:-24} \
+        --batch_size ${BATCH_SIZE:-32} \
         --lr ${LR} \
         --weight_decay ${WD} \
         --train_aug ${TRAIN_AUG} \
