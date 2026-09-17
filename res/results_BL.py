@@ -144,6 +144,17 @@ BASELINE_FLAT_CSVS = {
         'dfc2020':     ['res/baselines/dfc2020_cobench_mke_upernet.csv'],
         'biomassters': ['res/baselines/biomassters_mke_upernet.csv'],
     },
+    'freematch': {
+        # FreeMatch is semi-supervised and TEACHER-FREE, like MixMatch, so these
+        # rows are unaffected by any teacher change. Absent for biomassters by
+        # design: its self-adaptive thresholding on max(softmax) plus a class
+        # histogram are K-way classification constructs with no regression
+        # analogue (arXiv 2205.07246 never mentions regression), so the column
+        # is structurally empty there rather than merely unrun.
+        'dfc2020':     ['res/baselines/dfc2020_cobench_freematch_upernet.csv'],
+        'benv2':       ['res/baselines/benv2_freematch.csv'],
+        'eurosat':     ['res/baselines/eurosat_freematch.csv'],
+    },
     'mixmatch': {
         # RERUN first: the original dfc2020 rows all used lambda_u=75, which
         # collapses training (0.34-23.39 mIoU vs 54-59 at lambda_u 0.5-1.0).
@@ -465,13 +476,20 @@ def _load_mke_addition(dataset, arch='evan_base'):
     return result
 
 
-def _load_mixmatch_peek(dataset, arch='evan_base'):
-    df = _flat_frames('mixmatch', dataset, arch)
-    if df is None:
+def _load_mixmatch_peek(dataset, arch='evan_base', family='mixmatch'):
+    """Semi-supervised peek baseline: modality -> (mean, sd) of top-3 by val.
+
+    `family` selects mixmatch or freematch; both are teacher-free and share the
+    same flat-CSV schema (best_val_metric / best_val_test_metric / lambda_u).
+    """
+    df = _flat_frames(family, dataset, arch)
+    if df is None and family == 'mixmatch':
         df = _read_csv(f'res/baselines/mixmatch/baseline_mixmatch_{dataset}.csv')
         if df is None:
             return {}
         df = df[df['model_type'] == arch]
+    if df is None:
+        return {}
     if df.empty or 'best_val_metric' not in df.columns:
         return {}
     df = df.copy()
@@ -598,6 +616,8 @@ def build_peek_BL(dataset, arch='BL', ignore_select_by=False):
 
     mm_b  = _load_mixmatch_peek(dataset, 'evan_base')
     mm_l  = _load_mixmatch_peek(dataset, 'evan_large')
+    fm_b  = _load_mixmatch_peek(dataset, 'evan_base',  family='freematch')
+    fm_l  = _load_mixmatch_peek(dataset, 'evan_large', family='freematch')
     del_b = _load_delulu(dataset, 'evan_base',  'valchecked_val_peek', 'valchecked_peek', ignore_select_by=ignore_select_by)
     del_l = _load_delulu(dataset, 'evan_large', 'valchecked_val_peek', 'valchecked_peek', ignore_select_by=ignore_select_by)
     sft_b = _load_sft_dino(dataset, 'evan_base')
@@ -616,6 +636,8 @@ def build_peek_BL(dataset, arch='BL', ignore_select_by=False):
             'DINO-SFT-L':     _fmt(sft_l.get(start)),
             'MixMatch-B':     _fmt_meanstd(mm_b.get(start)),
             'MixMatch-L':     _fmt_meanstd(mm_l.get(start)),
+            'FreeMatch-B':    _fmt_meanstd(fm_b.get(start)),
+            'FreeMatch-L':    _fmt_meanstd(fm_l.get(start)),
             'Delulu-B':       _fmt_meanstd(del_b.get((start, new))),
             'Delulu-L':       _fmt_meanstd(del_l.get((start, new))),
             'Panopticon-B':   _fmt(rsfm.get(('panopticon',     start))),
@@ -914,7 +936,8 @@ def make_transfer_tex(df, arch='BL'):
 
 
 def make_peek_tex(df, arch='BL'):
-    baseline_cols = [c for c in ['DINO-SFT-B', 'DINO-SFT-L', 'MixMatch-B', 'MixMatch-L', 'Delulu-B', 'Delulu-L'] if c in df.columns]
+    baseline_cols = [c for c in ['DINO-SFT-B', 'DINO-SFT-L', 'MixMatch-B', 'MixMatch-L',
+                                 'FreeMatch-B', 'FreeMatch-L', 'Delulu-B', 'Delulu-L'] if c in df.columns]
     df = _bold_max_per_row(df, baseline_cols)
     oracle_cols = [c for c in df.columns if c in ('Panopticon-B', 'OlmoEarth-B', 'OlmoEarth-L')]
     rows = _df_to_latex_rows(df, merge_cols=['Dataset', 'Start(M_A)'], gray_cols=oracle_cols)
@@ -923,7 +946,8 @@ def make_peek_tex(df, arch='BL'):
     cmidrule = _midrule_after_start_groups(df, ncols)
 
     n_f0       = sum(1 for c in ['DINO-SFT-B', 'DINO-SFT-L'] if c in df.columns)
-    n_baseline = sum(1 for c in ['MixMatch-B', 'MixMatch-L'] if c in df.columns)
+    n_baseline = sum(1 for c in ['MixMatch-B', 'MixMatch-L',
+                                 'FreeMatch-B', 'FreeMatch-L'] if c in df.columns)
     n_ours     = sum(1 for c in ['Delulu-B', 'Delulu-L'] if c in df.columns)
     n_oracle   = sum(1 for c in ['Panopticon-B', 'OlmoEarth-B', 'OlmoEarth-L'] if c in df.columns)
 
@@ -944,6 +968,8 @@ def make_peek_tex(df, arch='BL'):
         'DINO-SFT-L':   r'\shortstack[c]{DINO\\v3 (L)}',
         'MixMatch-B':   r'\shortstack[c]{MixMatch\\(B)}',
         'MixMatch-L':   r'\shortstack[c]{MixMatch\\(L)}',
+        'FreeMatch-B':  r'\shortstack[c]{FreeMatch\\(B)}',
+        'FreeMatch-L':  r'\shortstack[c]{FreeMatch\\(L)}',
         'Delulu-B':     r'\shortstack[c]{Delulu\\(B)}',
         'Delulu-L':     r'\shortstack[c]{Delulu\\(L)}',
         'Panopticon-B': r'\shortstack[c]{Panop.\\(B)}',
@@ -1026,6 +1052,7 @@ _TRANSFER_METHOD_ROWS = [
 _PEEK_METHOD_ROWS = [
     (r'$f_0$',      r'$f_0(M_A)$',                               'DINO-SFT-B',  'DINO-SFT-L' ),
     ('MixMatch',    'Baselines',                                  'MixMatch-B',  'MixMatch-L' ),
+    ('FreeMatch',   'Baselines',                                  'FreeMatch-B', 'FreeMatch-L'),
     ('Delulu',      'Ours',                                       'Delulu-B',    'Delulu-L'   ),
     ('Panopticon',  r'\shortstack[c]{Oracle\\($M_A$)}',          'Panopticon-B', None        ),
     ('OlmoEarth',   r'\shortstack[c]{Oracle\\($M_A$)}',          'OlmoEarth-B', 'OlmoEarth-L'),
