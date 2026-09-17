@@ -194,6 +194,21 @@ def _flat_frames(family, dataset, arch):
             df = df[df['model_type'] == arch]
         # TRANSFER distillation only: report the TEACHER-INIT arm.
         #
+        # NOTE teacher-init is NOT the baselines' best configuration. Measured
+        # on dfc2020 2026-09-17: KD/TTM are -0.56 mIoU worse with it (better in
+        # 2/8 cells), MKE +0.16 (2/4). train_delulu.py:248 already documented
+        # why -- a transfer student must UNLEARN the teacher's modality-specific
+        # features. Reporting it anyway moves Delulu 4/8 -> 7/8 on dfc2020
+        # Transfer+Addition, so any write-up must say the baselines are matched
+        # to Delulu's init rather than tuned.
+        #
+        # This is deliberate: different inits want different TRAINING (separate
+        # lrs for pretrained vs newly-added parameters), and the current recipe
+        # is tuned for random init, so a best-per-method table would confound
+        # init with "which init suits the existing hyperparameters". Matched
+        # init under one recipe is the controlled comparison. Revisiting it
+        # needs per-arm lr tuning first, not just flipping this filter.
+        #
         # KD/TTM students were built with load_weights=False -- neither teacher
         # weights nor DINO -- while Delulu's transfer student defaults to
         # student_init='teacher' and MKE/MixMatch both get DINO. That gave the
