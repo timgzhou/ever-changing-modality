@@ -39,7 +39,12 @@ mkdir -p logs/train_delulu res/delulu; touch "${LEDGER}"
 
 prefix_for () { [ "$1" = "dfc2020" ] && echo "dfc2020_cobench" || echo "$1"; }
 decoder_for () { [ "$1" = "dfc2020" ] && echo "upernet" || echo "upernet+relu"; }
-batch_for ()   { [ "$1" = "dfc2020" ] && echo "8" || echo "16"; }
+# BATCH_SIZE override: --temporal_prefusion keeps T folded through the
+# projector, so it sees B*T rows instead of B. At the biomassters default of 16
+# that is 192 rows and OOMs on a 44 GB card; 8 gives 96 and fits. Both A/B arms
+# must use the SAME value or the comparison is confounded.
+batch_for ()   { [ -n "${BATCH_SIZE:-}" ] && { echo "${BATCH_SIZE}"; return; }
+                 [ "$1" = "dfc2020" ] && echo "8" || echo "16"; }
 
 # Skip (dataset,direction,config,selector) combos already submitted and still
 # queued/running, so re-running the launcher is safe.

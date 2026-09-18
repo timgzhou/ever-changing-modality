@@ -658,10 +658,16 @@ def _unlabeled_batch_step(
     # modality from another, discarding the per-timestep correspondence that is
     # the strongest cue available -- and letting the reconstruction losses be
     # satisfied by matching a mean. Non-temporal data is unaffected (n_time=None).
-    prefusion_features, n_time = evan.forward_modality_specific_features(
-        full_multimodal_input, pool_time=not temporal_prefusion)
-    if not temporal_prefusion:
-        n_time = None                      # pooled already; behave as before
+    # NB pool_time=True returns a bare dict, pool_time=False returns
+    # (dict, T). Unpacking unconditionally silently binds the dict's KEYS --
+    # prefusion_features becomes a modality-name string.
+    if temporal_prefusion:
+        prefusion_features, n_time = evan.forward_modality_specific_features(
+            full_multimodal_input, pool_time=False)
+    else:
+        prefusion_features = evan.forward_modality_specific_features(
+            full_multimodal_input)
+        n_time = None
     if n_time:
         batch_size = batch_size * n_time   # rows are [B*T] until the pool below
 
