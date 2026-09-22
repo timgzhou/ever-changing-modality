@@ -12,7 +12,9 @@ TRAIN_MODE='fft'
 
 # Stage-0 oracles: single modality (s2, s1). Combined (s2+s1 / s1+s2) is the
 # addition upper bound. '+' separator -> train_sft_job.sh splits into --modalities.
-MODALITIES='s2 s1 s2+s1'
+# Overridable: the transfer/peek/addition tables also need the S2 sub-groups
+# (s2_rgb, s2_norgb) as starting modalities, which this default list omits.
+MODALITIES="${MODALITIES:-s2 s1 s2+s1}"
 
 LRS=('0.0005' '0.0001')
 WDS=('0.01' '0.0')

@@ -16,7 +16,7 @@ import csv
 from tqdm import tqdm
 from delulunet_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
-from train_utils import _compute_map, compute_miou, evaluate
+from train_utils import _compute_map, compute_miou, evaluate, set_seed
 
 # Must track the dataset loaders' own _VALID_MODS, not lag them. biomassters
 # gained s2_rgb/s2_norgb on 2026-09-13 (biomassters_data_utils._VALID_MODS) and
@@ -478,6 +478,11 @@ def main():
                         choices=['kd', 'ttm', 'wttm'])
     parser.add_argument('--init_from_teacher', action='store_true',
                         help='Initialize student backbone and adaptors from teacher weights (instead of DINO pretrained)')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for torch/numpy/random, recorded in the results CSV. '
+                             'When set, results are written to a *_seeds.csv file: the existing '
+                             'CSVs have a fixed schema and an appended column would silently '
+                             'shift every field left in pandas (see --init_from_teacher).')
     parser.add_argument('--results_csv', type=str, default=None,
                         help='Path to results CSV file (default: res/baseline_distillation_{dataset}.csv)')
     parser.add_argument('--warmup_epochs', type=int, default=1,
@@ -496,6 +501,9 @@ def main():
                         help='Width of the upernet decoder (ignored for linear).')
     args = parser.parse_args()
 
+    if args.seed is not None:
+        set_seed(args.seed)
+
     # Validate each student modality against dataset
     valid_mods = VALID_NEW_MODS[args.dataset]
     for m in args.modalities:
@@ -509,6 +517,10 @@ def main():
     # Default results CSV includes dataset name
     if args.results_csv is None:
         args.results_csv = f"res/baseline_distillation_{args.dataset}.csv"
+    # Seeded runs carry an extra column, so they get their own file rather than
+    # appending a wider row under the existing fixed-width header.
+    if args.seed is not None:
+        args.results_csv = args.results_csv.replace('.csv', '_seeds.csv')
 
     teacher_checkpoint_path = args.teacher_checkpoint
     if not os.path.exists(teacher_checkpoint_path):
@@ -802,6 +814,8 @@ def main():
                   "ensemble_metric_logits", "ensemble_metric_softmax",
                   "teacher_classifier_acc", "supervised_classifier_acc", "supervised_classifier_best_acc",
                   "saved_checkpoint", "global_rep", "teacher_checkpoint", "init_from_teacher"]
+    if args.seed is not None:
+        fieldnames = fieldnames + ["seed"]
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
         if not file_exists:
@@ -817,7 +831,7 @@ def main():
             f"{supervised_classifier_acc:.2f}" if supervised_classifier_acc is not None else "",
             f"{supervised_classifier_best_acc:.2f}" if supervised_classifier_best_acc is not None else "",
             "", args.global_rep, teacher_checkpoint_path, args.init_from_teacher,
-        ])
+        ] + ([args.seed] if args.seed is not None else []))
 
     print(f"\nResults appended to {filename}")
     if args.wandb_project:

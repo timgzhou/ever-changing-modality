@@ -39,3 +39,12 @@ evan_base,s2_rgb,fft,0.0004,0.0001,85684243,20,1.0,0.01,0.99,1.0,False,True,True
 evan_base,s2,fft,0.0004,0.0001,87453715,20,1.0,0.05,0.999,1.0,False,True,True,mAP,59.08,63.81,59.13,checkpoints/evan_freematch_benv2_s2_20260727_115422.pt,clstoken,True,False
 evan_base,s2_rgb,fft,0.0004,0.0001,85684243,20,1.0,0.05,0.99,1.0,False,True,True,mAP,62.79,67.03,61.56,checkpoints/evan_freematch_benv2_s2_rgb_20260727_120842.pt,clstoken,True,False
 evan_base,s2,fft,0.0004,0.0001,87453715,20,1.0,0.05,0.99,1.0,False,True,True,mAP,58.60,63.28,58.60,checkpoints/evan_freematch_benv2_s2_20260727_121743.pt,clstoken,True,False
+evan_base,s2_rgb,fft,0.0003,0.0001,85684243,20,0.5,0.01,0.999,1.0,False,True,False,mAP,64.36,68.49,64.26,checkpoints/evan_freematch_benv2_s2_rgb_20260918_054345.pt,clstoken,True,False
+evan_base,s2,fft,0.0003,0.0001,87453715,20,0.5,0.01,0.999,1.0,False,True,False,mAP,57.90,62.97,57.85,checkpoints/evan_freematch_benv2_s2_20260918_054248.pt,clstoken,True,False
+evan_base,s1,fft,0.0003,0.0001,85487635,20,0.5,0.01,0.999,1.0,False,True,False,mAP,47.07,51.89,47.64,checkpoints/evan_freematch_benv2_s1_20260918_054321.pt,clstoken,True,False
+evan_base,s2_rgb,fft,0.0003,0.0001,85684243,20,5.0,0.01,0.999,1.0,False,True,False,mAP,55.47,60.80,55.50,checkpoints/evan_freematch_benv2_s2_rgb_20260918_060544.pt,clstoken,True,False
+evan_base,s2,fft,0.0003,0.0001,87453715,20,5.0,0.01,0.999,1.0,False,True,False,mAP,57.55,61.05,57.70,checkpoints/evan_freematch_benv2_s2_20260918_060553.pt,clstoken,True,False
+evan_base,s1,fft,0.0003,0.0001,85487635,20,5.0,0.01,0.999,1.0,False,True,False,mAP,44.90,47.56,45.04,checkpoints/evan_freematch_benv2_s1_20260918_060627.pt,clstoken,True,False
+evan_base,s2_rgb,fft,0.0003,0.0001,85684243,20,0.5,0.01,0.99,1.0,False,True,False,mAP,64.03,68.07,64.08,checkpoints/evan_freematch_benv2_s2_rgb_20260918_062747.pt,clstoken,True,False
+evan_base,s1,fft,0.0003,0.0001,85487635,20,0.5,0.01,0.99,1.0,False,True,False,mAP,47.58,52.37,49.20,checkpoints/evan_freematch_benv2_s1_20260918_062936.pt,clstoken,True,False
+evan_base,s2,fft,0.0003,0.0001,87453715,20,0.5,0.05,0.999,1.0,False,True,False,mAP,55.54,61.17,57.13,checkpoints/evan_freematch_benv2_s2_20260918_063952.pt,clstoken,True,False

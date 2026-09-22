@@ -1,0 +1,4 @@
+model_type,modality,train_mode,learning_rate,weight_decay,trainable_params,epochs,lambda_u,lambda_e,ema_momentum,temperature,use_quantile,clip_thresh,no_strong_aug,metric_name,test_metric,best_val_metric,best_val_test_metric,saved_checkpoint,global_rep,use_dino_weights,use_s2dino_weights,seed
+evan_base,rgb,fft,0.0003,0.0001,85677322,20,1.0,0.01,0.999,1.0,False,True,False,Acc,97.76,97.30,97.83,checkpoints/evan_freematch_eurosat_rgb_20260920_045122.pt,clstoken,True,False,1
+evan_base,rgb,fft,0.0003,0.0001,85677322,20,1.0,0.01,0.999,1.0,False,True,False,Acc,95.07,95.63,95.65,checkpoints/evan_freematch_eurosat_rgb_20260920_045149.pt,clstoken,True,False,2
+evan_base,rgb,fft,0.0003,0.0001,85677322,20,1.0,0.01,0.999,1.0,False,True,False,Acc,97.50,97.41,97.50,checkpoints/evan_freematch_eurosat_rgb_20260920_045111.pt,clstoken,True,False,0

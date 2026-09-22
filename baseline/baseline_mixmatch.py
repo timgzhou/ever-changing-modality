@@ -23,7 +23,7 @@ import kornia.augmentation as K
 
 from delulunet_main import evan_small, evan_base, evan_large, evan_small_s2, BENV2_BAND_INDICES, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
-from train_utils import evaluate
+from train_utils import evaluate, set_seed
 
 VALID_MODALITIES = {
     'eurosat': ['rgb', 'vre', 'nir', 'swir'],
@@ -100,6 +100,11 @@ def main():
     parser.add_argument('--checkpoint_name', type=str, default=None)
     parser.add_argument('--val_per_epoch', type=int, default=1)
     parser.add_argument('--warmup_epochs', type=int, default=1)
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for torch/numpy/random, recorded in the results CSV. '
+                             'When set, results go to a *_seeds.csv file: the existing CSVs have '
+                             'a fixed schema and an appended field would silently shift every '
+                             'column left in pandas.')
     parser.add_argument('--results_csv', type=str, default=None)
     # MixMatch-specific
     parser.add_argument('--K', type=int, default=2,
@@ -126,6 +131,9 @@ def main():
                         help='Width of the upernet decoder (ignored for linear).')
     args = parser.parse_args()
 
+    if args.seed is not None:
+        set_seed(args.seed)
+
     # Validate modality
     valid_mods = VALID_MODALITIES[args.dataset]
     if args.modality not in valid_mods:
@@ -134,6 +142,10 @@ def main():
 
     if args.results_csv is None:
         args.results_csv = f"res/baseline_mixmatch_{args.dataset}.csv"
+    # Seeded runs carry an extra column, so they get their own file rather than
+    # appending a wider row under the existing fixed-width header.
+    if args.seed is not None:
+        args.results_csv = args.results_csv.replace('.csv', '_seeds.csv')
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Dataset: {args.dataset}, Modality: {args.modality}")
@@ -300,6 +312,8 @@ def main():
         "test_metric", "best_val_metric", "best_val_test_metric",
         "saved_checkpoint", "global_rep", "use_dino_weights",
     ]
+    if args.seed is not None:
+        fieldnames = fieldnames + ["seed"]
     with open(filename, mode='a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
@@ -312,7 +326,7 @@ def main():
             f"{best_val_metric:.2f}" if best_val_metric is not None else "",
             f"{best_val_test_metric:.2f}" if best_val_test_metric is not None else "",
             checkpoint_path, args.global_rep, args.use_dino_weights,
-        ])
+        ] + ([args.seed] if args.seed is not None else []))
     print(f"Results appended to {filename}")
 
     if args.wandb_project:

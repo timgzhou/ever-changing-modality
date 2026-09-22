@@ -96,6 +96,10 @@ def main():
     args.recon_cos_weight_latent = 1.0
     args.checkpoint_name = None
     args.save_checkpoint = False
+    # --temporal_prefusion is an A/B arm (hallucinate per-timestep, then pool).
+    # It is irrelevant to a mean-pooled sweep, where T is already 1 at the
+    # input, and off by default in train_delulu.py.
+    args.temporal_prefusion = False
 
     train_delulu.main(args)
 

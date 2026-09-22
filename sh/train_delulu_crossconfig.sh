@@ -23,11 +23,14 @@
 #         DATASETS="dfc2020" bash sh/train_delulu_crossconfig.sh
 #         WALLTIME=23:59:00 DATASETS=biomassters bash sh/train_delulu_crossconfig.sh
 #
-# WALLTIME overrides the job script's #SBATCH --time. biomassters measured
-# 9.4-10.9 min/epoch in practice (not the 9.9 projected), so 64 epochs lands at
-# 10.0-11.6h against an 11:59 limit. A job killed at the wall writes NO results
-# row -- train_delulu.py appends only after the final epoch -- so a retry should
-# use WALLTIME=23:59:00.
+# WALLTIME overrides the job script's #SBATCH --time. A job killed at the wall
+# writes NO results row -- train_delulu.py appends only after the final epoch.
+#
+# Throughput (measured 2026-09-18 over 15 recent biomassters jobs, bs 8 and 16
+# alike): ~3.8-4.6 min/epoch, so 64 epochs is ~4.5h and 128 epochs ~9.5h, both
+# inside the 11:59 default. The earlier 9.4-10.9 min/epoch figure quoted here
+# was measured before the loader/prefusion work and no longer holds; keep
+# WALLTIME=23:59:00 in reserve if a future change slows the step again.
 set -uo pipefail
 
 TEACHERS_JSON="artifacts/sft_teachers.json"
@@ -62,7 +65,12 @@ for DATASET in ${DATASETS}; do
     # in the paper table but was never in the default list.
     for pair in ${PAIRS:-s1:s2 s2:s1 s2_rgb:s2_norgb s2_norgb:s2_rgb}; do
         START="${pair%%:*}"; NEW="${pair##*:}"
-        KEY="${PRE}/${START}/evan_base/${DEC}/split1"
+        # TEMPORAL_POOL=1 selects the mean-pooled biomassters teachers (the
+        # '/tpooled' registry suffix) and passes the pooled window through as a
+        # negative --num_time_steps. Student and teacher MUST come from the same
+        # regime: a pooled student reads [C,1,H,W] while a T=12 teacher expects
+        # the full stack.
+        KEY="${PRE}/${START}/evan_base/${DEC}/split1${TEMPORAL_POOL:+/tpooled}"
         TEACHER=$(jq -r ".\"${KEY}\".checkpoint // empty" "${TEACHERS_JSON}")
         if [ -z "${TEACHER}" ] || [ ! -f "${TEACHER}" ]; then
             echo "  [skip] ${DATASET} ${START}->+${NEW}: no teacher (${KEY})"; miss=$((miss+1)); continue
@@ -70,14 +78,28 @@ for DATASET in ${DATASETS}; do
         for FAM in ${CONFIG_FAMILIES}; do
             CONFIG="configs/delulu_best_${FAM}.yaml"
             for SEL in ${SELECTORS}; do
-                TAG="${DATASET} ${START} ${NEW} ${FAM} ${SEL}${LR:+ lr${LR}}${STUDENT_INIT:+ init${STUDENT_INIT}}${SEED:+ s${SEED}}${TEMPORAL_PREFUSION:+ tpf}"
+                # EPOCHS is part of the key: a 64- and a 128-epoch run of the
+                # same cell are different experiments, and without it the
+                # in-flight guard would silently skip the second one.
+                TAG="${DATASET} ${START} ${NEW} ${FAM} ${SEL}${LR:+ lr${LR}}${EPOCHS:+ ep${EPOCHS}}${STUDENT_INIT:+ init${STUDENT_INIT}}${SEED:+ s${SEED}}${TEMPORAL_PREFUSION:+ tpf}${TEMPORAL_POOL:+ tpool}"
                 if printf '%s' "${INFLIGHT}" | grep -qxF "${TAG}"; then
                     echo "  [have] ${TAG}: in flight"; dup=$((dup+1)); continue
                 fi
                 n=$((n+1))
                 EX="ALL,DATASET=${DATASET},START=${START},NEW=${NEW},TEACHER=${TEACHER}"
                 EX="${EX},CONFIG=${CONFIG},SELECT_BY=${SEL},BATCH_SIZE=${BS}"
-                EX="${EX},RESULTS_CSV=res/delulu/${DATASET}_crossconfig.csv"
+                # Pooled runs go to their OWN csv. The crossconfig schema has no
+                # num_time_steps column -- it lives only in the checkpoint -- so
+                # a pooled and a T=12 row are indistinguishable once written,
+                # and res/results_BL.py would pool them into one mean per cell.
+                # The _tpool config_label alone is too fragile to rely on for
+                # that separation, and a separate file also makes the T=12 set
+                # trivially archivable as one unit.
+                _RCSV="res/delulu/${DATASET}_crossconfig.csv"
+                if [ -n "${TEMPORAL_POOL:-}" ] && [ "${TEMPORAL_POOL}" != "0" ]; then
+                    _RCSV="res/delulu/${DATASET}_crossconfig_tpooled.csv"
+                fi
+                EX="${EX},RESULTS_CSV=${_RCSV}"
                 # LR override: the source config's lr can be catastrophically
                 # wrong for the target dataset. On biomassters every config with
                 # lr <= 1e-4 collapsed (dfc2020_peeking 5/5, benv2_addition 4/4;
@@ -88,6 +110,12 @@ for DATASET in ${DATASETS}; do
                 if [ -n "${LR:-}" ]; then
                     EX="${EX},LR=${LR}"
                     LBL="${LBL}_lr${LR}"
+                fi
+                # Epoch count in the label too: _load_delulu picks the top-3
+                # configs by val per cell, so a 64- and a 128-epoch run of the
+                # same config would otherwise pool into one mean.
+                if [ -n "${EPOCHS:-}" ] && [ "${EPOCHS}" != "64" ]; then
+                    LBL="${LBL}_ep${EPOCHS}"
                 fi
                 # STUDENT_INIT=random re-rolls the student's weights while
                 # KEEPING the frozen teacher, so supervision is unchanged and
@@ -104,6 +132,27 @@ for DATASET in ${DATASETS}; do
                 # 0.77-0.99 mIoU, so a single run per cell cannot resolve the
                 # ~0.5 effect this ablation is chasing.
                 [ -n "${SEED:-}" ] && EX="${EX},SEED=${SEED}" && LBL="${LBL}_s${SEED}"
+                # Loss-weight overrides. The config's lambdas were tuned on the
+                # SOURCE dataset; on biomassters the prefusion/latent terms are
+                # reconstruction losses whose natural scale differs with the
+                # target (RMSE regression, not logits), so they need their own
+                # values. Labelled so rows at different weights never pool.
+                if [ -n "${LAMBDA_PREFUSION:-}" ]; then
+                    EX="${EX},LAMBDA_PREFUSION=${LAMBDA_PREFUSION}"
+                    LBL="${LBL}_lpf${LAMBDA_PREFUSION}"
+                fi
+                if [ -n "${LAMBDA_LATENT:-}" ]; then
+                    EX="${EX},LAMBDA_LATENT=${LAMBDA_LATENT}"
+                    LBL="${LBL}_llat${LAMBDA_LATENT}"
+                fi
+                # Mean-pooled biomassters: negative NUM_TIME_STEPS makes the
+                # loader pool T at the input and read the on-disk cache, so the
+                # run is fully non-temporal (~7x faster per epoch). Labelled so
+                # pooled and temporal rows never pool in the table selection.
+                if [ -n "${TEMPORAL_POOL:-}" ] && [ "${TEMPORAL_POOL}" != "0" ]; then
+                    EX="${EX},NUM_TIME_STEPS=-${POOL_T:-12}"
+                    LBL="${LBL}_tpool"
+                fi
                 # A/B arm: prefusion before the temporal pool (biomassters only).
                 if [ -n "${TEMPORAL_PREFUSION:-}" ] && [ "${TEMPORAL_PREFUSION}" != "0" ]; then
                     EX="${EX},TEMPORAL_PREFUSION=1"; LBL="${LBL}_tpf"

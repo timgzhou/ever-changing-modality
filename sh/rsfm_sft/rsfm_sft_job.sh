@@ -4,13 +4,23 @@
 #SBATCH --output=logs/rsfm_sft/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com
 #SBATCH --mail-type=ALL
-#SBATCH --gres=gpu:h100:1
+# l40s, not h100: L40S nodes are far less contended here, so these queue and
+# start much sooner. BATCH_SIZE stays 32: every dfc2020/benv2 oracle row in
+# res/rsfm/rsfm_results.csv was run at 32, and mixing batch sizes within the
+# oracle column would change BN statistics and gradient noise independently of
+# the lr the 9-combo sweep selects. These are non-temporal probes, so 32 fits
+# in the L40S's 46G -- the small-batch note applies only to biomassters, where
+# T=12 folds into the batch.
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 # kn101 has failing GPU memory: every job scheduled there since 2026-09-15 died
 # with "CUDA error: uncorrectable ECC error encountered", while jobs on every
 # other node succeeded. Slurm still lists it as healthy. Remove if repaired.
-#SBATCH --exclude=kn101
+#
+# kn159 added 2026-09-19: 50/50 jobs landing there died in 1-3s with exit code
+# 53 and no output file, while concurrent jobs on 13 other nodes ran normally.
+#SBATCH --exclude=kn101,kn159
 # Expected env vars (set by rsfm_sft_all.sh):
 #   MODEL, DATASET, TRAIN_MODE, MODALITY
 

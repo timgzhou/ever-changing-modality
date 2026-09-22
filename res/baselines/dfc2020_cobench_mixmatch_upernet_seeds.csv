@@ -1,0 +1,13 @@
+model_type,modality,train_mode,learning_rate,weight_decay,trainable_params,epochs,K,temperature,alpha,lambda_u,mixmatch_warmup_epochs,metric_name,test_metric,best_val_metric,best_val_test_metric,saved_checkpoint,global_rep,use_dino_weights,seed
+evan_base,s1,fft,0.0001,0.0001,124814856,64,2,0.5,0.75,0.5,4,mIoU,48.37,49.23,48.79,checkpoints/evan_mixmatch_dfc2020_s1_20260919_111440.pt,clstoken,True,0
+evan_base,s2_rgb,fft,0.0001,0.0001,125011464,64,2,0.5,0.75,0.5,4,mIoU,56.23,59.44,59.18,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260919_111455.pt,clstoken,True,0
+evan_base,s1,fft,0.0001,0.0001,124814856,64,2,0.5,0.75,0.5,4,mIoU,47.65,47.96,48.66,checkpoints/evan_mixmatch_dfc2020_s1_20260919_111543.pt,clstoken,True,1
+evan_base,s2,fft,0.0001,0.0001,126977544,64,2,0.5,0.75,0.5,4,mIoU,60.42,61.79,61.52,checkpoints/evan_mixmatch_dfc2020_s2_20260919_111441.pt,clstoken,True,0
+evan_base,s2_norgb,fft,0.0001,0.0001,126387720,64,2,0.5,0.75,0.5,4,mIoU,57.55,58.13,58.57,checkpoints/evan_mixmatch_dfc2020_s2_norgb_20260919_111449.pt,clstoken,True,0
+evan_base,s1,fft,0.0001,0.0001,124814856,64,2,0.5,0.75,0.5,4,mIoU,47.13,48.05,48.27,checkpoints/evan_mixmatch_dfc2020_s1_20260919_111805.pt,clstoken,True,2
+evan_base,s2_norgb,fft,0.0001,0.0001,126387720,64,2,0.5,0.75,0.5,4,mIoU,58.73,59.36,59.56,checkpoints/evan_mixmatch_dfc2020_s2_norgb_20260919_111553.pt,clstoken,True,1
+evan_base,s2_rgb,fft,0.0001,0.0001,125011464,64,2,0.5,0.75,0.5,4,mIoU,58.28,59.60,59.10,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260919_111557.pt,clstoken,True,1
+evan_base,s2_rgb,fft,0.0001,0.0001,125011464,64,2,0.5,0.75,0.5,4,mIoU,58.81,59.27,59.26,checkpoints/evan_mixmatch_dfc2020_s2_rgb_20260919_111826.pt,clstoken,True,2
+evan_base,s2,fft,0.0001,0.0001,126977544,64,2,0.5,0.75,0.5,4,mIoU,58.41,61.02,61.18,checkpoints/evan_mixmatch_dfc2020_s2_20260919_111822.pt,clstoken,True,2
+evan_base,s2,fft,0.0001,0.0001,126977544,64,2,0.5,0.75,0.5,4,mIoU,58.65,60.11,60.15,checkpoints/evan_mixmatch_dfc2020_s2_20260919_111549.pt,clstoken,True,1
+evan_base,s2_norgb,fft,0.0001,0.0001,126387720,64,2,0.5,0.75,0.5,4,mIoU,57.13,58.44,57.90,checkpoints/evan_mixmatch_dfc2020_s2_norgb_20260919_111833.pt,clstoken,True,2

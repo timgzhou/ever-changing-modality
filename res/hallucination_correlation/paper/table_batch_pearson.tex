@@ -1,0 +1,17 @@
+\begin{table}[t]
+\centering
+\small
+\caption{Across-sample Pearson correlation between hallucinated and real patch tokens on DFC2020, computed per (patch position, feature) over the 960-sample test split and averaged. \emph{Paired} hallucinates each sample's missing modality from its own observed modality; \emph{shuffled} hallucinates it from a different sample's. Centering over the sample axis removes the dataset mean token, so a projector that ignores its input scores $0$; the shuffled column is the empirical null. Values are mean $\pm$ standard deviation across the $N\times D$ (patch position, feature) coordinates, i.e.\ the spread of the underlying population, not a confidence interval on the mean; that spread is dominated by variation across feature channels rather than across patch positions. Unlike the token-wise correlation of Fig.~\ref{fig:masking-transformer-analysis}, this is sensitive to per-sample content rather than to shared representational geometry.}
+\label{tab:hallucination_batch_corr}
+\begin{tabular}{llccc}
+\toprule
+Transfer & Target & Paired $r$ & Shuffled $r$ & Margin \\
+\midrule
+S1 $\leftrightarrow$ S2 & S1 & $0.330 \pm 0.194$ & $+0.004 \pm 0.031$ & $10.5\sigma$ \\
+ & S2 & $0.395 \pm 0.167$ & $+0.002 \pm 0.032$ & $12.5\sigma$ \\
+\midrule
+S1 $\leftrightarrow$ S2$_{\text{noRGB}}$ & S1 & $0.488 \pm 0.235$ & $+0.002 \pm 0.031$ & $15.9\sigma$ \\
+ & S2$_{\text{noRGB}}$ & $0.434 \pm 0.191$ & $+0.004 \pm 0.031$ & $13.8\sigma$ \\
+\bottomrule
+\end{tabular}
+\end{table}

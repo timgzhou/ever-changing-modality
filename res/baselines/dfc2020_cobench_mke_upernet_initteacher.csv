@@ -1,0 +1,9 @@
+model_type,teacher_modality,student_modalities,train_mode,learning_rate,weight_decay,trainable_params,epochs,use_dino_weights,metric_name,teacher_train1_metric,teacher_train2_metric,teacher_test_metric,student_test_metric,student_best_test_metric,best_epoch,best_val2_teacher_agreement,valchecked_test_metric,saved_checkpoint,global_rep,teacher_checkpoint
+evan_base,s2,s2+s1,fft,0.0005,0.0001,148642824,64,False,mIoU,73.04,67.27,66.96,65.77,65.98,62,94.36,65.77,,clstoken,checkpoints/sft_evan_base_dfc2020_s2_fft_lr0.0005_20260916_020548.pt
+evan_base,s2,s2+s1,fft,0.0001,0.0001,148642824,64,False,mIoU,73.04,67.27,66.96,66.12,66.13,54,94.91,66.07,,clstoken,checkpoints/sft_evan_base_dfc2020_s2_fft_lr0.0005_20260916_020548.pt
+evan_base,s1,s1+s2,fft,0.0005,0.0001,148642824,64,False,mIoU,62.57,49.06,47.96,49.93,50.03,24,89.28,49.57,,clstoken,checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260916_012334.pt
+evan_base,s1,s1+s2,fft,0.0001,0.0001,148642824,64,False,mIoU,62.57,49.06,47.96,49.69,50.38,8,89.96,49.75,,clstoken,checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260916_012334.pt
+evan_base,s2_rgb,s2_rgb+s1,fft,0.0001,0.0001,146676744,64,False,mIoU,67.45,60.37,59.80,59.29,59.90,26,94.28,59.29,,clstoken,checkpoints/sft_evan_base_dfc2020_s2_rgb_fft_lr0.0005_20260916_012550.pt
+evan_base,s2_rgb,s2_rgb+s2_norgb,fft,0.0005,0.0001,148249608,64,False,mIoU,67.45,60.37,59.80,59.03,59.38,22,93.61,58.99,,clstoken,checkpoints/sft_evan_base_dfc2020_s2_rgb_fft_lr0.0005_20260916_012550.pt
+evan_base,s2_rgb,s2_rgb+s1,fft,0.0005,0.0001,146676744,64,False,mIoU,67.45,60.37,59.80,59.29,59.45,40,93.43,59.29,,clstoken,checkpoints/sft_evan_base_dfc2020_s2_rgb_fft_lr0.0005_20260916_012550.pt
+evan_base,s2_rgb,s2_rgb+s2_norgb,fft,0.0001,0.0001,148249608,64,False,mIoU,67.45,60.37,59.80,59.33,59.74,31,94.28,59.27,,clstoken,checkpoints/sft_evan_base_dfc2020_s2_rgb_fft_lr0.0005_20260916_012550.pt

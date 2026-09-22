@@ -21,7 +21,11 @@ for dataset, path in csvs.items():
     if not os.path.isfile(path):
         print(f"[warn] missing: {path}")
         continue
-    f = pd.read_csv(path)
+    # Some rows were written under a wider schema (an extra trailing field), so
+    # they are column-shifted relative to the header. Skip them rather than
+    # misparse: a shifted row would put the wrong value in num_time_steps or
+    # train_split and could be selected as a teacher.
+    f = pd.read_csv(path, on_bad_lines='skip')
     # the CSV's own `dataset` column says "dfc2020" for both splits; override it
     # with the registry name so the two never collide in the lookup
     f["dataset"] = dataset
@@ -39,7 +43,7 @@ df = pd.concat(frames, ignore_index=True)
 # methods must take a split1 teacher; `full` is only valid for the supervised
 # upper-bound row.
 group_keys = ["dataset", "modality", "model_type", "train_mode", "dino_init",
-              "decoder", "train_split"]
+              "decoder", "train_split", "num_time_steps"]
 
 # Metric direction. Accuracy / mAP / mIoU are higher-is-better; RMSE (biomassters
 # regression) is LOWER-is-better. Sorting every metric descending silently picked
@@ -97,22 +101,41 @@ for dataset, group in best.groupby("dataset"):
 # Best run per (dataset, modality, model, decoder) by val, regardless of
 # dino_init. Filtering to dino_init==True was right when DINO always won, but
 # with the upernet decoder the best s1 and s2_norgb teachers are dino_init=False.
+# num_time_steps is part of the identity: biomassters can be trained on the
+# 12-month temporal stack or on the mean-pooled cache (recorded as -12), and the
+# two are different models on different inputs. Without it in the key they
+# compete for one slot and best-by-val silently returns whichever regime won,
+# so a Delulu run could be handed a teacher from the other one. Only non-default
+# values are suffixed, so every existing key (and the launchers that hardcode
+# them) keeps working.
 teachers = (
     best_teacher_pool.assign(_rank=_rank_key(best_teacher_pool)).sort_values("_rank", ascending=False)
-        .groupby(["dataset", "modality", "model_type", "decoder", "train_split"],
+        .groupby(["dataset", "modality", "model_type", "decoder", "train_split",
+                  "num_time_steps"],
                  as_index=False)
         .first()
 )
+
+
+def _nts_suffix(v):
+    """'' for the ordinary case, '/tpooled' for the mean-pooled (negative) one."""
+    try:
+        return "/tpooled" if int(v) < 0 else ""
+    except (TypeError, ValueError):
+        return ""
+
+
 lookup = {}
 for _, row in teachers.iterrows():
     key = (f"{row['dataset']}/{row['modality']}/{row['model_type']}/"
-           f"{row['decoder']}/{row['train_split']}")
+           f"{row['decoder']}/{row['train_split']}{_nts_suffix(row['num_time_steps'])}")
     lookup[key] = {
         "dataset":     row["dataset"],
         "modality":    row["modality"],
         "model_type":  row["model_type"],
         "decoder":     row["decoder"],
         "train_split": row["train_split"],
+        "num_time_steps": row["num_time_steps"],
         "dino_init":   bool(row["dino_init"]),
         "val_metric":  round(float(row["val_metric"]), 4),
         "test_metric": round(float(row["test_metric"]), 4),

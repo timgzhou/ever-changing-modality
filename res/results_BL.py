@@ -65,11 +65,20 @@ MOD_DISPLAY = {
     'nir': 'NIR', 'swir': 'SWIR',
 }
 
+# EXACT combined-modality names only -- every alias here must name a run on the
+# SAME pair of modalities as the cell.
+#
+# Loose fallbacks were removed 2026-09-21: they filled 11 of 27 oracle Addition
+# cells with a number from a DIFFERENT experiment. 's2s1' is a genuine S2+S1
+# run, so it is right for ('s1','s2')/('s2','s1') but wrong for
+# ('s2_rgb','s1') -- RGB-only is not full S2. Worse, ('s2_rgb','s2_norgb') fell
+# back to plain 's2', a UNIMODAL score printed in a bimodal cell. A missing
+# oracle run must read '--', not borrow a neighbour's number.
 COMBINED_RSFM_ALIASES = {
     ('s2', 's1'):           ['s2s1', 's2+s1', 's1+s2'],
     ('s1', 's2'):           ['s2s1', 's1+s2', 's2+s1'],
-    ('s2_rgb', 's1'):       ['s2_rgb+s1', 's1+s2_rgb', 's2s1', 's2+s1'],
-    ('s2_rgb', 's2_norgb'): ['s2_rgb+s2_norgb', 's2_norgb+s2_rgb', 's2'],
+    ('s2_rgb', 's1'):       ['s2_rgb+s1', 's1+s2_rgb'],
+    ('s2_rgb', 's2_norgb'): ['s2_rgb+s2_norgb', 's2_norgb+s2_rgb'],
     ('rgb', 'nir'):         ['rgb+nir', 'nir+rgb'],
     ('rgb', 'vre'):         ['rgb+vre', 'vre+rgb'],
     ('rgb', 'swir'):        ['rgb+swir', 'swir+rgb'],
@@ -117,6 +126,10 @@ def _fmt_meanstd(val, decimals=1):
     return f'{mean:.{decimals}f}±{std:.{decimals}f}'
 
 
+# Three seeds of each per-cell sweep winner (sh/delulu_seeds_all.sh). Holds all
+# datasets; _load_delulu prefers these rows for any cell they cover.
+PAPER_SEEDS_CSV = 'res/delulu/paper_seeds.csv'
+
 DELULU_CSV = 'res/delulu/hptuned_masking_may6.csv'  # overridden by --apr21 / --may5 flags
 
 # Flat per-dataset baseline CSVs, for datasets that never used the
@@ -133,8 +146,15 @@ DELULU_CSV = 'res/delulu/hptuned_masking_may6.csv'  # overridden by --apr21 / --
 # which is the ADDITION setting. See sh/distill_transfer_dfc2020.sh.
 BASELINE_FLAT_CSVS = {
     'distillation': {
-        'dfc2020':     ['res/baselines/dfc2020_cobench_distill_transfer_upernet.csv'],
+        'dfc2020':     ['res/baselines/dfc2020_cobench_distill_transfer_upernet_seeds.csv',
+                        'res/baselines/dfc2020_cobench_distill_transfer_upernet.csv'],
         'biomassters': ['res/baselines/biomassters_distill_transfer_upernet.csv'],
+        # benv2/eurosat transfer seeds live in their own flat files, written by
+        # sweep/pick_baseline_winners.py + sh/baselines_seeds_all.sh. Without
+        # these the loader globs only the per-cell sweep dirs, which have no
+        # seed column, and the table falls back to a config spread.
+        'benv2':       ['res/baselines/distillation_benv2_transfer_seeds.csv'],
+        'eurosat':     ['res/baselines/distillation_eurosat_transfer_seeds.csv'],
     },
     'distillation_add': {   # bimodal student -> the addition/ensemble column
         'dfc2020':     ['res/baselines/dfc2020_cobench_distillation_upernet.csv'],
@@ -148,10 +168,17 @@ BASELINE_FLAT_CSVS = {
         # second modality (blocks seeded from the backbone). It gets its own
         # file because the original CSVs have a fixed 21-column schema and an
         # extra field would silently shift every column left in pandas.
-        'dfc2020':     ['res/baselines/dfc2020_cobench_mke_upernet_initteacher.csv',
+        'dfc2020':     ['res/baselines/dfc2020_cobench_mke_upernet_initteacher_seeds.csv',
+                        'res/baselines/dfc2020_cobench_mke_upernet_initteacher.csv',
                         'res/baselines/dfc2020_cobench_mke_upernet.csv'],
         'biomassters': ['res/baselines/biomassters_mke_upernet_initteacher.csv',
                         'res/baselines/biomassters_mke_upernet.csv'],
+        # benv2/eurosat were previously absent, so _load_mke_addition fell
+        # through to its single-file fallback and never saw the *_seeds.csv.
+        'benv2':       ['res/baselines/mke/benv2_seeds.csv',
+                        'res/baselines/mke/benv2.csv'],
+        'eurosat':     ['res/baselines/mke/eurosat_seeds.csv',
+                        'res/baselines/mke/eurosat.csv'],
     },
     'freematch': {
         # FreeMatch is semi-supervised and TEACHER-FREE, like MixMatch, so these
@@ -160,16 +187,30 @@ BASELINE_FLAT_CSVS = {
         # histogram are K-way classification constructs with no regression
         # analogue (arXiv 2205.07246 never mentions regression), so the column
         # is structurally empty there rather than merely unrun.
-        'dfc2020':     ['res/baselines/dfc2020_cobench_freematch_upernet.csv'],
-        'benv2':       ['res/baselines/benv2_freematch.csv'],
-        'eurosat':     ['res/baselines/eurosat_freematch.csv'],
+        'dfc2020':     ['res/baselines/dfc2020_cobench_freematch_upernet_seeds.csv',
+                        'res/baselines/dfc2020_cobench_freematch_upernet.csv'],
+        # benv2/eurosat predate the flat-CSV convention: they live in the
+        # freematch/ subdir under the baseline_freematch_<ds> name, not at
+        # res/baselines/<ds>_freematch.csv. The old paths matched no file, so
+        # both columns silently read '--' despite the runs existing.
+        'benv2':       ['res/baselines/freematch/baseline_freematch_benv2_seeds.csv',
+                        'res/baselines/freematch/baseline_freematch_benv2.csv'],
+        'eurosat':     ['res/baselines/freematch/baseline_freematch_eurosat_seeds.csv',
+                        'res/baselines/freematch/baseline_freematch_eurosat.csv'],
     },
     'mixmatch': {
         # RERUN first: the original dfc2020 rows all used lambda_u=75, which
         # collapses training (0.34-23.39 mIoU vs 54-59 at lambda_u 0.5-1.0).
-        'dfc2020':     ['res/baselines/dfc2020_cobench_mixmatch_upernet_RERUN.csv',
+        'dfc2020':     ['res/baselines/dfc2020_cobench_mixmatch_upernet_seeds.csv',
+                        'res/baselines/dfc2020_cobench_mixmatch_upernet_RERUN.csv',
                         'res/baselines/dfc2020_cobench_mixmatch_lambdau_upernet.csv'],
         'biomassters': ['res/baselines/biomassters_mixmatch_upernet.csv'],
+        # benv2/eurosat were previously absent here, so _load_mixmatch_peek fell
+        # through to its single-file fallback and never saw the *_seeds.csv.
+        'benv2':       ['res/baselines/mixmatch/baseline_mixmatch_benv2_seeds.csv',
+                        'res/baselines/mixmatch/baseline_mixmatch_benv2.csv'],
+        'eurosat':     ['res/baselines/mixmatch/baseline_mixmatch_eurosat_seeds.csv',
+                        'res/baselines/mixmatch/baseline_mixmatch_eurosat.csv'],
     },
 }
 
@@ -231,36 +272,58 @@ def _flat_frames(family, dataset, arch):
     return pd.concat(frames, ignore_index=True, sort=False)
 
 
-# Per-dataset Delulu result files, read IN ADDITION to DELULU_CSV.
+# Datasets reported from a single crossconfig sweep, which REPLACES DELULU_CSV
+# and DELULU_EXTRA_CSVS rather than adding to them (see _load_delulu).
 #
-# DELULU_CSV is a single pooled file from the April/May runs. dfc2020 moved to
-# the Copernicus-Bench split in August and biomassters was added in September;
-# neither writes into that pooled file, so without this map their Delulu columns
-# come back empty (or, worse, filled from the pre-split rows that used to live
-# in the pooled file -- those have been quarantined to res/ignore/).
+# dfc2020 moved to the Copernicus-Bench split in August and biomassters was
+# added in September; neither writes into the pooled April/May DELULU_CSV. Each
+# has since been swept as one grid of (config x seed) on the current code, so
+# that grid is the whole candidate set -- anything else on disk is an earlier,
+# non-comparable run.
 #
 # Only files whose rows carry `select_by` are usable: the table picks a config
 # per (start, new, selector), and a file with select_by unset cannot answer that
 # unless --ignore_select_by is passed.
-DELULU_EXTRA_CSVS = {
-    'dfc2020':     ['res/delulu/dfc2020_crossconfig.csv',
-                    'res/delulu/dfc2020_cobench_upernet.csv'],
-    'biomassters': ['res/delulu/biomassters_crossconfig.csv',
-                    'res/delulu/biomassters_best_s1s2.csv',
-                    'res/delulu/biomassters_best_s2s1.csv'],
+DELULU_CROSSCONFIG_CSVS = {
+    'dfc2020':     'res/delulu/dfc2020_crossconfig.csv',
+    'biomassters': 'res/delulu/biomassters_crossconfig.csv',
 }
+
+# BIOMASSTERS_TPOOLED=1 builds the biomassters table from the mean-pooled runs
+# (input-pooled T, non-temporal model) instead of the T=12 ones. They are
+# separate experiments on different inputs and must never be mixed in one cell,
+# so they live in separate CSVs and the stage-0 teachers come from the
+# '/tpooled' registry keys. Off by default, so existing tables are unchanged.
+_TPOOLED_ON = os.environ.get('BIOMASSTERS_TPOOLED', '0') not in ('0', '', 'false', 'False')
+if _TPOOLED_ON:
+    DELULU_CROSSCONFIG_CSVS['biomassters'] = 'res/delulu/biomassters_crossconfig_tpooled.csv'
+
+
+def _TPOOLED(dataset):
+    """True when this dataset's table should read mean-pooled (T<0) stage-0 rows."""
+    return _TPOOLED_ON and dataset == 'biomassters'
+
+# Per-dataset Delulu result files, read IN ADDITION to DELULU_CSV. Only consulted
+# for datasets absent from DELULU_CROSSCONFIG_CSVS above.
+DELULU_EXTRA_CSVS = {}
 
 # ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
 
-def _distill_agg(df, id_cols, result):
+def _distill_agg(df, id_cols, result, dataset=None):
     """Aggregate one distillation frame into result[(teacher, student, kl)]."""
     df = df.copy()
     df['test_metric']        = pd.to_numeric(df['test_metric'],        errors='coerce')
     df['best_val_agreement'] = pd.to_numeric(df['best_val_agreement'], errors='coerce')
+    if 'seed' in df.columns:
+        df['seed'] = pd.to_numeric(df['seed'], errors='coerce')
     for (teacher, student, kl_type), grp in df.groupby(
             ['teacher_modality', 'student_modality', 'kl_type']):
+        seeded = _seed_agg(grp, 'best_val_agreement', 'test_metric', dataset)
+        if seeded is not None:
+            result[(teacher, student, kl_type)] = seeded[:2]
+            continue
         val_rows = grp[grp['best_val_agreement'].notna()]
         if val_rows.empty:
             topk = grp.nlargest(5, 'test_metric')['test_metric']
@@ -284,7 +347,7 @@ def _load_distillation(dataset, arch):
     flat = _flat_frames('distillation', dataset, arch)
     if flat is not None and 'teacher_modality' in flat.columns:
         id_cols = list(flat.columns[6:13]) + ['teacher_checkpoint']
-        return _distill_agg(flat, id_cols, {})
+        return _distill_agg(flat, id_cols, {}, dataset)
 
     base = f'res/baselines/distillation/{dataset}/{arch}'
     if not os.path.isdir(base):
@@ -360,17 +423,30 @@ def _load_delulu(dataset, arch, val_col, test_col, ignore_select_by=False):
     norm_val  = COL_MAP.get(val_col,  val_col)
     norm_test = COL_MAP.get(test_col, test_col)
 
+    # A dataset with a crossconfig file is reported from that file ALONE: it is
+    # the complete, current sweep (every config x seed on the current code), so
+    # pooling it with the legacy CSVs can only add older runs to the candidate
+    # set that val-selection then picks from. Those runs are not comparable --
+    # dfc2020's legacy file is the leaky-teacher era, and biomassters' best_*
+    # files are single-pair snapshots -- and mixing them inflates the spread
+    # (biomassters addition read 69.9+-23.8 pooled).
     frames = []
-    base = _read_csv(DELULU_CSV)
-    if base is not None:
-        frames.append(base)
-    for extra in DELULU_EXTRA_CSVS.get(dataset, []):
-        e = _read_csv(extra)
-        if e is not None:
-            frames.append(e)
-    if not frames:
-        return {}
-    df = pd.concat(frames, ignore_index=True, sort=False)
+    crossconfig = DELULU_CROSSCONFIG_CSVS.get(dataset)
+    if crossconfig is not None:
+        df = _read_csv(crossconfig)
+        if df is None:
+            return {}
+    else:
+        base = _read_csv(DELULU_CSV)
+        if base is not None:
+            frames.append(base)
+        for extra in DELULU_EXTRA_CSVS.get(dataset, []):
+            e = _read_csv(extra)
+            if e is not None:
+                frames.append(e)
+        if not frames:
+            return {}
+        df = pd.concat(frames, ignore_index=True, sort=False)
 
     df = df[df['dataset'] == dataset]
 
@@ -401,8 +477,41 @@ def _load_delulu(dataset, arch, val_col, test_col, ignore_select_by=False):
 
     df[norm_test] = pd.to_numeric(df[norm_test], errors='coerce')
     df[norm_val]  = pd.to_numeric(df[norm_val],  errors='coerce')
+    if 'seed' in df.columns:
+        df['seed'] = pd.to_numeric(df['seed'], errors='coerce')
+
+    # The paper seed runs -- 3 seeds of each per-cell sweep winner, written by
+    # sh/delulu_seeds_all.sh -- are the only Delulu rows that yield a real seed
+    # std. Append them, tagged so the per-cell loop can prefer them: pooling
+    # them with the sweep trials would let a lucky trial win val-selection and
+    # put the cell back on a config spread.
+    seeded = _read_csv(PAPER_SEEDS_CSV)
+    if seeded is not None and 'dataset' in seeded.columns:
+        seeded = seeded[seeded['dataset'] == dataset].copy()
+        if len(seeded):
+            for c in (norm_val, norm_test, 'seed'):
+                if c in seeded.columns:
+                    seeded[c] = pd.to_numeric(seeded[c], errors='coerce')
+            if not ignore_select_by and 'select_by' in seeded.columns:
+                sel = SELECT_MAP.get(norm_val)
+                if sel is not None:
+                    seeded = seeded[seeded['select_by'] == sel]
+            if norm_val in seeded.columns and norm_test in seeded.columns and len(seeded):
+                seeded['_paper_seed'] = True
+                df = df.assign(_paper_seed=False)
+                df = pd.concat([df, seeded], ignore_index=True, sort=False)
+
     result = {}
     for (start, new), grp in df.groupby(['starting_modality', 'new_modality']):
+        if '_paper_seed' in grp.columns and grp['_paper_seed'].fillna(False).any():
+            grp = grp[grp['_paper_seed'].fillna(False)]
+        # Prefer a real seed std: pick the config by val, then spread across
+        # THAT config's seeds. Falls back to top-k-by-val for cells that have
+        # no seeded rows yet (biomassters, and any pre-seed Delulu sweep).
+        seeded = _seed_agg(grp, norm_val, norm_test, dataset)
+        if seeded is not None:
+            result[(start, new)] = seeded[:2]
+            continue
         # Direction matters: the regression columns were un-negated above, so
         # nlargest would pick the WORST (highest-RMSE) configs for biomassters.
         top3 = _nbest(grp, norm_val, 3, dataset).index
@@ -434,7 +543,10 @@ def _load_rsfm(dataset):
 #     unlabeled pool, so mixing splits leaks. split1 only.
 #   - dfc2020/benv2 tables are upernet; biomassters is upernet+relu.
 SFT_SOURCE = {
-    'benv2':       dict(csv='benv2',           decoder='upernet',      split='split1'),
+    # benv2 is multi-label CLASSIFICATION: its head is 'cls', never upernet.
+    # Asking for upernet here matched zero rows and blanked every benv2 stage-0
+    # cell (f_0 and the DINOv3 oracle) in all three tables.
+    'benv2':       dict(csv='benv2',           decoder='cls',          split='split1'),
     'dfc2020':     dict(csv='dfc2020_cobench', decoder='upernet',      split='split1'),
     'eurosat':     dict(csv='eurosat',         decoder=None,           split=None),
     'biomassters': dict(csv='biomassters',     decoder='upernet+relu', split='split1'),
@@ -457,6 +569,14 @@ def _sft_frame(dataset, arch):
         df = df[(got == want) | (got == want.split('+')[0])] if '+' in want else df[got == want]
     if spec['split'] and 'train_split' in df.columns:
         df = df[df['train_split'].astype(str) == spec['split']]
+    # Temporal regime. biomassters rows carry num_time_steps: 12 for the
+    # temporal stack, -12 for the input-mean-pooled cache. They are different
+    # models on different inputs, so the f_0 / oracle rows must come from the
+    # same regime as the Delulu rows they are compared against -- otherwise a
+    # pooled Delulu number is scored against a temporal teacher.
+    if 'num_time_steps' in df.columns:
+        nts = pd.to_numeric(df['num_time_steps'], errors='coerce')
+        df = df[nts < 0] if _TPOOLED(dataset) else df[~(nts < 0)]
     return df if len(df) else None
 
 
@@ -497,6 +617,70 @@ def _nbest(grp, col, n, dataset):
             else grp.nlargest(n, col))[col]
 
 
+# Hyperparameter columns that identify a CONFIG within one baseline family. Two
+# rows sharing these values and differing in `seed` are seed replicates of the
+# same run; anything else is a different configuration.
+_CONFIG_COLS = [
+    # baseline families
+    'learning_rate', 'weight_decay', 'epoch', 'epochs',
+    'temperature', 'alpha', 'distillation_mode', 'init_from_teacher',
+    'lambda_u', 'lambda_e', 'ema_momentum', 'use_quantile', 'clip_thresh',
+    'no_strong_aug', 'K', 'mixmatch_warmup_epochs', 'use_dino_weights',
+    # Delulu. Its CSVs share NO hyperparameter column name with the baselines
+    # (lr not learning_rate, and the lambda_*/mask/dropout knobs are its own),
+    # so without these _seed_agg finds no config columns and falls back to the
+    # top-k-by-val path -- which is what it is meant to replace.
+    #
+    # config_label is deliberately EXCLUDED even though it looks identifying:
+    # the crossconfig sweeps bake the seed into it
+    # (dfc2020_addition_initrandom_s0/s1/s2), so grouping by it makes every
+    # cell a singleton and hides the very replicates we want to average.
+    'lr', 'lambda_latent', 'lambda_prefusion', 'lambda_distill',
+    'mae_mask_ratio', 'modality_dropout', 'modality_dropout_startmod',
+    'modality_dropout_newmod', 'labeled_frequency', 'labeled_start_fraction',
+    'student_init', 'loss_balance', 'active_losses', 'use_mask_token',
+    'latent_masked_only', 'protect_lrm', 'unprotect_starting_mod',
+]
+
+
+def _seed_agg(grp, val_col, test_col, dataset):
+    """(mean, std, n, kind) over the val-winning config's SEED replicates.
+
+    Returns None when `grp` has no seeded rows, so each caller can fall back to
+    its existing top-k-by-val behaviour.
+
+    Why this is separate from _nbest: before the seed columns existed, every +/-
+    in these tables was the spread across DIFFERENT CONFIGS (for KD/TTM on
+    dfc2020, literally the gap between lr 5e-4 and lr 1e-4, n=2). That is a
+    hyperparameter-sensitivity bar, not the run-to-run noise a reader assumes a
+    +/- means, and it was not comparable to Delulu's, which does average seeds.
+    Here the config is chosen by val FIRST, then the std is taken across that
+    one config's seeds only.
+    """
+    if 'seed' not in grp.columns:
+        return None
+    seeded = grp[grp['seed'].notna()]
+    if seeded.empty:
+        return None
+    cfg = [c for c in _CONFIG_COLS if c in seeded.columns]
+    if not cfg:
+        return None
+    # Rank configs by their mean val across seeds, then take the winner's seeds.
+    by_cfg = seeded.groupby(cfg, dropna=False)[val_col].mean()
+    if by_cfg.empty or by_cfg.isna().all():
+        return None
+    best = by_cfg.idxmin() if dataset in _LOWER_IS_BETTER_DS else by_cfg.idxmax()
+    if not isinstance(best, tuple):
+        best = (best,)
+    mask = pd.Series(True, index=seeded.index)
+    for c, v in zip(cfg, best):
+        mask &= (seeded[c].isna() if pd.isna(v) else seeded[c] == v)
+    vals = seeded[mask][test_col].dropna()
+    if vals.empty:
+        return None
+    return (vals.mean(), vals.std(), len(vals), 'seed')
+
+
 def _load_mke_addition(dataset, arch='evan_base'):
     df = _flat_frames('mke', dataset, arch)
     if df is None:
@@ -508,6 +692,8 @@ def _load_mke_addition(dataset, arch='evan_base'):
         return {}
     df = df.copy()
     df['valchecked_test_metric'] = pd.to_numeric(df['valchecked_test_metric'], errors='coerce')
+    if 'seed' in df.columns:
+        df['seed'] = pd.to_numeric(df['seed'], errors='coerce')
     # Older runs (the 3 biomassters rows) predate valchecked_test_metric and
     # leave it empty; fall back to the plain test metric so the cell is a number
     # rather than nan. Those rows are not val-selected -- noted in the audit.
@@ -520,6 +706,10 @@ def _load_mke_addition(dataset, arch='evan_base'):
         parts     = [p.strip() for p in student_mods.split('+')]
         new_parts = [p for p in parts if p != teacher]
         if len(new_parts) != 1:
+            continue
+        seeded = _seed_agg(grp, 'valchecked_test_metric', 'valchecked_test_metric', dataset)
+        if seeded is not None:
+            result[(teacher, new_parts[0])] = seeded[:2]
             continue
         top3 = _nbest(grp, 'valchecked_test_metric', 3, dataset)
         result[(teacher, new_parts[0])] = (top3.mean(), top3.std())
@@ -545,8 +735,14 @@ def _load_mixmatch_peek(dataset, arch='evan_base', family='mixmatch'):
     df = df.copy()
     df['best_val_metric']      = pd.to_numeric(df['best_val_metric'],      errors='coerce')
     df['best_val_test_metric'] = pd.to_numeric(df['best_val_test_metric'], errors='coerce')
+    if 'seed' in df.columns:
+        df['seed'] = pd.to_numeric(df['seed'], errors='coerce')
     result = {}
     for modality, grp in df.groupby('modality'):
+        seeded = _seed_agg(grp, 'best_val_metric', 'best_val_test_metric', dataset)
+        if seeded is not None:
+            result[modality] = seeded[:2]
+            continue
         # These flat files are SWEEPS over lambda_u, and lambda_u is the single
         # biggest driver of the score (dfc2020 s2_norgb: 59.4 at 0.5 down to 5.2
         # at 75). Averaging the top-3 val rows therefore mixes a good config with
@@ -1118,6 +1314,20 @@ _ADDITION_METHOD_ROWS = [
 ]
 
 
+# Datasets that do NOT get the Panopticon / OlmoEarth oracle rows. biomassters
+# is excluded because OlmoEarth was never run there at all and Panopticon's rows
+# sit at RMSE 67-76 against a 42 teacher, i.e. far worse than the method being
+# compared -- an "oracle" that loses to everything is not an upper bound, so the
+# rows only add noise. Its DINOv3 oracle stays.
+_NO_RSFM_ORACLE_DATASETS = ('biomassters',)
+
+_RSFM_ORACLE_METHODS = ('Panopticon', 'OlmoEarth')
+
+
+def _drop_rsfm_oracle_rows(method_rows):
+    return [r for r in method_rows if r[0] not in _RSFM_ORACLE_METHODS]
+
+
 def _make_tall_tex(df, dataset_col, start_col, new_col, method_rows, arch='BL',
                    bold_excludes_f0=False, new_col_label=r'New ($M_B$)'):
     """Tall table: methods as rows, (dataset, start, new) as columns.
@@ -1150,19 +1360,28 @@ def _make_tall_tex(df, dataset_col, start_col, new_col, method_rows, arch='BL',
             row_vals.append(raw)
         cell_vals.append(row_vals)
 
-    # for each key column, find the max among eligible rows
+    # for each key column, find the BEST among eligible rows.
+    #
+    # Direction is per COLUMN, not per table: a column belongs to one dataset,
+    # and a tall table can place an RMSE dataset beside mAP/mIoU ones. Taking
+    # max() unconditionally bolded the WORST method in every biomassters column
+    # (e.g. MixMatch 59.2 bolded over Delulu 44.7). Same rule as the wide tables'
+    # _bold_max_per_row; see LOWER_IS_BETTER_DATASETS.
     bold_mask = [[False] * len(keys) for _ in flat_rows]
     for ki in range(len(keys)):
-        best_val = float('-inf')
+        lower_better = _row_lower_is_better({'Dataset': keys[ki][0]})
+        best_val = float('inf') if lower_better else float('-inf')
         for ri, (group, method, size, col) in enumerate(flat_rows):
             if group in _oracle_groups:
                 continue
             if bold_excludes_f0 and group in _f0_groups:
                 continue
             v = _num(cell_vals[ri][ki])
-            if not np.isnan(v) and v > best_val:
+            if np.isnan(v):
+                continue
+            if v < best_val if lower_better else v > best_val:
                 best_val = v
-        if best_val == float('-inf'):
+        if best_val in (float('inf'), float('-inf')):
             continue
         for ri, (group, method, size, col) in enumerate(flat_rows):
             if group in _oracle_groups:
@@ -1258,13 +1477,20 @@ def _make_tall_tex(df, dataset_col, start_col, new_col, method_rows, arch='BL',
     return '\n'.join(lines)
 
 
+def _rows_for(method_rows):
+    """Drop the RSFM oracle rows when every rendered dataset opts out of them."""
+    if DATASETS and all(d in _NO_RSFM_ORACLE_DATASETS for d in DATASETS):
+        return _drop_rsfm_oracle_rows(method_rows)
+    return method_rows
+
+
 def make_transfer_tex_tall(df, arch='BL'):
-    return _make_tall_tex(df, 'Dataset', 'Start(M_A)', 'Transfer(M_B)', _TRANSFER_METHOD_ROWS,
+    return _make_tall_tex(df, 'Dataset', 'Start(M_A)', 'Transfer(M_B)', _rows_for(_TRANSFER_METHOD_ROWS),
                           arch=arch, bold_excludes_f0=True, new_col_label=r'Transfer ($M_B$)')
 
 
 def make_peek_tex_tall(df, arch='BL'):
-    return _make_tall_tex(df, 'Dataset', 'Start(M_A)', 'New(M_B)', _PEEK_METHOD_ROWS,
+    return _make_tall_tex(df, 'Dataset', 'Start(M_A)', 'New(M_B)', _rows_for(_PEEK_METHOD_ROWS),
                           arch=arch, bold_excludes_f0=False, new_col_label=r'New ($M_B$)')
 
 
@@ -1273,7 +1499,7 @@ def make_addition_tex_tall(df, arch='BL'):
     df = df.copy()
     df['_start'] = split[0]
     df['_new']   = split[1]
-    return _make_tall_tex(df, 'Dataset', '_start', '_new', _ADDITION_METHOD_ROWS,
+    return _make_tall_tex(df, 'Dataset', '_start', '_new', _rows_for(_ADDITION_METHOD_ROWS),
                           arch=arch, bold_excludes_f0=False, new_col_label=r'New ($M_B$)')
 
 

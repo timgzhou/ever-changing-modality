@@ -97,3 +97,11 @@ evan_base,rgb,fft,0.0003,0.0001,85677322,20,1.0,0.01,0.999,1.0,False,True,False,
 evan_base,rgb,fft,0.0003,0.0001,85677322,20,1.0,0.01,0.99,1.0,False,True,False,Acc,97.65,97.26,97.65,checkpoints/evan_freematch_eurosat_rgb_20260727_145859.pt,clstoken,True,False
 evan_large,nir,fft,0.0004,0.0001,302902282,20,1.0,0.05,0.999,1.0,False,True,False,Acc,81.13,80.44,81.13,checkpoints/evan_freematch_eurosat_nir_20260727_141202.pt,clstoken,True,False
 evan_large,swir,fft,0.0004,0.0001,303164426,20,1.0,0.05,0.999,1.0,False,True,True,Acc,92.50,91.81,92.37,checkpoints/evan_freematch_eurosat_swir_20260727_144438.pt,clstoken,True,False
+evan_base,nir,fft,0.0003,0.0001,85480714,20,0.5,0.01,0.999,1.0,False,True,False,Acc,78.78,77.74,78.78,checkpoints/evan_freematch_eurosat_nir_20260918_054240.pt,clstoken,True,False
+evan_base,vre,fft,0.0003,0.0001,85677322,20,0.5,0.01,0.999,1.0,False,True,False,Acc,92.72,92.04,92.41,checkpoints/evan_freematch_eurosat_vre_20260918_054240.pt,clstoken,True,False
+evan_base,rgb,fft,0.0003,0.0001,85677322,20,0.5,0.01,0.999,1.0,False,True,False,Acc,96.94,96.85,97.06,checkpoints/evan_freematch_eurosat_rgb_20260918_054240.pt,clstoken,True,False
+evan_base,swir,fft,0.0003,0.0001,85677322,20,0.5,0.01,0.999,1.0,False,True,False,Acc,90.07,90.00,90.06,checkpoints/evan_freematch_eurosat_swir_20260918_054248.pt,clstoken,True,False
+evan_base,nir,fft,0.0003,0.0001,85480714,20,5.0,0.01,0.999,1.0,False,True,False,Acc,54.30,55.93,55.56,checkpoints/evan_freematch_eurosat_nir_20260918_061847.pt,clstoken,True,False
+evan_base,vre,fft,0.0003,0.0001,85677322,20,5.0,0.01,0.999,1.0,False,True,False,Acc,71.15,70.44,71.67,checkpoints/evan_freematch_eurosat_vre_20260918_061919.pt,clstoken,True,False
+evan_base,rgb,fft,0.0003,0.0001,85677322,20,5.0,0.01,0.999,1.0,False,True,False,Acc,43.09,81.78,81.59,checkpoints/evan_freematch_eurosat_rgb_20260918_061954.pt,clstoken,True,False
+evan_base,swir,fft,0.0003,0.0001,85677322,20,5.0,0.01,0.999,1.0,False,True,False,Acc,76.37,75.11,76.11,checkpoints/evan_freematch_eurosat_swir_20260918_062019.pt,clstoken,True,False

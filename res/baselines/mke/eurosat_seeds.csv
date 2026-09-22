@@ -1,0 +1,4 @@
+model_type,teacher_modality,student_modalities,train_mode,learning_rate,weight_decay,trainable_params,epochs,use_dino_weights,metric_name,teacher_train1_metric,teacher_train2_metric,teacher_test_metric,student_test_metric,student_best_test_metric,best_epoch,best_val2_teacher_agreement,valchecked_test_metric,saved_checkpoint,global_rep,teacher_checkpoint,seed
+evan_base,rgb,rgb+vre,fft,0.0001,0.0001,107539210,20,False,Acc,100.00,98.60,98.57,93.80,93.80,20,93.26,93.80,,clstoken,checkpoints/sft_evan_base_eurosat_rgb_fft_lr0.0001_20260913_195452.pt,0
+evan_base,rgb,rgb+vre,fft,0.0001,0.0001,107539210,20,False,Acc,100.00,98.60,98.57,93.61,93.61,19,92.48,93.37,,clstoken,checkpoints/sft_evan_base_eurosat_rgb_fft_lr0.0001_20260913_195452.pt,2
+evan_base,rgb,rgb+vre,fft,0.0001,0.0001,107539210,20,False,Acc,100.00,98.60,98.57,93.37,93.50,19,92.96,93.50,,clstoken,checkpoints/sft_evan_base_eurosat_rgb_fft_lr0.0001_20260913_195452.pt,1

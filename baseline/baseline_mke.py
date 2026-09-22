@@ -29,7 +29,7 @@ import kornia.augmentation as K
 
 from delulunet_main import evan_small, evan_base, evan_large, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
-from train_utils import make_scheduler, TrainMetricAccumulator, evaluate, make_criterion
+from train_utils import make_scheduler, TrainMetricAccumulator, evaluate, make_criterion, set_seed
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
 
@@ -196,6 +196,11 @@ def main():
     parser.add_argument('--val_per_epoch', type=int, default=1,
                         help='Run validation every N epochs (default: 1)')
     parser.add_argument('--warmup_epochs', type=int, default=3)
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for torch/numpy/random, recorded in the results CSV. '
+                             'When set, results go to a *_seeds.csv file: the existing CSVs have '
+                             'a fixed 21-column schema and an appended field would silently shift '
+                             'every column left in pandas.')
     parser.add_argument('--results_csv', type=str, default=None)
     # Dense decoder head. For teacher-based baselines this MUST match the
     # teacher checkpoint: an upernet teacher with a linear student is not a
@@ -211,6 +216,9 @@ def main():
                         help='Width of the upernet decoder (ignored for linear).')
     args = parser.parse_args()
 
+    if args.seed is not None:
+        set_seed(args.seed)
+
     if args.results_csv is None:
         args.results_csv = f"res/baseline_mke_{args.dataset}.csv"
     # init_from_teacher is a NEW arm and the existing MKE CSVs have a fixed
@@ -219,6 +227,9 @@ def main():
     # own file instead. results_BL.py reads both via BASELINE_FLAT_CSVS.
     if args.init_from_teacher:
         args.results_csv = args.results_csv.replace('.csv', '_initteacher.csv')
+    # Seeded runs carry an extra column -- same reasoning as init_from_teacher.
+    if args.seed is not None:
+        args.results_csv = args.results_csv.replace('.csv', '_seeds.csv')
 
     teacher_checkpoint_path = args.teacher_checkpoint
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -695,6 +706,8 @@ def main():
         "best_val2_teacher_agreement", "valchecked_test_metric",
         "saved_checkpoint", "global_rep", "teacher_checkpoint",
     ]
+    if args.seed is not None:
+        fieldnames = fieldnames + ["seed"]
     with open(filename, mode='a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
@@ -708,7 +721,7 @@ def main():
             f"{best_agreement:.2f}",
             f"{valchecked_test_metric:.2f}" if valchecked_test_metric is not None else "",
             "", args.global_rep, teacher_checkpoint_path,
-        ])
+        ] + ([args.seed] if args.seed is not None else []))
     print(f"Results appended to {filename}")
 
     if args.wandb_project:

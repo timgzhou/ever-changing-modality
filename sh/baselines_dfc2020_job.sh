@@ -10,7 +10,12 @@
 # kn101 has failing GPU memory: every job scheduled there since 2026-09-15 died
 # with "CUDA error: uncorrectable ECC error encountered", while jobs on every
 # other node succeeded. Slurm still lists it as healthy. Remove if repaired.
-#SBATCH --exclude=kn101
+#
+# kn159 added 2026-09-19: 4/4 jobs landing there died in 2-3s with exit code 53
+# and no output file at all (the job never got far enough to open one), while
+# the 7 concurrent jobs on kn023/033/040/084/139/164/166 all ran normally.
+# Slurm still lists it as healthy. Remove if repaired.
+#SBATCH --exclude=kn101,kn159
 
 # One baseline run on DFC2020 / Copernicus-Bench.
 # Expected env: BASELINE_ARGS (full python arg string), RUN_TAG, DECODER

@@ -10,7 +10,12 @@
 # kn101 has failing GPU memory: every job scheduled there since 2026-09-15 died
 # with "CUDA error: uncorrectable ECC error encountered", while jobs on every
 # other node succeeded. Slurm still lists it as healthy. Remove if repaired.
-#SBATCH --exclude=kn101
+#
+# kn159 added 2026-09-19: 50/50 jobs landing there died in 1-3s with exit code
+# 53 and no output file, while concurrent jobs on 13 other nodes ran normally.
+# Because they died in seconds, Slurm kept refilling the freed slot and one bad
+# node burned most of a 60-job queue. Remove if repaired.
+#SBATCH --exclude=kn101,kn159
 
 # Run one W&B sweep agent for a bounded number of trials.
 #

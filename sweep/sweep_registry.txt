@@ -87,3 +87,7 @@ delulu-dfc2020-cobench-s2norgb_to_s2rgb-nobal tgz/delulu-dfc2020-cobench-s2norgb
 delulu-deep-dfc2020_s1_to_s2norgb tgz/delulu-deep-dfc2020_s1_to_s2norgb/m94buytx checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260821_194707.pt s2_norgb
 delulu-deep-benv2_s2rgb_to_s2norgb tgz/delulu-deep-benv2_s2rgb_to_s2norgb/oxvkqgel checkpoints/sft_evan_base_benv2_s2_rgb_fft_lr0.0005_20260803_215614.pt s2_norgb
 delulu-deep-dfc2020_s1_to_s2norgb-d3 tgz/delulu-deep-dfc2020_s1_to_s2norgb-d3/wr7zdf0j checkpoints/sft_evan_base_dfc2020_s1_fft_lr0.0005_20260821_194707.pt s2_norgb
+delulu-biomassters-tpooled-delulu-s1tos2 tgz/delulu-biomassters-tpooled-delulu-s1tos2/s0veh6ou checkpoints/sft_evan_base_biomassters_s1_fft_lr0.0005_20260919_125600.pt s2
+delulu-biomassters-tpooled-delulu-s2tos1 tgz/delulu-biomassters-tpooled-delulu-s2tos1/s4dpcrty checkpoints/sft_evan_base_biomassters_s2_fft_lr0.0005_20260919_125845.pt s1
+delulu-biomassters-tpooled-delulu-s2_rgbtos2_norgb tgz/delulu-biomassters-tpooled-delulu-s2_rgbtos2_norgb/ahxstqf6 checkpoints/sft_evan_base_biomassters_s2_rgb_fft_lr0.0005_20260919_122434.pt s2_norgb
+delulu-biomassters-tpooled-delulu-s2_norgbtos2_rgb tgz/delulu-biomassters-tpooled-delulu-s2_norgbtos2_rgb/2a5d99d5 checkpoints/sft_evan_base_biomassters_s2_norgb_fft_lr0.0005_20260919_125803.pt s2_rgb

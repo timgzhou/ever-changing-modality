@@ -111,7 +111,8 @@ def main():
                         help='Clamp regression output at 0 with ReLU (as PANGAEA RegUPerNet does). '
                              'Valid for non-negative targets such as raw AGB in t/ha.')
     parser.add_argument('--num_time_steps', type=int, default=12,
-                        help='Number of timestamps to load per BioMassters image before temporal mean-pooling.')
+                        help='Number of timestamps to load per BioMassters image before temporal mean-pooling.'
+                             ' Negative values (e.g. -12) load |n| timesteps and mean-pool them at the INPUT, so the model runs fully non-temporal: ~T x faster per step and identical code paths to the other datasets, at some accuracy cost.')
     parser.add_argument('--val_per_epoch', type=int, default=1,
                         help='Run validation every N epochs (and always on the last epoch).')
     parser.add_argument('--warmup_epochs', type=int, default=3,

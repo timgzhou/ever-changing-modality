@@ -8,9 +8,9 @@
   \midrule
   $f_0(M_A)$ & $f_0$ & 98.6 & 98.6 & 90.7 & 90.7 & 80.9 & 80.9 \\
   \midrule
-  \multirow{2}{*}{Baselines} & KD & 87.8$\pm$1.8 & 74.8$\pm$7.4 & 86.2$\pm$2.0 & -- & 83.4$\pm$0.1 & \textbf{82.1$\pm$1.4} \\
-   & TTM & 88.5$\pm$1.7 & 77.4$\pm$5.7 & 88.2$\pm$0.7 & -- & 83.9$\pm$0.7 & \textbf{82.1$\pm$0.9} \\
-  Ours & Delulu & \textbf{94.2$\pm$0.9} & \textbf{81.6$\pm$0.8} & \textbf{89.0$\pm$0.5} & \textbf{78.8$\pm$1.9} & \textbf{85.0$\pm$0.2} & \textbf{82.1$\pm$0.5} \\
+  \multirow{2}{*}{Baselines} & KD & 88.5$\pm$0.2 & -- & -- & -- & -- & -- \\
+   & TTM & 88.9$\pm$0.7 & -- & -- & -- & -- & -- \\
+  Ours & Delulu & \textbf{90.6$\pm$0.4} & \textbf{81.6$\pm$0.8} & \textbf{89.0$\pm$0.5} & \textbf{78.8$\pm$1.9} & \textbf{85.0$\pm$0.2} & \textbf{82.1$\pm$0.5} \\
   \midrule
   \shortstack[c]{Oracle\\($M_B$)} & DINOv3 & \textcolor{gray}{90.7} & \textcolor{gray}{80.9} & \textcolor{gray}{98.6} & \textcolor{gray}{80.9} & \textcolor{gray}{98.6} & \textcolor{gray}{90.7} \\
 \bottomrule
@@ -26,9 +26,9 @@
   \multicolumn{2}{c|}{Start ($M_A$)} & \multicolumn{2}{c}{RGB} & \multicolumn{2}{c}{VRE} & \multicolumn{2}{c}{NIR} \\
   \multicolumn{2}{c|}{New ($M_B$)} & VRE & NIR & RGB & NIR & RGB & VRE \\
   \midrule
-  $f_0(M_A)$ & $f_0$ & 98.6 & 98.6 & 90.7 & 90.7 & 80.9 & 80.9 \\
-  Baselines & MixMatch & \textbf{99.0$\pm$0.1} & \textbf{99.0$\pm$0.1} & \textbf{92.7} & \textbf{92.7} & 66.2$\pm$6.4 & 66.2$\pm$6.4 \\
-  Ours & Delulu & 98.5$\pm$0.1 & 98.5$\pm$0.1 & 91.4$\pm$0.1 & 91.5$\pm$0.1 & \textbf{81.9$\pm$0.2} & \textbf{82.0$\pm$0.0} \\
+  $f_0(M_A)$ & $f_0$ & 98.6 & \textbf{98.6} & 90.7 & 90.7 & 80.9 & 80.9 \\
+  Baselines & MixMatch & 98.5$\pm$0.2 & 98.5$\pm$0.2 & \textbf{92.7} & \textbf{92.7} & 66.2$\pm$6.4 & 66.2$\pm$6.4 \\
+  Ours & Delulu & \textbf{99.0$\pm$0.1} & 98.5$\pm$0.1 & 91.4$\pm$0.1 & 91.5$\pm$0.1 & \textbf{81.9$\pm$0.2} & \textbf{82.0$\pm$0.0} \\
 \bottomrule
 \end{tabular}
 
@@ -43,8 +43,8 @@
   \multicolumn{2}{c|}{New ($M_B$)} & VRE & NIR & RGB & NIR & RGB & VRE \\
   \midrule
   $f_0(M_A)$ & $f_0$ & 98.6 & 98.6 & 90.7 & 90.7 & 80.9 & 80.9 \\
-  Baselines & MKE & 97.5$\pm$0.9 & 97.9$\pm$0.5 & 90.2$\pm$0.2 & 89.4$\pm$0.3 & \textbf{84.4$\pm$0.9} & \textbf{84.8$\pm$0.7} \\
-  Ours & Delulu & \textbf{98.7$\pm$0.1} & \textbf{98.7$\pm$0.1} & \textbf{91.5$\pm$0.1} & \textbf{91.6$\pm$0.1} & 82.1$\pm$0.3 & 82.0$\pm$0.3 \\
+  Baselines & MKE & 93.6$\pm$0.2 & 97.9$\pm$0.5 & 90.2$\pm$0.2 & 89.4$\pm$0.3 & \textbf{84.4$\pm$0.9} & \textbf{84.8$\pm$0.7} \\
+  Ours & Delulu & \textbf{99.0$\pm$0.1} & \textbf{98.7$\pm$0.1} & \textbf{91.5$\pm$0.1} & \textbf{91.6$\pm$0.1} & 82.1$\pm$0.3 & 82.0$\pm$0.3 \\
   \midrule
   \shortstack[c]{Oracle\\($M_A$+$M_B$)} & DINOv3 & \textcolor{gray}{98.6} & \textcolor{gray}{98.8} & \textcolor{gray}{98.6} & \textcolor{gray}{93.2} & \textcolor{gray}{98.8} & \textcolor{gray}{93.2} \\
 \bottomrule

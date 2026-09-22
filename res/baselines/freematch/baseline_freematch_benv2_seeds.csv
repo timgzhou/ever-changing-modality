@@ -1,0 +1,10 @@
+model_type,modality,train_mode,learning_rate,weight_decay,trainable_params,epochs,lambda_u,lambda_e,ema_momentum,temperature,use_quantile,clip_thresh,no_strong_aug,metric_name,test_metric,best_val_metric,best_val_test_metric,saved_checkpoint,global_rep,use_dino_weights,use_s2dino_weights,seed
+evan_base,s2_rgb,fft,0.0003,0.0001,85684243,20,0.5,0.01,0.999,1.0,False,True,False,mAP,63.39,68.21,63.31,checkpoints/evan_freematch_benv2_s2_rgb_20260920_044128.pt,clstoken,True,False,0
+evan_base,s2_rgb,fft,0.0003,0.0001,85684243,20,0.5,0.01,0.999,1.0,False,True,False,mAP,64.68,68.30,63.97,checkpoints/evan_freematch_benv2_s2_rgb_20260920_044153.pt,clstoken,True,False,2
+evan_base,s1,fft,0.0004,0.0001,85487635,20,1.0,0.01,0.999,1.0,False,True,False,mAP,46.95,52.38,47.76,checkpoints/evan_freematch_benv2_s1_20260920_044238.pt,clstoken,True,False,1
+evan_base,s1,fft,0.0004,0.0001,85487635,20,1.0,0.01,0.999,1.0,False,True,False,mAP,46.69,52.30,48.33,checkpoints/evan_freematch_benv2_s1_20260920_044238.pt,clstoken,True,False,2
+evan_base,s1,fft,0.0004,0.0001,85487635,20,1.0,0.01,0.999,1.0,False,True,False,mAP,45.55,51.31,47.62,checkpoints/evan_freematch_benv2_s1_20260920_044240.pt,clstoken,True,False,0
+evan_base,s2,fft,0.0004,0.0001,87453715,20,1.0,0.01,0.999,1.0,False,True,False,mAP,58.29,63.58,58.48,checkpoints/evan_freematch_benv2_s2_20260920_044317.pt,clstoken,True,False,0
+evan_base,s2,fft,0.0004,0.0001,87453715,20,1.0,0.01,0.999,1.0,False,True,False,mAP,57.17,62.50,57.66,checkpoints/evan_freematch_benv2_s2_20260920_044621.pt,clstoken,True,False,2
+evan_base,s2_rgb,fft,0.0003,0.0001,85684243,20,0.5,0.01,0.999,1.0,False,True,False,mAP,62.63,68.86,62.63,checkpoints/evan_freematch_benv2_s2_rgb_20260920_121724.pt,clstoken,True,False,1
+evan_base,s2,fft,0.0004,0.0001,87453715,20,1.0,0.01,0.999,1.0,False,True,False,mAP,56.03,62.51,56.55,checkpoints/evan_freematch_benv2_s2_20260920_121724.pt,clstoken,True,False,1

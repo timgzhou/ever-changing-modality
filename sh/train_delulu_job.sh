@@ -41,6 +41,11 @@
 #                             sane there: latent targets are post-LayerNorm)
 #   RECON_DROP_CLS=1          drop the CLS token from those reconstruction
 #                             targets (a segmenter decoder never reads it)
+#   EVAL_EVERY=N              periodic-eval interval in epochs (default 2).
+#     MEASURED 2026-09-18 on biomassters: one eval costs ~616s against a ~245s
+#     epoch, i.e. 2.5x an epoch. At the default of 2 that is ~55% of walltime,
+#     which is what killed a 128-epoch sweep at the 11:59 wall (all 36 jobs
+#     reached only epoch ~78). Budget as: epochs*245s + (epochs/EVAL_EVERY)*616s.
 #   SAVE_CHECKPOINT=0         skip writing the final .pt (scratch is quota-bound;
 #                             ablations that only need the metrics should set this)
 #   CKPT_NAME=<name>          filename for the saved .pt (default: a timestamp,
@@ -172,6 +177,7 @@ python -u train_delulu.py \
     --lambda_latent "${LAMBDA_LATENT}" \
     --lambda_prefusion "${LAMBDA_PREFUSION}" \
     --lambda_distill "${LAMBDA_DISTILL}" \
+    --eval_every_n_epochs "${EVAL_EVERY:-2}" \
     --token_mask_ratio "${TOKEN_MASK_RATIO}" \
     --protect_lrm "${PROTECT_LRM}" \
     --latent_masked_only \

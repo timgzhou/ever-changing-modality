@@ -1,0 +1,4 @@
+model_type,modality,train_mode,learning_rate,weight_decay,trainable_params,epochs,K,temperature,alpha,lambda_u,mixmatch_warmup_epochs,metric_name,test_metric,best_val_metric,best_val_test_metric,saved_checkpoint,global_rep,use_dino_weights,seed
+evan_base,rgb,fft,0.0003,0.0001,85677322,20,2,0.5,0.75,10.0,4,Acc,98.59,98.59,98.63,checkpoints/evan_mixmatch_eurosat_rgb_20260920_045221.pt,clstoken,True,0
+evan_base,rgb,fft,0.0003,0.0001,85677322,20,2,0.5,0.75,10.0,4,Acc,98.81,98.63,98.65,checkpoints/evan_mixmatch_eurosat_rgb_20260920_045256.pt,clstoken,True,2
+evan_base,rgb,fft,0.0003,0.0001,85677322,20,2,0.5,0.75,10.0,4,Acc,98.67,98.26,98.31,checkpoints/evan_mixmatch_eurosat_rgb_20260920_045257.pt,clstoken,True,1

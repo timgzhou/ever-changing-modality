@@ -162,9 +162,16 @@ def get_loaders(
         return get_benv2_loaders(**kwargs)
     elif dataset == 'biomassters':
         from biomassters_data_utils import get_biomassters_loaders
+        # A NEGATIVE num_time_steps means "load |n| timesteps, then mean-pool them
+        # into one at the input", so the sample is [C, 1, H, W] and the whole
+        # stack downstream runs in its ordinary non-temporal mode. Encoding it in
+        # the existing int avoids threading a separate flag through every caller,
+        # and it stays visible in the results CSV (num_time_steps=-12 reads as
+        # "12 months, pooled") instead of silently looking like a T=1 run.
+        pool = num_time_steps < 0
         kwargs = dict(batch_size=batch_size, num_workers=num_workers,
                       starting_modality=starting_modality, new_modality=new_modality,
-                      num_time_steps=num_time_steps)
+                      num_time_steps=abs(num_time_steps), temporal_pool=pool)
         if data_normalizer is not None and data_normalizer is not False:
             kwargs['data_normalizer'] = data_normalizer
         return get_biomassters_loaders(**kwargs)

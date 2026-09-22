@@ -30,7 +30,7 @@ from tqdm import tqdm
 
 from delulunet_main import evan_small, evan_base, evan_large, evan_small_s2, BENV2_BAND_INDICES, EVANClassifier, EvanSegmenter
 from data_utils import get_loaders, create_multimodal_batch
-from train_utils import evaluate
+from train_utils import evaluate, set_seed
 
 VALID_MODALITIES = {
     'eurosat': ['rgb', 'vre', 'nir', 'swir'],
@@ -307,6 +307,11 @@ def main():
                              'FreeMatch does NOT sharpen: the adaptive threshold is calibrated '
                              'against raw model confidence, so keep this at 1.0. Values <1 '
                              'distort time_p/p_model and break SAT (default: 1.0)')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for torch/numpy/random, recorded in the results CSV. '
+                             'When set, results go to a *_seeds.csv file: the existing CSVs have '
+                             'a fixed schema and an appended field would silently shift every '
+                             'column left in pandas.')
     parser.add_argument('--results_csv', type=str, default=None)
     # Dense decoder head. For teacher-based baselines this MUST match the
     # teacher checkpoint: an upernet teacher with a linear student is not a
@@ -318,6 +323,9 @@ def main():
     parser.add_argument('--decoder_channels', type=int, default=512,
                         help='Width of the upernet decoder (ignored for linear).')
     args = parser.parse_args()
+
+    if args.seed is not None:
+        set_seed(args.seed)
 
     # Validate modality
     if args.dataset not in VALID_MODALITIES:
@@ -332,6 +340,10 @@ def main():
 
     if args.results_csv is None:
         args.results_csv = f"res/baseline_freematch_{args.dataset}.csv"
+    # Seeded runs carry an extra column, so they get their own file rather than
+    # appending a wider row under the existing fixed-width header.
+    if args.seed is not None:
+        args.results_csv = args.results_csv.replace('.csv', '_seeds.csv')
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Dataset: {args.dataset}, Modality: {args.modality}")
@@ -528,6 +540,8 @@ def main():
         "best_val_test_metric", "saved_checkpoint", "global_rep",
         "use_dino_weights", "use_s2dino_weights",
     ]
+    if args.seed is not None:
+        fieldnames = fieldnames + ["seed"]
     with open(filename, mode='a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
@@ -543,7 +557,7 @@ def main():
             f"{best_val_test_metric:.2f}" if best_val_test_metric is not None else "",
             checkpoint_path, args.global_rep,
             args.use_dino_weights, args.use_s2dino_weights,
-        ])
+        ] + ([args.seed] if args.seed is not None else []))
     print(f"Results appended to {filename}")
 
     if args.wandb_project:

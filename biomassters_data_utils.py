@@ -28,6 +28,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import random
 from pathlib import Path
 
@@ -129,11 +130,17 @@ class TemporalStackedDataset(Dataset):
     """
 
     def __init__(self, dataset, num_time_steps: int, training: bool = False,
-                 month_dropout: float = 0.0):
+                 month_dropout: float = 0.0, temporal_pool: bool = False):
         self.dataset = dataset
         self.num_time_steps = num_time_steps
         self.training = training
         self.month_dropout = month_dropout
+        # temporal_pool: average the T timesteps into one BEFORE the model sees
+        # them, so the sample is [C, 1, H, W] and every downstream path (patch
+        # embed, fusion, Delulu's projector and losses) is the ordinary
+        # non-temporal one. This is NOT num_time_steps=1, which keeps only the
+        # most recent month and discards the other 11; here all T contribute.
+        self.temporal_pool = temporal_pool
 
         # Per-band normalization tensors, shaped [C, 1, 1, 1] to broadcast over
         # [C, T, H, W]. Order: s2 (10) then s1 (4), matching the stack below.
@@ -149,6 +156,20 @@ class TemporalStackedDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.dataset)
+
+    def pooled_sample(self, index: int) -> tuple:
+        """The [C,1,H,W] pooled image and mask, with augmentation disabled.
+
+        Used to build the on-disk cache, so the cached tensor is the clean
+        12-month mean -- deterministic and identical for every epoch.
+        """
+        was_training = self.training
+        self.training = False          # never month-drop into a cache
+        try:
+            s = self[index]
+        finally:
+            self.training = was_training
+        return s['image'], s['mask']
 
     @staticmethod
     def _ensure_cthw(x: Tensor) -> Tensor:
@@ -182,10 +203,120 @@ class TemporalStackedDataset(Dataset):
                 drop[torch.randint(T, (1,))] = False
             image[:, drop] = 0.0
 
+        # Collapse time AFTER normalization and month dropout, so both still act
+        # per-timestep and a dropped month contributes zeros to the average
+        # exactly as it would to the model's own feature pool. S2 missing months
+        # are zero-filled upstream, so this is a plain mean over the T slots, the
+        # same reduction the temporal shim applies to features -- moved to the
+        # input, where it costs one forward pass instead of T.
+        if self.temporal_pool:
+            image = image.mean(dim=1, keepdim=True)  # [C, 1, H, W]
+
         # Recover raw AGB in t/ha (geobench applied agb / AGB_STD internally).
         mask = sample['mask'].float() * AGB_STD
 
         return {'image': image, 'mask': mask}
+
+
+class CachedPooledDataset(Dataset):
+    """Memory-mapped [N,C,1,H,W] fp16 images + [N,H,W] fp32 masks.
+
+    Why this exists: ~70% of a BioMassters epoch is data loading, not GPU. Even
+    with temporal_pool=True the loader still reads all 12 months off disk and
+    normalizes them before averaging, so pooling alone made loading marginally
+    SLOWER (measured 488 vs 448 ms/batch). Caching the pooled result collapses
+    that to a single mmap read: 14.6 GiB fp16 for all 8526 samples, against the
+    129 GB source tree.
+
+    fp16 is safe here because the images are already min-max normalized into
+    ~[0,1]; the mask stays fp32 since AGB is in raw t/ha up to ~400.
+
+    Month dropout is NOT applied -- the cache holds the clean mean (see
+    pooled_sample). Pooled runs therefore train without that augmentation, which
+    is a deliberate trade for speed.
+    """
+
+    def __init__(self, img_path: Path, mask_path: Path, shape: tuple, n: int):
+        self.img_path = Path(img_path)
+        self.mask_path = Path(mask_path)
+        self.shape = shape          # (C, 1, H, W)
+        self.n = n
+        self._img = None            # opened lazily, per worker
+        self._mask = None
+
+    def _ensure_open(self):
+        # np.memmap is not fork-safe when opened before the worker forks, so
+        # each DataLoader worker opens its own handle on first access.
+        if self._img is None:
+            import numpy as np
+            self._img = np.memmap(self.img_path, dtype=np.float16, mode='r',
+                                  shape=(self.n,) + self.shape)
+            H, W = self.shape[2], self.shape[3]
+            self._mask = np.memmap(self.mask_path, dtype=np.float32, mode='r',
+                                   shape=(self.n, H, W))
+
+    def __len__(self) -> int:
+        return self.n
+
+    def __getitem__(self, index: int) -> dict:
+        self._ensure_open()
+        img = torch.from_numpy(self._img[index].astype('float32'))
+        mask = torch.from_numpy(self._mask[index].copy())
+        return {'image': img, 'mask': mask}
+
+
+def build_pooled_cache(cache_dir, num_time_steps: int = 12,
+                       data_root: str = 'datasets/geoben2/biomassters',
+                       splits=('train', 'validation', 'test')) -> None:
+    """Materialise the mean-pooled dataset to disk (idempotent)."""
+    import numpy as np
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    band_order = {'s2': list(BIOMASSTERS_S2_BANDS), 's1': list(BIOMASSTERS_S1_BANDS)}
+    for split in splits:
+        img_p = cache_dir / f'{split}_img.f16'
+        msk_p = cache_dir / f'{split}_mask.f32'
+        meta_p = cache_dir / f'{split}.meta'
+        if meta_p.exists():
+            print(f'  [{split}] cache present, skipping')
+            continue
+        base = GeoBenchBioMassters(
+            split=split, root=Path(data_root), band_order=band_order,
+            data_normalizer=IdentityNormalizer(), num_time_steps=num_time_steps,
+            return_stacked_image=False, download=False)
+        ds = TemporalStackedDataset(base, num_time_steps, training=False,
+                                    month_dropout=0.0, temporal_pool=True)
+        n = len(ds)
+        img0, msk0 = ds.pooled_sample(0)
+        C, T, H, W = img0.shape
+        assert T == 1, f'expected pooled T=1, got {T}'
+        # Write to .tmp then rename, so an interrupted build never leaves a
+        # half-written cache that looks complete.
+        im = np.memmap(str(img_p) + '.tmp', dtype=np.float16, mode='w+', shape=(n, C, 1, H, W))
+        mm = np.memmap(str(msk_p) + '.tmp', dtype=np.float32, mode='w+', shape=(n, H, W))
+        for i in range(n):
+            a, b = ds.pooled_sample(i)
+            im[i] = a.numpy().astype(np.float16)
+            mm[i] = b.numpy()
+            if (i + 1) % 250 == 0:
+                print(f'  [{split}] {i+1}/{n}', flush=True)
+        im.flush(); mm.flush()
+        del im, mm
+        os.replace(str(img_p) + '.tmp', img_p)
+        os.replace(str(msk_p) + '.tmp', msk_p)
+        meta_p.write_text(f'{n} {C} 1 {H} {W} {num_time_steps}\n')
+        print(f'  [{split}] wrote {n} samples -> {img_p.name}', flush=True)
+
+
+def _load_cached_split(cache_dir, split: str):
+    """Return a CachedPooledDataset, or None when the cache is absent."""
+    cache_dir = Path(cache_dir)
+    meta_p = cache_dir / f'{split}.meta'
+    if not meta_p.exists():
+        return None
+    n, C, T, H, W, _ = (int(x) for x in meta_p.read_text().split())
+    return CachedPooledDataset(cache_dir / f'{split}_img.f16',
+                               cache_dir / f'{split}_mask.f32', (C, T, H, W), n)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +333,8 @@ def get_biomassters_loaders(
     num_time_steps: int = 6,
     data_normalizer=None,          # ignored; we apply min-max ourselves
     month_dropout: float = 0.3,    # train-time per-timestep drop prob (winner: 0.3)
+    temporal_pool: bool = False,   # mean-pool T at the INPUT -> non-temporal
+    cache_dir: str | None = None,  # pooled-cache location (default: $BIOMASSTERS_POOL_CACHE)
 ) -> tuple:
     """
     Create the standard 5-loader + TaskConfig tuple for BioMassters.
@@ -251,14 +384,34 @@ def get_biomassters_loaders(
         download=False,               # data already present; installed class lists only 3 parts
     )
 
-    train_full = GeoBenchBioMassters(split='train', **common)
-    val_full   = GeoBenchBioMassters(split='validation', **common)
-    test_full  = GeoBenchBioMassters(split='test', **common)
+    # Pooled mode prefers the on-disk cache: a single mmap read per sample
+    # instead of decoding 12 months. Falls back to on-the-fly pooling when the
+    # cache has not been built (see build_pooled_cache / BIOMASSTERS_POOL_CACHE).
+    cached = None
+    if temporal_pool:
+        cdir = cache_dir or os.environ.get(
+            'BIOMASSTERS_POOL_CACHE', str(Path(data_root).parent / 'biomassters_pooled'))
+        c_tr, c_va, c_te = (_load_cached_split(cdir, s)
+                            for s in ('train', 'validation', 'test'))
+        if c_tr is not None and c_va is not None and c_te is not None:
+            cached = (c_tr, c_va, c_te)
+            print(f"BioMassters — using pooled cache at {cdir} "
+                  f"(month_dropout disabled: the cache holds the clean mean)")
 
-    # Month dropout applies to training splits only.
-    train_ds = TemporalStackedDataset(train_full, num_time_steps, training=True, month_dropout=month_dropout)
-    val_ds   = TemporalStackedDataset(val_full, num_time_steps, training=False)
-    test_ds  = TemporalStackedDataset(test_full, num_time_steps, training=False)
+    if cached is not None:
+        train_ds, val_ds, test_ds = cached
+    else:
+        train_full = GeoBenchBioMassters(split='train', **common)
+        val_full   = GeoBenchBioMassters(split='validation', **common)
+        test_full  = GeoBenchBioMassters(split='test', **common)
+
+        # Month dropout applies to training splits only.
+        train_ds = TemporalStackedDataset(train_full, num_time_steps, training=True,
+                                          month_dropout=month_dropout, temporal_pool=temporal_pool)
+        val_ds   = TemporalStackedDataset(val_full, num_time_steps, training=False,
+                                          temporal_pool=temporal_pool)
+        test_ds  = TemporalStackedDataset(test_full, num_time_steps, training=False,
+                                          temporal_pool=temporal_pool)
 
     # Disjoint, deterministic 50/50 splits of train and val.
     rng = random.Random(seed)
@@ -275,9 +428,11 @@ def get_biomassters_loaders(
     val1_ds = Subset(val_ds, val_indices[:half_v])
     val2_ds = Subset(val_ds, val_indices[half_v:])
 
+    _t_desc = (f"T={num_time_steps} mean-pooled at input -> 1"
+               if temporal_pool else f"T={num_time_steps}")
     print(f"BioMassters — Train1: {len(train1_ds)}, Train2: {len(train2_ds)}, "
           f"Val1: {len(val1_ds)}, Val2: {len(val2_ds)}, Test: {len(test_ds)} "
-          f"(S2+S1, T={num_time_steps})")
+          f"(S2+S1, {_t_desc})")
 
     train1_loader = DataLoader(train1_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=True)
     val1_loader   = DataLoader(val1_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)

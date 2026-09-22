@@ -137,7 +137,8 @@ def _parse_args():
     parser.add_argument('--num_workers', type=int, default=2)
     parser.add_argument('--num_time_steps', type=int, default=12,
                         help='Temporal datasets (biomassters): timesteps to load; '
-                             'features are mean-pooled over them. Ignored by non-temporal datasets.')
+                             'features are mean-pooled over them. Ignored by non-temporal datasets.'
+                             ' Negative values (e.g. -12) load |n| timesteps and mean-pool them at the INPUT, so the model runs fully non-temporal: ~T x faster per step and identical code paths to the other datasets, at some accuracy cost.')
     parser.add_argument('--epochs', type=int, default=4)
     parser.add_argument('--eval_every_n_epochs', type=int, default=2)
     parser.add_argument('--lr', type=float, default=1e-4)

@@ -2,6 +2,8 @@
 
 import copy
 import os
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,6 +18,22 @@ import wandb
 # ---------------------------------------------------------------------------
 # Shared training utilities
 # ---------------------------------------------------------------------------
+
+def set_seed(seed: int):
+    """Seed python/numpy/torch so repeated runs of one config differ only by seed.
+
+    Mirrors train_delulu.py's block so a baseline seed means the same thing a
+    Delulu seed does. Call before any model or dataloader construction. Does not
+    force cudnn determinism -- runs are reproducible only up to normal GPU
+    kernel nondeterminism, which is exactly the run-to-run variation the seed
+    replicates are meant to measure.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    print(f"=== Seed: {seed} ===")
+
 
 def make_scheduler(optimizer, num_epochs: int, warmup_epochs: int = 1, eta_min: float = 1e-6):
     """
@@ -1956,16 +1974,22 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0,
 
     task_type:
         'classification' — softmax KL divergence [B, C]
-        'multilabel'     — per-class BCE against sigmoid teacher probs [B, C]
+        'multilabel'     — per-class BCE against sigmoid teacher probs [B, C];
+                           honours kl_type on the sigmoid (see below)
         'segmentation'   — softmax KL divergence on [B, C, H, W]; pass labels+ignore_index to mask void pixels
         'regression'     — MSE between student and teacher predictions [B, 1, H, W].
                            There is no distribution to soften, so temperature and
                            kl_type do not apply. Mirrors delulu.py's distillation_loss.
 
-    kl_type choices (classification/segmentation only):
-        'kd'   — standard KD (temperature-scaled softmax, multiplied by T²)
+    kl_type choices (all task types except regression):
+        'kd'   — standard KD (both sides temperature-scaled, multiplied by T²)
         'ttm'  — teacher-temp only (teacher scaled, student not)
         'wttm' — weighted TTM (weight by teacher confidence)
+
+    For classification/segmentation these act on the softmax KL; for multilabel
+    they act on the per-class sigmoid BCE, which is the closest analogue (there
+    is no distribution over classes to soften). Regression ignores kl_type --
+    there is nothing to soften at all.
     """
     if task_type == "regression":
         sc = regression_loss_scale or 1.0
@@ -1979,8 +2003,31 @@ def distillation_loss(student_logits, teacher_logits, temperature=2.0,
             student_logits = student_logits[mask]
             teacher_logits = teacher_logits[mask]
     if task_type == "multilabel":
+        # Multilabel has no softmax to soften, so each kl_type is expressed on
+        # the per-class sigmoid instead. Before 2026-09-20 this branch ignored
+        # kl_type entirely and always scaled BOTH sides by T, which made 'kd'
+        # and 'ttm' bit-identical on reBEN -- the tables carried two baseline
+        # rows that were the same computation.
         teacher_probs = torch.sigmoid(teacher_logits / temperature)
-        return F.binary_cross_entropy_with_logits(student_logits / temperature, teacher_probs)
+        if kl_type == "kd":
+            # Both sides softened, T**2 to keep the gradient scale comparable to
+            # the unsoftened loss (Hinton et al. 2015), matching the softmax arm.
+            return F.binary_cross_entropy_with_logits(
+                student_logits / temperature, teacher_probs) * (temperature ** 2)
+        elif kl_type == "ttm":
+            # Teacher-temperature-only: soften the TEACHER, leave the student's
+            # logits at their own scale.
+            return F.binary_cross_entropy_with_logits(student_logits, teacher_probs)
+        elif kl_type == "wttm":
+            # TTM weighted by teacher confidence, per class then summed, mirroring
+            # the softmax arm's (teacher_soft ** gamma) * per_sample_kl.
+            gamma = 1.0 / temperature
+            per_class = F.binary_cross_entropy_with_logits(
+                student_logits, teacher_probs, reduction="none")
+            weight = teacher_probs.clamp_min(1e-6) ** gamma
+            return (weight * per_class).sum(dim=-1).mean()
+        else:
+            raise ValueError(f"Unknown kl_type: {kl_type!r}")
     teacher_soft = F.softmax(teacher_logits / temperature, dim=-1)
     if kl_type == "kd":
         student_log_soft = F.log_softmax(student_logits / temperature, dim=-1)
