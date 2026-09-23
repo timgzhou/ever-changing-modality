@@ -4,6 +4,15 @@
 #SBATCH --output=logs/rsfm_sft/%j.out
 #SBATCH --mail-user=tiange.zhou@outlook.com
 #SBATCH --mail-type=ALL
+# EXCEPTION -- olmoearth-large on dfc2020 needs BATCH_SIZE=16 AND an h100.
+# dfc2020 is 256x256 and OlmoEarth runs at patch_size=8, so a sample is 1024
+# tokens, 4x reBEN's 128x128. At fft with the 1024-dim Large encoder that is
+# ~79 GB at batch 32: it OOMs on the L40S (44 G) AND on the h100 (79 G, died
+# with 228 MiB free). Those two cells are therefore the only oracle rows not at
+# batch 32 -- acceptable because olmoearth-large had NO dfc2020 rows at all, so
+# there is nothing same-model to be inconsistent with. Submit them as:
+#   sbatch --gres=gpu:h100:1 --export=ALL,...,BATCH_SIZE=16 sh/rsfm_sft/rsfm_sft_job.sh
+#
 # l40s, not h100: L40S nodes are far less contended here, so these queue and
 # start much sooner. BATCH_SIZE stays 32: every dfc2020/benv2 oracle row in
 # res/rsfm/rsfm_results.csv was run at 32, and mixing batch sizes within the

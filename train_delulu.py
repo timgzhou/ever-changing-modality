@@ -139,6 +139,19 @@ def _parse_args():
                         help='Temporal datasets (biomassters): timesteps to load; '
                              'features are mean-pooled over them. Ignored by non-temporal datasets.'
                              ' Negative values (e.g. -12) load |n| timesteps and mean-pool them at the INPUT, so the model runs fully non-temporal: ~T x faster per step and identical code paths to the other datasets, at some accuracy cost.')
+    parser.add_argument('--regression_distill_mask', action='store_true',
+                        help='Regression only (biomassters): drop pixels where the TEACHER predicts '
+                             'above the dataset regression_mask_above (AGB>=400) from the DISTILLATION '
+                             'loss. The supervised loss already drops those pixels by ground truth; the '
+                             'distill loss did not, so the student was fit to teacher extrapolations on '
+                             'exactly the pixels the teacher never trained on. Split 2 is unlabeled, so '
+                             'the mask keys off the teacher prediction rather than the label.')
+    parser.add_argument('--regression_huber_beta', type=float, default=None,
+                        help='Regression only: use SmoothL1 with this beta for the DISTILLATION loss '
+                             'instead of MSE, bounding the gradient from badly-wrong teacher pixels. '
+                             'Beta is in regression_loss_scale-NORMALIZED units, so 1.0 (the torch '
+                             'default) is one full target std and is close to a no-op; 0.1 ~= 29 t/ha '
+                             'at AGB_STD=289.89. Leave unset for plain MSE.')
     parser.add_argument('--epochs', type=int, default=4)
     parser.add_argument('--eval_every_n_epochs', type=int, default=2)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -151,7 +164,10 @@ def _parse_args():
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--checkpoint_name', type=str, default=None)
     parser.add_argument('--save_checkpoint', action='store_true',
-                        help='Save final model checkpoint to --checkpoint_dir')
+                        help='Save model checkpoint to --checkpoint_dir')
+    parser.add_argument('--save_path_checkpoints', action='store_true',
+                        help='Also save the best-val weights for each eval path as '
+                             '<checkpoint>_best_{transfer,peeking,addition}.pt (needs --save_checkpoint).')
     parser.add_argument('--seed', type=int, default=0,
                         help='Random seed for torch/numpy/random; recorded in the results CSV '
                              'so repeated runs of the same config are distinguishable.')
@@ -337,6 +353,7 @@ def main(args=None):
         recon_cos_weight_prefusion=args.recon_cos_weight_prefusion,
         recon_cos_weight_latent=args.recon_cos_weight_latent,
         temporal_prefusion=args.temporal_prefusion,
+        keep_path_states=args.save_path_checkpoints,
         unprotect_starting_mod=args.unprotect_starting_mod,
         task_type=task_config.task_type,
         label_key=task_config.label_key,
@@ -345,6 +362,8 @@ def main(args=None):
         regression_scale=getattr(task_config, 'regression_scale', 1.0),
         regression_loss_scale=getattr(task_config, 'regression_loss_scale', 1.0),
         regression_mask_above=getattr(task_config, 'regression_mask_above', None),
+        regression_distill_mask=args.regression_distill_mask,
+        regression_huber_beta=args.regression_huber_beta,
     )
 
     # Log teacher baselines
@@ -365,9 +384,11 @@ def main(args=None):
             wandb.run.summary[f'{ckpt_name}_test_addition_ens'] = ckpt_data['test_accs'].get('addition_ens', 0)
 
     # ========================================= CHECKPOINT =====================================
-    # NOTE: this saves the FINAL-epoch model. best_checkpoints tracks the best-val
-    # epochs but only stores metrics (no weights), so the best-val model is not
-    # recoverable from disk -- see the metrics in the results CSV for that epoch.
+    # NOTE: the main file holds the weights train_delulu_model restored at the
+    # end: the best epoch on its 'combined' criterion (0.5 peeking + 0.5
+    # transfer_score), NOT the final epoch and NOT the per-path best. The per-path
+    # best weights are only kept with --save_path_checkpoints.
+    path_states = {k: v.pop('state') for k, v in best_checkpoints.items() if 'state' in v}
     if args.save_checkpoint:
         os.makedirs(args.checkpoint_dir, exist_ok=True)
         if args.checkpoint_name:
@@ -399,7 +420,14 @@ def main(args=None):
             'recon_drop_cls': args.recon_drop_cls,
             'best_checkpoints': best_checkpoints,
         }, ckpt_path)
-        print(f"Checkpoint saved to: {ckpt_path}  (final epoch {args.epochs})")
+        print(f"Checkpoint saved to: {ckpt_path}  (best 'combined' val epoch)")
+        meta = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        for name, state in path_states.items():
+            path_file = ckpt_path[:-3] + f'_{name}.pt'
+            torch.save({**meta, 'model_state_dict': state,
+                        'selected_by': name, 'selected_epoch': best_checkpoints[name]['epoch']},
+                       path_file)
+            print(f"Checkpoint saved to: {path_file}  (epoch {best_checkpoints[name]['epoch'] + 1})")
 
     # ========================================= CSV LOGGING =====================================
     def get_ckpt_data(ckpt_name, test_key):
@@ -434,6 +462,7 @@ def main(args=None):
         "stage0_checkpoint",
         # appended last so existing positional CSV readers keep working
         "seed", "config_label", "student_init", "loss_balance",
+        "regression_distill_mask", "regression_huber_beta",
     ]
     # If the file predates a newly-added column, widen it in place. A positional
     # csv.writer would otherwise append values with no header to name them.
@@ -495,6 +524,8 @@ def main(args=None):
             args.config_label or "",
             getattr(args, 'student_init', 'teacher'),
             getattr(args, 'loss_balance', 'none'),
+            int(getattr(args, 'regression_distill_mask', False)),
+            getattr(args, 'regression_huber_beta', None) if getattr(args, 'regression_huber_beta', None) is not None else "",
         ])
 
     print(f"\nResults appended to {filename}")

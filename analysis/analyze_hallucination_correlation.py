@@ -67,6 +67,7 @@ def _infer_dataset(mods, ckpt_config):
 
 _GEOBENCH_S2_BANDS = {
     'benv2':       ('geobench_data_utils',     'BENV2_S2_BANDS'),
+    'dfc2020':     ('dfc2020_data_utils',      'DFC2020_S2_BANDS'),
     'biomassters': ('biomassters_data_utils',  'BIOMASSTERS_S2_BANDS'),
 }
 
@@ -388,6 +389,31 @@ def modality_to_rgb(img_chw, band_spec, rgb_idx=None):
     return _stretch(np.stack([avg, avg, avg], axis=-1))
 
 
+def _stretch_per_channel(arr_hwc):
+    """Independent 2-98 percentile stretch per channel. [H,W,C] -> float [0,1]."""
+    lo = np.percentile(arr_hwc, 2, axis=(0, 1))
+    hi = np.percentile(arr_hwc, 98, axis=(0, 1))
+    return np.clip((arr_hwc - lo) / (hi - lo + 1e-8), 0, 1)
+
+
+def modality_to_color(img_chw, band_spec, rgb_idx=None):
+    """Colour rendering used by the paper figures (commit fa682e9).
+
+    True-colour when available; a 2-channel modality (S1 VV/VH) becomes
+    (VV, VH, mean) with per-channel stretch; anything else is a per-image
+    PCA of its bands -> RGB. Unlike modality_to_rgb, never falls back to gray.
+    """
+    x = _drop_time(img_chw[band_spec]).cpu().numpy().astype(np.float32)
+    if rgb_idx is not None:
+        return modality_to_rgb(img_chw, band_spec, rgb_idx)
+    C, H, W = x.shape
+    if C == 2:
+        s = _stretch_per_channel(x.transpose(1, 2, 0))
+        return np.concatenate([s, s.mean(-1, keepdims=True)], axis=-1)
+    pix = x.reshape(C, -1).T
+    return _stretch_per_channel(PCA(n_components=3).fit_transform(pix).reshape(H, W, 3))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', default='checkpoints/delulunet_benv2_0501_0433.pt')
@@ -404,6 +430,14 @@ def main():
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--seed', type=int, default=0,
                         help='Seed for the shuffled-control derangements.')
+    parser.add_argument('--token_pca', default='pair', choices=('pair', 'real'),
+                        help="Token panels: 'pair' fits top-3 PCs per modality on real+hallucinated "
+                             "tokens concatenated; 'real' fits on real A+B and projects hallucinated "
+                             "tokens into that space (the original figures).")
+    parser.add_argument('--viz_style', default='color', choices=('color', 'mean'),
+                        help="Sample-figure rendering of the input images. 'color' is the "
+                             "paper look (S1 as VV/VH/mean composite, S2 true colour); "
+                             "'mean' renders non-RGB modalities as grayscale averages.")
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -935,8 +969,14 @@ def main():
 
     slice_a = modality_slices[mod_a]
     slice_b = modality_slices[mod_b]
-    label_a = f'{mod_a.upper()} (RGB)' if rgb_idx[mod_a] is not None else f'{mod_a.upper()} (mean)'
-    label_b = f'{mod_b.upper()} (RGB)' if rgb_idx[mod_b] is not None else f'{mod_b.upper()} (mean)'
+    def _label(mod):
+        if rgb_idx[mod] is not None:
+            return f'{mod.upper()} (RGB)'
+        if args.viz_style == 'mean':
+            return f'{mod.upper()} (mean)'
+        return f'{mod.upper()} (VV/VH)' if mod == 's1' else f'{mod.upper()} (PCA)'
+    label_a, label_b = _label(mod_a), _label(mod_b)
+    render = modality_to_color if args.viz_style == 'color' else modality_to_rgb
 
     if not top:
         print('No tiles available for visualization; skipping sample figures.')
@@ -957,16 +997,29 @@ def main():
     for idx, (mean_corr_a, img_raw, pa, ha, pb, hb, corr_a_map, corr_b_map, _std) in enumerate(top):
         fig = plt.figure(figsize=(10, 5))
 
-        # PCA fit on both real token sets jointly; hallucinated tokens projected into same space.
-        real_both = np.concatenate([pa.float().numpy(), pb.float().numpy()], axis=0)
-        pca = PCA(n_components=3).fit(real_both)
-        proj_real = pca.transform(real_both)
-        lo, hi = proj_real.min(0), proj_real.max(0)
-
-        rgb_pa = make_pca_rgb(pca, lo, hi, pa).reshape(grid_size, grid_size, 3)
-        rgb_ha = make_pca_rgb(pca, lo, hi, ha).reshape(grid_size, grid_size, 3)
-        rgb_pb = make_pca_rgb(pca, lo, hi, pb).reshape(grid_size, grid_size, 3)
-        rgb_hb = make_pca_rgb(pca, lo, hi, hb).reshape(grid_size, grid_size, 3)
+        N = pa.shape[0]
+        if args.token_pca == 'real':
+            # Original figures: PCA on real A+B; hallucinated tokens projected in.
+            real_both = np.concatenate([pa.float().numpy(), pb.float().numpy()], axis=0)
+            pca = PCA(n_components=3).fit(real_both)
+            proj_real = pca.transform(real_both)
+            lo, hi = proj_real.min(0), proj_real.max(0)
+            rgb_pa, rgb_ha, rgb_pb, rgb_hb = (make_pca_rgb(pca, lo, hi, t) for t in (pa, ha, pb, hb))
+        else:
+            # Per modality: one PCA over [real; hall] of that modality, one colour
+            # range, so real vs hall is compared on equal footing. Fitting on
+            # real only renders hall grayer whenever its variance lies off the
+            # real axes. A and B get independent PCAs -- they are not compared.
+            def pair_pca(real, hall):
+                z = PCA(n_components=3).fit_transform(
+                    np.concatenate([real.float().numpy(), hall.float().numpy()], axis=0))
+                lo, hi = z.min(0), z.max(0)
+                z = np.clip((z - lo) / (hi - lo + 1e-8), 0, 1)
+                return z[:N], z[N:]
+            rgb_pa, rgb_ha = pair_pca(pa, ha)
+            rgb_pb, rgb_hb = pair_pca(pb, hb)
+        rgb_pa, rgb_ha, rgb_pb, rgb_hb = (x.reshape(grid_size, grid_size, 3)
+                                          for x in (rgb_pa, rgb_ha, rgb_pb, rgb_hb))
 
         # Pixel-based layout (fig is 10×5 in at 150 dpi = 1500×750 px).
         # Left images: 224×224 px. Token panels: 100×100 px, gap 24 px between rows.
@@ -1014,10 +1067,10 @@ def main():
         for ax in (ax_s2, ax_s1, ax_pa, ax_ha, ax_pb, ax_hb):
             ax.axis('off')
 
-        ax_s2.imshow(modality_to_rgb(img_raw, slice_a, rgb_idx[mod_a]))
+        ax_s2.imshow(render(img_raw, slice_a, rgb_idx[mod_a]))
         ax_s2.text(0.5, -0.02, label_a, fontsize=11, ha='center', va='top', transform=ax_s2.transAxes)
 
-        ax_s1.imshow(modality_to_rgb(img_raw, slice_b, rgb_idx[mod_b]))
+        ax_s1.imshow(render(img_raw, slice_b, rgb_idx[mod_b]))
         ax_s1.text(0.5, -0.02, label_b, fontsize=11, ha='center', va='top', transform=ax_s1.transAxes)
 
         ax_pa.imshow(rgb_pa, interpolation='nearest')

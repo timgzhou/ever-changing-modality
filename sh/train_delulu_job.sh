@@ -53,6 +53,15 @@
 #   SELF_DISTILL_ADDITION=1   opt-in: distil the new-modality heads against the
 #                             student's own addition path instead of the frozen
 #                             unimodal teacher (experimental, off by default)
+#   REG_DISTILL_MASK=1        regression only: drop pixels where the TEACHER
+#                             predicts >= regression_mask_above (AGB>=400) from
+#                             the distill loss. The supervised loss already
+#                             drops them by ground truth; the distill loss did
+#                             not, so the student was fit to teacher
+#                             extrapolations on pixels it never trained on.
+#   REG_HUBER_BETA=<f>        regression only: SmoothL1 instead of MSE for the
+#                             distill loss. Beta is in AGB_STD-NORMALIZED units,
+#                             so torch's 1.0 default is ~a no-op; 0.1 ~= 29 t/ha.
 #
 # The STARTING modality is not passed: train_delulu.py reads it back out of the
 # teacher checkpoint's evan_config, so teacher and student can never disagree.
@@ -128,6 +137,9 @@ fi
 # CKPT_NAME gives the saved .pt a stable, arm-identifying filename. Without it
 # the name is a timestamp, which cannot be attributed back to an ablation arm.
 [ -n "${CKPT_NAME:-}" ] && SAVE_CKPT_FLAG="${SAVE_CKPT_FLAG} --checkpoint_name ${CKPT_NAME}"
+# SAVE_PATH_CKPTS=1 also writes <ckpt>_best_{transfer,peeking,addition}.pt, the
+# best-val weights of each eval path (used for the hallucination figures).
+[ -n "${SAVE_PATH_CKPTS:-}" ] && [ "${SAVE_PATH_CKPTS}" != "0" ] && SAVE_CKPT_FLAG="${SAVE_CKPT_FLAG} --save_path_checkpoints"
 # Provenance columns: which tuned config produced this row. Without these every
 # cross-config row looks identical apart from its hyperparameters.
 RECON_ARGS=""
@@ -138,6 +150,14 @@ RECON_ARGS=""
 [ -n "${RECON_DROP_CLS:-}" ] && [ "${RECON_DROP_CLS}" != "0" ] && RECON_ARGS="${RECON_ARGS} --recon_drop_cls"
 [ -n "${RECON_COS_W_PREFUSION:-}" ] && RECON_ARGS="${RECON_ARGS} --recon_cos_weight_prefusion ${RECON_COS_W_PREFUSION}"
 [ -n "${RECON_COS_W_LATENT:-}" ] && RECON_ARGS="${RECON_ARGS} --recon_cos_weight_latent ${RECON_COS_W_LATENT}"
+
+# Regression distill-loss fixes (biomassters). REG_DISTILL_MASK=1 drops pixels
+# where the teacher predicts AGB>=400 from the distill loss -- the supervised
+# loss already drops them by ground truth. REG_HUBER_BETA swaps that loss's MSE
+# for SmoothL1; beta is in AGB_STD-normalized units, so useful values are well
+# below the torch default of 1.0 (0.1 ~= 29 t/ha).
+[ -n "${REG_DISTILL_MASK:-}" ] && [ "${REG_DISTILL_MASK}" != "0" ] && RECON_ARGS="${RECON_ARGS} --regression_distill_mask"
+[ -n "${REG_HUBER_BETA:-}" ] && RECON_ARGS="${RECON_ARGS} --regression_huber_beta ${REG_HUBER_BETA}"
 
 PROV_ARGS=""
 [ -n "${CONFIG_LABEL:-}" ] && PROV_ARGS="${PROV_ARGS} --config_label ${CONFIG_LABEL}"

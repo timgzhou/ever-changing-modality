@@ -16,7 +16,8 @@ def _make_batch(batch, modality_bands_dict, modalities, device):
     return {k: v.to(device) for k, v in out.items()}
 
 def distillation_loss(student_logits, teacher_logits, temperature, task_type,
-                      regression_loss_scale=1.0):
+                      regression_loss_scale=1.0,
+                      regression_mask_above=None, regression_huber_beta=None):
     """Distillation loss between student and teacher logits.
 
     task_type:
@@ -30,11 +31,40 @@ def distillation_loss(student_logits, teacher_logits, temperature, task_type,
         loss in normalized units (~O(1)), comparable to the feature-space
         latent/prefusion losses rather than ~scale^2 larger. This is the target
         std (e.g. AGB_STD), independent of the RMSE reporting scale.
+
+    regression_mask_above: drop pixels where the TEACHER predicts >= this (raw
+        units). The supervised loss already drops ground-truth AGB>=400
+        (MaskedMSELoss, the BioMassters winner's NoNaNRMSE), but this branch
+        did not, so the student was fit to the teacher on exactly the pixels
+        the teacher was never trained on -- and L2 weights those arbitrary
+        extrapolations quadratically. Ground truth is unavailable here by
+        design (split 2 is unlabeled), so the mask keys off the teacher's own
+        prediction: a weaker condition than the supervised mask, but it targets
+        the same unreliable high-AGB regime without leaking labels.
+
+    regression_huber_beta: if set, use SmoothL1 with this beta instead of MSE,
+        so a teacher pixel that is badly wrong contributes a bounded gradient
+        instead of one growing with the error. NOTE beta is in NORMALIZED units
+        (both sides are divided by regression_loss_scale first), so beta=1.0 is
+        one full target std -- effectively still quadratic everywhere and close
+        to a no-op. Useful values are well below 1 (0.1 ~= 29 t/ha at AGB_STD).
     """
     if task_type == "regression":
         # Match the teacher's continuous per-pixel prediction, in normalized units.
-        return F.mse_loss(student_logits / regression_loss_scale,
-                          teacher_logits / regression_loss_scale)
+        student_n = student_logits / regression_loss_scale
+        teacher_n = teacher_logits / regression_loss_scale
+        if regression_huber_beta is not None:
+            per_px = F.smooth_l1_loss(student_n, teacher_n, reduction='none',
+                                      beta=regression_huber_beta)
+        else:
+            per_px = (student_n - teacher_n) ** 2
+        if regression_mask_above is not None:
+            # Threshold is in raw units; compare against the un-normalized teacher.
+            keep = teacher_logits < regression_mask_above
+            if not keep.any():
+                return (per_px * 0.0).sum()
+            return per_px[keep].mean()
+        return per_px.mean()
     if task_type == "segmentation" and student_logits.dim() == 4:
         C = student_logits.shape[1] # number of classes
         student_logits = student_logits.permute(0, 2, 3, 1).reshape(-1, C) # (batch*n_pixels),classes (per-patch class prediction)
@@ -639,6 +669,8 @@ def _unlabeled_batch_step(
     latent_masked_only: bool = False,
     unprotect_starting_mod: bool = False,
     regression_loss_scale: float = 1.0,
+    regression_mask_above: float | None = None,
+    regression_huber_beta: float | None = None,
     self_distill_addition: bool = False,
     recon_mode: str = "mse",
     recon_include_cls: bool = True,
@@ -764,6 +796,8 @@ def _unlabeled_batch_step(
                 distill_loss = distill_loss + distillation_loss(
                     model.get_modality_logits(student_fused, mod), target, distillation_temperature,
                     task_type=task_type, regression_loss_scale=regression_loss_scale,
+                    regression_mask_above=regression_mask_above,
+                    regression_huber_beta=regression_huber_beta,
                 )
                 distill_count += 1
         elif dyn_teacher:
@@ -781,6 +815,8 @@ def _unlabeled_batch_step(
                 distill_loss = distill_loss + distillation_loss(
                     model.get_modality_logits(student_fused, mod), target, distillation_temperature, task_type=task_type,
                     regression_loss_scale=regression_loss_scale,
+                    regression_mask_above=regression_mask_above,
+                    regression_huber_beta=regression_huber_beta,
                 )
                 distill_count += 1
         else:
@@ -788,6 +824,8 @@ def _unlabeled_batch_step(
                 distill_loss = distill_loss + distillation_loss(
                     model.get_modality_logits(student_fused, mod), teacher_logits, distillation_temperature, task_type=task_type,
                     regression_loss_scale=regression_loss_scale,
+                    regression_mask_above=regression_mask_above,
+                    regression_huber_beta=regression_huber_beta,
                 )
                 distill_count += 1
 
@@ -811,6 +849,7 @@ def _run_periodic_eval(
     use_mask_token=False, agree_ref='teacher',
     regression_scale=1.0, regression_mask_above=None,
     minival_loader=None,
+    keep_path_states=False,
 ):
     """Run periodic eval, update checkpoints. Returns updated state."""
     if task_type == "regression":
@@ -979,6 +1018,11 @@ def _run_periodic_eval(
                 'epoch': epoch,
                 'test_accs': periodic_test_accs.copy(),
             }
+            if keep_path_states and ckpt_name != 'best_ens_addition':
+                # CPU copy so each path's best epoch is recoverable as weights,
+                # not just metrics. Caller pops these before logging/saving.
+                best_checkpoints[ckpt_name]['state'] = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             new_records.append(f"{ckpt_name} (val {metric_key}: {val_metrics[metric_key]:.2f}%)")
             wandb.log({
                 f'best/{ckpt_name}_test_transfer': periodic_test_accs['transfer'],
@@ -1039,6 +1083,10 @@ def train_delulu_model(
     regression_scale: float = 1.0,      # task_type='regression': rescale RMSE to target units for reporting
     regression_loss_scale: float = 1.0, # task_type='regression': divide distill/CE MSE by this^2 to match latent/prefusion
     regression_mask_above: float = None, # task_type='regression': exclude target >= this from loss/metric
+    regression_distill_mask: bool = False,  # task_type='regression': also apply that mask to the DISTILL loss,
+                                            # keyed off the teacher's prediction (split 2 has no labels)
+    regression_huber_beta: float | None = None,  # task_type='regression': SmoothL1 beta for the distill loss,
+                                                 # in regression_loss_scale-normalized units (None = MSE)
     unimodal_teacher=None,
     asym_lr_multiplier: float | None = None,  # If set, new components get lr * asym_lr_multiplier
     dyn_teacher: bool = False,
@@ -1053,6 +1101,7 @@ def train_delulu_model(
     recon_cos_weight_prefusion: float = 1.0,
     recon_cos_weight_latent: float = 1.0,
     temporal_prefusion: bool = False,
+    keep_path_states: bool = False,          # keep best-val weights per eval path in best_checkpoints
 ):
     """
     End-to-end training with hybrid loss combining:
@@ -1336,6 +1385,8 @@ def train_delulu_model(
                     latent_masked_only=latent_masked_only,
                     unprotect_starting_mod=unprotect_starting_mod,
                     regression_loss_scale=regression_loss_scale,
+                    regression_mask_above=(regression_mask_above if regression_distill_mask else None),
+                    regression_huber_beta=regression_huber_beta,
                     self_distill_addition=self_distill_addition,
                     recon_mode=recon_mode,
                     recon_include_cls=recon_include_cls,
@@ -1418,6 +1469,7 @@ def train_delulu_model(
                 best_checkpoints, latent_decoders,
                 use_mask_token=use_mask_token, agree_ref=agree_ref,
                 regression_scale=regression_scale, regression_mask_above=regression_mask_above,
+                keep_path_states=keep_path_states,
             )
 
             model.train()

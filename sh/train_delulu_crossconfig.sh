@@ -81,7 +81,7 @@ for DATASET in ${DATASETS}; do
                 # EPOCHS is part of the key: a 64- and a 128-epoch run of the
                 # same cell are different experiments, and without it the
                 # in-flight guard would silently skip the second one.
-                TAG="${DATASET} ${START} ${NEW} ${FAM} ${SEL}${LR:+ lr${LR}}${EPOCHS:+ ep${EPOCHS}}${STUDENT_INIT:+ init${STUDENT_INIT}}${SEED:+ s${SEED}}${TEMPORAL_PREFUSION:+ tpf}${TEMPORAL_POOL:+ tpool}"
+                TAG="${DATASET} ${START} ${NEW} ${FAM} ${SEL}${LR:+ lr${LR}}${EPOCHS:+ ep${EPOCHS}}${STUDENT_INIT:+ init${STUDENT_INIT}}${SEED:+ s${SEED}}${TEMPORAL_PREFUSION:+ tpf}${TEMPORAL_POOL:+ tpool}${REG_DISTILL_MASK:+ dmask}${REG_HUBER_BETA:+ hb${REG_HUBER_BETA}}"
                 if printf '%s' "${INFLIGHT}" | grep -qxF "${TAG}"; then
                     echo "  [have] ${TAG}: in flight"; dup=$((dup+1)); continue
                 fi
@@ -156,6 +156,15 @@ for DATASET in ${DATASETS}; do
                 # A/B arm: prefusion before the temporal pool (biomassters only).
                 if [ -n "${TEMPORAL_PREFUSION:-}" ] && [ "${TEMPORAL_PREFUSION}" != "0" ]; then
                     EX="${EX},TEMPORAL_PREFUSION=1"; LBL="${LBL}_tpf"
+                fi
+                # A/B arms for the regression distill loss (biomassters only).
+                # Labelled so a masked/huber row never pools with the plain-MSE
+                # row of the same config -- they are different losses.
+                if [ -n "${REG_DISTILL_MASK:-}" ] && [ "${REG_DISTILL_MASK}" != "0" ]; then
+                    EX="${EX},REG_DISTILL_MASK=1"; LBL="${LBL}_dmask"
+                fi
+                if [ -n "${REG_HUBER_BETA:-}" ]; then
+                    EX="${EX},REG_HUBER_BETA=${REG_HUBER_BETA}"; LBL="${LBL}_hb${REG_HUBER_BETA}"
                 fi
                 EX="${EX},CONFIG_LABEL=${LBL}"
                 # biomassters: pin 64 epochs, overriding the config's value --

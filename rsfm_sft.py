@@ -269,8 +269,15 @@ class OlmoEarthWrapper(ModelWrapper):
         elif modality in self._S2_SUBBAND_INDICES or '+' in modality:
             # Sub-band S2 modality (single or combined via '+'):
             # place bands into correct positions in a 12-band S2 tensor, mask the rest MISSING.
+            # An 's1' part is NOT an S2 sub-band: it rides the separate
+            # sentinel1 field, exactly as the 's2s1' branch above does. Split it
+            # out first, or _S2_SUBBAND_INDICES[part] raises KeyError: 's1' and
+            # every s2_rgb+s1 run dies at the first forward pass.
+            has_s1 = False
             if '+' in modality:
-                parts = modality.split('+')
+                parts = [q for q in modality.split('+')]
+                has_s1 = 's1' in parts
+                parts = [q for q in parts if q != 's1']
                 positions, band_names = [], []
                 for part in parts:
                     p, b = self._S2_SUBBAND_INDICES[part]
@@ -298,6 +305,15 @@ class OlmoEarthWrapper(ModelWrapper):
             for s in active_sets:
                 s2_mask[:, :, :, :, s] = MaskValue.ONLINE_ENCODER.value
             kwargs['sentinel2_l2a_mask'] = s2_mask
+            if has_s1:
+                # S1 occupies the LAST 2 input channels (VV, VH), the same
+                # convention the 's2s1' branch uses.
+                s1_norm = self._normalize_clip(imgs[:, -2:], self.s1_lo, self.s1_hi)
+                kwargs['sentinel1'] = s1_norm.permute(0, 2, 3, 1).unsqueeze(3)
+                kwargs['sentinel1_mask'] = torch.full(
+                    (B, H, W, 1, 1), fill_value=MaskValue.ONLINE_ENCODER.value,
+                    dtype=torch.int32, device=device,
+                )
 
         else:
             raise ValueError(f"OlmoEarthWrapper: unsupported modality '{modality}'")
